@@ -25,6 +25,13 @@ const commands = [
         description: 'Send ESDT tokens to a specified user (Admin only)',
         options: [
             {
+                name: 'project-name',
+                description: 'The project to use for this transfer',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
                 name: 'user-tag',
                 description: 'The Discord username to send tokens to (without @ symbol)',
                 type: ApplicationCommandOptionType.String,
@@ -101,6 +108,119 @@ const commands = [
                 description: 'Comma-separated list of supported token tickers',
                 type: ApplicationCommandOptionType.String,
                 required: true,
+            },
+        ],
+        default_member_permissions: null, // Permissions are checked in code
+    },
+    {
+        name: 'update-project',
+        description: 'Update specific fields of an existing project (Admin only)',
+        options: [
+            {
+                name: 'project-name',
+                description: 'Name of the project to update',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'new-project-name',
+                description: 'New name for the project (optional)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+            },
+            {
+                name: 'wallet-pem',
+                description: 'New PEM file content for the project wallet (optional)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+            },
+            {
+                name: 'supported-tokens',
+                description: 'New comma-separated list of supported token tickers (optional)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+            },
+        ],
+        default_member_permissions: null, // Permissions are checked in code
+    },
+    {
+        name: 'list-projects',
+        description: 'List all registered projects for this server (Admin only)',
+        options: [
+            {
+                name: 'public',
+                description: 'Whether to make the response visible to everyone',
+                type: ApplicationCommandOptionType.Boolean,
+                required: false,
+            }
+        ],
+        default_member_permissions: null, // Permissions are checked in code
+    },
+    {
+        name: 'delete-project',
+        description: 'Delete a project from this server (Admin only)',
+        options: [
+            {
+                name: 'project-name',
+                description: 'Name of the project to delete',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'confirm',
+                description: 'Type "DELETE" to confirm project deletion',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+            }
+        ],
+        default_member_permissions: null, // Permissions are checked in code
+    },
+    {
+        name: 'set-community-fund',
+        description: 'Set the project to be used as the Community Tip Fund (Admin only)',
+        options: [
+            {
+                name: 'project-name',
+                description: 'The project to use as the Community Tip Fund',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            }
+        ],
+        default_member_permissions: null, // Permissions are checked in code
+    },
+    {
+        name: 'tip',
+        description: 'Tip another user using the Community Tip Fund',
+        options: [
+            {
+                name: 'user-tag',
+                description: 'The Discord username to tip (without @ symbol)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'token-ticker',
+                description: 'The token ticker to use for this tip',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'amount',
+                description: 'The amount of tokens to tip',
+                type: ApplicationCommandOptionType.Number,
+                required: true,
+                min_value: 0
+            },
+            {
+                name: 'memo',
+                description: 'Optional memo or reason for the tip',
+                type: ApplicationCommandOptionType.String,
+                required: false,
             },
         ],
         default_member_permissions: null, // Permissions are checked in code
