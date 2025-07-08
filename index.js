@@ -219,6 +219,7 @@ async function transferESDT(recipientWallet, tokenTicker, amount, projectName, g
       }
       
       let txHash = null;
+      let txStatus = null;
       
       if (parsedResponse.txHash) {
         txHash = parsedResponse.txHash;
@@ -230,15 +231,25 @@ async function transferESDT(recipientWallet, tokenTicker, amount, projectName, g
         txHash = parsedResponse.transaction.txHash;
       }
       
+      // Check for transaction status in the response
+      if (parsedResponse.result && parsedResponse.result.status) {
+        txStatus = parsedResponse.result.status;
+      } else if (parsedResponse.status) {
+        txStatus = parsedResponse.status;
+      }
+      
       const errorMessage = parsedResponse.error || 
                           (parsedResponse.result && parsedResponse.result.error) ||
                           (parsedResponse.data && parsedResponse.data.error) ||
                           (!response.ok ? `API error (${response.status})` : null);
       
+      // Only treat as success if status is 'success', HTTP is OK, and txHash exists
+      const isApiSuccess = (response.ok || parsedResponse.success === true) && txStatus === 'success' && !!txHash;
+      
       const result = {
-        success: response.ok || !!txHash,
+        success: isApiSuccess,
         txHash: txHash,
-        errorMessage: errorMessage,
+        errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status
       };
@@ -248,7 +259,7 @@ async function transferESDT(recipientWallet, tokenTicker, amount, projectName, g
       } else {
         console.error(`API reported failure for ${tokenTicker} transfer: ${errorMessage || 'Unknown error'}`);
         if (txHash) {
-          console.log(`However, transaction hash was found: ${txHash} - will consider this a success`);
+          console.log(`Transaction hash was returned (${txHash}), but transaction failed (status: ${txStatus}).`);
         }
       }
       
@@ -345,6 +356,15 @@ client.on('interactionCreate', async (interaction) => {
 
       const projects = getProjects(guildId);
       
+      // Check if project already exists
+      if (projects[projectName]) {
+        await interaction.editReply({ 
+          content: `⚠️ **Warning:** Project "${projectName}" already exists!\n\nThis will **overwrite** the existing project with new credentials.\n\nIf you want to update specific fields instead, use \`/update-project\`.\n\nTo proceed with overwriting, run this command again.`, 
+          ephemeral: true 
+        });
+        return;
+      }
+      
       projects[projectName] = {
         walletPem: walletPem,
         supportedTokens: supportedTokens,
@@ -363,7 +383,8 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Status', value: '✅ Active', inline: true }
         ])
         .setColor('#00FF00')
-        .setTimestamp();
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
 
       await interaction.editReply({ embeds: [embed] });
       
@@ -376,6 +397,107 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error registering project: ${error.message}`, ephemeral: true });
       }
     }
+  } else if (commandName === 'update-project') {
+    try {
+      await interaction.deferReply({ ephemeral: true });
+      
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ content: 'Only administrators can update projects.', ephemeral: true });
+        return;
+      }
+
+      const projectName = interaction.options.getString('project-name');
+      const newProjectName = interaction.options.getString('new-project-name');
+      const walletPem = interaction.options.getString('wallet-pem');
+      const supportedTokensStr = interaction.options.getString('supported-tokens');
+
+      const projects = getProjects(guildId);
+      
+      if (!projects[projectName]) {
+        await interaction.editReply({ content: `Project "${projectName}" not found. Use /register-project to create it first.`, ephemeral: true });
+        return;
+      }
+
+      // Check if new project name already exists (if renaming)
+      if (newProjectName && newProjectName !== projectName && projects[newProjectName]) {
+        await interaction.editReply({ content: `Project "${newProjectName}" already exists. Choose a different name.`, ephemeral: true });
+        return;
+      }
+
+      const currentProject = projects[projectName];
+      let hasChanges = false;
+      const changes = [];
+
+      // Update project name if provided
+      if (newProjectName && newProjectName !== projectName) {
+        projects[newProjectName] = {
+          ...currentProject,
+          registeredAt: Date.now()
+        };
+        delete projects[projectName];
+        changes.push(`Project name: "${projectName}" → "${newProjectName}"`);
+        hasChanges = true;
+      }
+
+      // Update wallet PEM if provided
+      if (walletPem) {
+        const pemValid = isValidPemFormat(walletPem);
+        if (!pemValid) {
+          await interaction.editReply({ content: 'Invalid PEM format. Please provide a valid MultiversX wallet PEM file content.', ephemeral: true });
+          return;
+        }
+        const targetProject = newProjectName ? projects[newProjectName] : projects[projectName];
+        targetProject.walletPem = walletPem;
+        changes.push('Wallet PEM updated');
+        hasChanges = true;
+      }
+
+      // Update supported tokens if provided
+      if (supportedTokensStr) {
+        const supportedTokens = supportedTokensStr.split(',').map(token => token.trim()).filter(token => token.length > 0);
+        
+        if (supportedTokens.length === 0) {
+          await interaction.editReply({ content: 'Please provide at least one supported token.', ephemeral: true });
+          return;
+        }
+        
+        const targetProject = newProjectName ? projects[newProjectName] : projects[projectName];
+        targetProject.supportedTokens = supportedTokens;
+        changes.push(`Supported tokens: ${supportedTokens.join(', ')}`);
+        hasChanges = true;
+      }
+
+      if (!hasChanges) {
+        await interaction.editReply({ content: 'No changes provided. Please specify at least one field to update.', ephemeral: true });
+        return;
+      }
+
+      saveServerData();
+
+      const finalProjectName = newProjectName || projectName;
+      const embed = new EmbedBuilder()
+        .setTitle('Project Updated Successfully')
+        .setDescription(`Project **${finalProjectName}** has been updated.`)
+        .addFields([
+          { name: 'Changes Made', value: changes.join('\n'), inline: false },
+          { name: 'Updated By', value: `<@${interaction.user.id}>`, inline: true },
+          { name: 'Status', value: '✅ Active', inline: true }
+        ])
+        .setColor('#00FF00')
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+
+      await interaction.editReply({ embeds: [embed] });
+      
+      console.log(`Project "${finalProjectName}" updated for guild ${guildId} by ${interaction.user.tag}`);
+    } catch (error) {
+      console.error('Error updating project:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error updating project: ${error.message}`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: `Error updating project: ${error.message}`, ephemeral: true });
+      }
+    }
   } else if (commandName === 'send-esdt') {
     try {
       await interaction.deferReply({ ephemeral: true });
@@ -385,6 +507,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      const projectName = interaction.options.getString('project-name');
       const userTag = interaction.options.getString('user-tag');
       const tokenTicker = interaction.options.getString('token-ticker');
       const amount = interaction.options.getNumber('amount');
@@ -397,28 +520,19 @@ client.on('interactionCreate', async (interaction) => {
 
       // Get available projects for this server
       const projects = getProjects(guildId);
-      const availableProjects = Object.keys(projects);
       
-      if (availableProjects.length === 0) {
+      if (!projects[projectName]) {
         await interaction.editReply({ 
-          content: 'No projects registered for this server. Use /register-project to add a project first.', 
+          content: `Project "${projectName}" not found. Use /list-projects to see available projects.`, 
           ephemeral: true 
         });
         return;
       }
 
-      // Find project that supports this token
-      let selectedProject = null;
-      for (const projectName of availableProjects) {
-        if (projects[projectName].supportedTokens.includes(tokenTicker)) {
-          selectedProject = projectName;
-          break;
-        }
-      }
-
-      if (!selectedProject) {
+      // Check if the selected project supports the requested token
+      if (!projects[projectName].supportedTokens.includes(tokenTicker)) {
         await interaction.editReply({ 
-          content: `No project supports token "${tokenTicker}". Available projects: ${availableProjects.join(', ')}`, 
+          content: `Project "${projectName}" does not support token "${tokenTicker}".\n\nSupported tokens for this project: ${projects[projectName].supportedTokens.join(', ')}`, 
           ephemeral: true 
         });
         return;
@@ -464,14 +578,14 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       await interaction.editReply({ 
-        content: `Preparing to send ${amount} ${tokenTicker} to ${userTag} using project ${selectedProject}...\nMemo: ${memo}`, 
+        content: `Preparing to send ${amount} ${tokenTicker} to ${userTag} using project ${projectName}...\nMemo: ${memo}`, 
         ephemeral: true 
       });
       
-      console.log(`Admin ${interaction.user.tag} (${interaction.user.id}) is sending ${amount} ${tokenTicker} to ${userTag} (${recipientWallet}) using project ${selectedProject}`);
+      console.log(`Admin ${interaction.user.tag} (${interaction.user.id}) is sending ${amount} ${tokenTicker} to ${userTag} (${recipientWallet}) using project ${projectName}`);
       console.log(`Transfer memo: ${memo}`);
       
-      const transferResult = await transferESDT(recipientWallet, tokenTicker, amount, selectedProject, guildId);
+      const transferResult = await transferESDT(recipientWallet, tokenTicker, amount, projectName, guildId);
       
       if (transferResult.success) {
         const explorerUrl = transferResult.txHash
@@ -485,6 +599,7 @@ client.on('interactionCreate', async (interaction) => {
           .setTitle('ESDT Transfer Successful')
           .setDescription(`Successfully sent **${amount} ${tokenTicker}** to ${targetUser ? `<@${targetUserId}>` : userTag}`)
           .addFields([
+            { name: 'Project Used', value: projectName, inline: true },
             { name: 'Recipient Wallet', value: `\`${recipientWallet}\``, inline: false },
             { name: 'Transaction Hash', value: txHashFieldValue, inline: false },
             { name: 'Memo', value: memo, inline: false },
@@ -493,7 +608,7 @@ client.on('interactionCreate', async (interaction) => {
           ])
           .setColor(0x4d55dc)
           .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
-          .setFooter({ text: 'Powered by MakeX API', iconURL: undefined })
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
           .setTimestamp();
         
         await interaction.editReply({ 
@@ -502,7 +617,7 @@ client.on('interactionCreate', async (interaction) => {
         });
         
         await interaction.channel.send({ 
-          content: `🪙 **Token Transfer Announcement** 🪙`,
+          content: `🪙 **Token Transfer Notification** 🪙`,
           embeds: [successEmbed]
         });
         
@@ -523,15 +638,15 @@ client.on('interactionCreate', async (interaction) => {
               .setTitle('You Received ESDT Tokens!')
               .setDescription(`You have received **${amount} ${tokenTicker}** from an administrator.`)
               .addFields([
+                { name: 'Project Used', value: projectName, inline: true },
                 { name: 'Transaction Hash', value: txHashFieldValue, inline: false },
-                { name: 'Project Used', value: selectedProject, inline: true },
                 { name: 'Memo', value: memo, inline: false },
                 { name: 'Sender', value: `<@${interaction.user.id}>`, inline: true },
                 { name: 'Status', value: '✅ Success', inline: true }
               ])
               .setColor(0x4d55dc)
               .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
-              .setFooter({ text: 'Powered by MakeX API', iconURL: undefined })
+              .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
               .setTimestamp();
               
             await targetUser.send({ embeds: [dmEmbed] });
@@ -545,6 +660,7 @@ client.on('interactionCreate', async (interaction) => {
           .setTitle('ESDT Transfer Failed')
           .setDescription(`Failed to send **${amount} ${tokenTicker}** to ${targetUser ? `<@${targetUserId}>` : userTag}`)
           .addFields([
+            { name: 'Project Used', value: projectName, inline: true },
             { name: 'Recipient Wallet', value: `\`${recipientWallet}\``, inline: false },
             { name: 'Transaction Hash', value: transferResult.txHash ? `\`${transferResult.txHash}\`` : 'Not available', inline: false },
             { name: 'Memo', value: memo, inline: false },
@@ -552,7 +668,8 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Status', value: '❌ Failed', inline: true }
           ])
           .setColor('#FF0000')
-          .setTimestamp();
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
           
         await interaction.editReply({ 
           content: `Transfer failed: ${transferResult.errorMessage || 'Unknown error'}`, 
@@ -577,6 +694,160 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ content: `Error sending ESDT tokens: ${error.message}`, ephemeral: true });
       } else {
         await interaction.reply({ content: `Error sending ESDT tokens: ${error.message}`, ephemeral: true });
+      }
+    }
+  } else if (commandName === 'set-community-fund') {
+    try {
+      await interaction.deferReply({ ephemeral: true });
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ content: 'Only administrators can set the Community Tip Fund.', ephemeral: true });
+        return;
+      }
+      const projectName = interaction.options.getString('project-name');
+      const confirm = interaction.options.getString('confirm');
+      const projects = getProjects(guildId);
+      if (!projects[projectName]) {
+        await interaction.editReply({ content: `Project "${projectName}" not found. Use /list-projects to see available projects.`, ephemeral: true });
+        return;
+      }
+      const currentFund = serverData[guildId]?.communityFundProject;
+      if (currentFund && currentFund !== projectName && confirm !== 'CONFIRM') {
+        await interaction.editReply({ content: `⚠️ Warning: This will replace the current Community Tip Fund (**${currentFund}**) with **${projectName}**.\n\nIf you are sure, run the command again and type CONFIRM in the confirm field.`, ephemeral: true });
+        return;
+      }
+      serverData[guildId].communityFundProject = projectName;
+      saveServerData();
+      await interaction.editReply({ content: `Community Tip Fund set to project: **${projectName}**. All /tip transactions will use this wallet.`, ephemeral: true });
+      console.log(`Community Tip Fund set to ${projectName} for guild ${guildId}`);
+    } catch (error) {
+      console.error('Error setting Community Tip Fund:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, ephemeral: true });
+      }
+    }
+  } else if (commandName === 'tip') {
+    try {
+      await interaction.deferReply({ ephemeral: true });
+      const userTag = interaction.options.getString('user-tag');
+      const tokenTicker = interaction.options.getString('token-ticker');
+      const amount = interaction.options.getNumber('amount');
+      const memo = interaction.options.getString('memo') || 'No memo provided';
+      // Check if community fund is set
+      const fundProject = serverData[guildId]?.communityFundProject;
+      if (!fundProject) {
+        await interaction.editReply({ content: 'No Community Tip Fund is set for this server. Please ask an admin to run /set-community-fund.', ephemeral: true });
+        return;
+      }
+      const projects = getProjects(guildId);
+      if (!projects[fundProject]) {
+        await interaction.editReply({ content: `The Community Tip Fund project ("${fundProject}") no longer exists. Please ask an admin to set it again.`, ephemeral: true });
+        return;
+      }
+      if (!projects[fundProject].supportedTokens.includes(tokenTicker)) {
+        await interaction.editReply({ content: `The Community Tip Fund does not support token "${tokenTicker}". Supported tokens: ${projects[fundProject].supportedTokens.join(', ')}`, ephemeral: true });
+        return;
+      }
+      let targetUserId = null;
+      let targetUser = null;
+      let recipientWallet = null;
+      try {
+        const guild = interaction.guild;
+        const members = await guild.members.fetch();
+        const targetMember = members.find(member => 
+          member.user.tag === userTag || 
+          member.user.username === userTag ||
+          (member.nickname && member.nickname === userTag)
+        );
+        if (targetMember) {
+          targetUserId = targetMember.user.id;
+          targetUser = targetMember.user;
+          recipientWallet = getUserWallets(guildId)[targetUserId];
+        }
+      } catch (fetchError) {
+        console.error('Error fetching guild members:', fetchError.message);
+      }
+      if (!recipientWallet) {
+        await interaction.editReply({ content: `User ${userTag} not found or has no registered wallet. Ask them to register with /set-wallet.`, ephemeral: true });
+        return;
+      }
+      if (!recipientWallet.startsWith('erd1') || recipientWallet.length !== 62) {
+        await interaction.editReply({ content: `User ${userTag} has an invalid wallet address: ${recipientWallet}. Ask them to update it with /set-wallet.`, ephemeral: true });
+        return;
+      }
+      await interaction.editReply({ content: `Preparing to tip ${amount} ${tokenTicker} to ${userTag} using Community Tip Fund (${fundProject})...\nMemo: ${memo}`, ephemeral: true });
+      console.log(`User ${interaction.user.tag} (${interaction.user.id}) is tipping ${amount} ${tokenTicker} to ${userTag} (${recipientWallet}) using Community Tip Fund (${fundProject})`);
+      const transferResult = await transferESDT(recipientWallet, tokenTicker, amount, fundProject, guildId);
+      if (transferResult.success) {
+        const explorerUrl = transferResult.txHash
+          ? `https://explorer.multiversx.com/transactions/${transferResult.txHash}`
+          : null;
+        const txHashFieldValue = transferResult.txHash
+          ? `[${transferResult.txHash}](${explorerUrl})`
+          : 'Not available';
+        const successEmbed = new EmbedBuilder()
+          .setTitle('Community Tip Sent!')
+          .setDescription(`Successfully tipped **${amount} ${tokenTicker}** to ${targetUser ? `<@${targetUserId}>` : userTag}`)
+          .addFields([
+            { name: 'Community Fund', value: fundProject, inline: true },
+            { name: 'Recipient Wallet', value: `\`${recipientWallet}\``, inline: false },
+            { name: 'Transaction Hash', value: txHashFieldValue, inline: false },
+            { name: 'Memo', value: memo, inline: false },
+            { name: 'Tipped By', value: `<@${interaction.user.id}>`, inline: true },
+            { name: 'Status', value: '✅ Success', inline: true }
+          ])
+          .setColor(0x4d55dc)
+          .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+          .setTimestamp();
+        await interaction.editReply({ content: `Tip sent successfully!`, embeds: [successEmbed], ephemeral: true });
+        await interaction.channel.send({ content: `🎁 **Community Tip Notification** 🎁`, embeds: [successEmbed] });
+        try {
+          if (targetUser) {
+            const dmEmbed = new EmbedBuilder()
+              .setTitle('You Received a Community Tip!')
+              .setDescription(`You have received **${amount} ${tokenTicker}** from a community member.`)
+              .addFields([
+                { name: 'Community Fund', value: fundProject, inline: true },
+                { name: 'Transaction Hash', value: txHashFieldValue, inline: false },
+                { name: 'Memo', value: memo, inline: false },
+                { name: 'Sender', value: `<@${interaction.user.id}>`, inline: true },
+                { name: 'Status', value: '✅ Success', inline: true }
+              ])
+              .setColor(0x4d55dc)
+              .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
+              .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+              .setTimestamp();
+            await targetUser.send({ embeds: [dmEmbed] });
+            console.log(`Sent DM notification to ${userTag} about received community tip`);
+          }
+        } catch (dmError) {
+          console.error(`Could not send DM to ${userTag}:`, dmError.message);
+        }
+      } else {
+        const errorEmbed = new EmbedBuilder()
+          .setTitle('Community Tip Failed')
+          .setDescription(`Failed to tip **${amount} ${tokenTicker}** to ${targetUser ? `<@${targetUserId}>` : userTag}`)
+          .addFields([
+            { name: 'Community Fund', value: fundProject, inline: true },
+            { name: 'Recipient Wallet', value: `\`${recipientWallet}\``, inline: false },
+            { name: 'Transaction Hash', value: transferResult.txHash ? `\`${transferResult.txHash}\`` : 'Not available', inline: false },
+            { name: 'Memo', value: memo, inline: false },
+            { name: 'Tipped By', value: `<@${interaction.user.id}>`, inline: true },
+            { name: 'Status', value: '❌ Failed', inline: true }
+          ])
+          .setColor('#FF0000')
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        await interaction.editReply({ content: `Tip failed: ${transferResult.errorMessage || 'Unknown error'}`, embeds: [errorEmbed], ephemeral: true });
+      }
+    } catch (error) {
+      console.error('Error sending community tip:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error sending community tip: ${error.message}`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: `Error sending community tip: ${error.message}`, ephemeral: true });
       }
     }
   } else if (commandName === 'list-wallets') {
@@ -739,12 +1010,168 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error listing wallets: ${error.message}`, ephemeral: true });
       }
     }
+  } else if (commandName === 'list-projects') {
+    try {
+      // Remove admin check so all users can use this command
+      const isPublic = interaction.options.getBoolean('public') || false;
+      await interaction.deferReply({ ephemeral: !isPublic });
+      console.log(`User ${interaction.user.tag} is listing projects, public: ${isPublic}`);
+      const projects = getProjects(guildId);
+      const projectNames = Object.keys(projects);
+      const communityFund = serverData[guildId]?.communityFundProject;
+      if (projectNames.length === 0) {
+        const embed = new EmbedBuilder()
+          .setTitle('No Projects Registered')
+          .setDescription('No projects are currently registered for this server.')
+          .addFields([
+            { name: 'Next Steps', value: 'Use `/register-project` to add your first project.', inline: false }
+          ])
+          .setColor('#FF9900')
+          .setTimestamp();
+        await interaction.editReply({ embeds: [embed], ephemeral: !isPublic });
+        return;
+      }
+      const embed = new EmbedBuilder()
+        .setTitle('Registered Projects')
+        .setDescription(`${projectNames.length} project${projectNames.length !== 1 ? 's' : ''} registered for this server`)
+        .setColor('#0099FF')
+        .setFooter({ text: `Requested by ${interaction.user.tag}` })
+        .setTimestamp();
+      for (const projectName of projectNames) {
+        const project = projects[projectName];
+        const registeredBy = project.registeredBy ? `<@${project.registeredBy}>` : 'Unknown';
+        const registeredAt = project.registeredAt ? new Date(project.registeredAt).toLocaleDateString() : 'Unknown';
+        const isFund = communityFund === projectName;
+        embed.addFields({
+          name: `${isFund ? '💰 ' : ''}📁 ${projectName}${isFund ? ' (Community Fund)' : ''}`,
+          value: `**Supported Tokens:** ${project.supportedTokens.join(', ')}\n**Registered By:** ${registeredBy}\n**Registered:** ${registeredAt}`,
+          inline: false
+        });
+      }
+      await interaction.editReply({ embeds: [embed], ephemeral: !isPublic });
+      console.log(`Listed ${projectNames.length} projects (${isPublic ? 'public' : 'private'} response)`);
+    } catch (error) {
+      console.error('Error listing projects:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error listing projects: ${error.message}`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: `Error listing projects: ${error.message}`, ephemeral: true });
+      }
+    }
+  } else if (commandName === 'delete-project') {
+    try {
+      await interaction.deferReply({ ephemeral: true });
+      
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ content: 'Only administrators can delete projects.', ephemeral: true });
+        return;
+      }
+
+      const projectName = interaction.options.getString('project-name');
+      const confirm = interaction.options.getString('confirm');
+
+      if (confirm !== 'DELETE') {
+        await interaction.editReply({ 
+          content: `❌ **Deletion Cancelled**\n\nTo delete project "${projectName}", you must type "DELETE" in the confirm field.\n\nThis is a safety measure to prevent accidental deletions.`, 
+          ephemeral: true 
+        });
+        return;
+      }
+
+      const projects = getProjects(guildId);
+      
+      if (!projects[projectName]) {
+        await interaction.editReply({ content: `Project "${projectName}" not found.`, ephemeral: true });
+        return;
+      }
+
+      // Store project info for logging before deletion
+      const projectInfo = projects[projectName];
+      const supportedTokens = projectInfo.supportedTokens.join(', ');
+      const registeredBy = projectInfo.registeredBy ? `<@${projectInfo.registeredBy}>` : 'Unknown';
+      const registeredAt = projectInfo.registeredAt ? new Date(projectInfo.registeredAt).toLocaleDateString() : 'Unknown';
+
+      // Delete the project
+      delete projects[projectName];
+      saveServerData();
+
+      const embed = new EmbedBuilder()
+        .setTitle('Project Deleted Successfully')
+        .setDescription(`Project **${projectName}** has been permanently deleted from this server.`)
+        .addFields([
+          { name: 'Deleted Project', value: projectName, inline: true },
+          { name: 'Supported Tokens', value: supportedTokens || 'None', inline: true },
+          { name: 'Originally Registered By', value: registeredBy, inline: true },
+          { name: 'Originally Registered', value: registeredAt, inline: true },
+          { name: 'Deleted By', value: `<@${interaction.user.id}>`, inline: true },
+          { name: 'Status', value: '🗑️ Deleted', inline: true }
+        ])
+        .setColor('#FF0000')
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+
+      await interaction.editReply({ embeds: [embed] });
+      
+      console.log(`Project "${projectName}" deleted from guild ${guildId} by ${interaction.user.tag}`);
+      
+      // Send notification to log channel if it exists
+      try {
+        if (interaction.guild) {
+          const logChannel = interaction.guild.channels.cache.find((channel) => channel.name === 'transfer-logs');
+          if (logChannel) {
+            const logEmbed = new EmbedBuilder()
+              .setTitle('⚠️ Project Deleted')
+              .setDescription(`Project **${projectName}** was deleted by ${interaction.user.tag}`)
+              .addFields([
+                { name: 'Supported Tokens', value: supportedTokens || 'None', inline: true },
+                { name: 'Deleted By', value: `<@${interaction.user.id}>`, inline: true }
+              ])
+              .setColor('#FF0000')
+              .setTimestamp()
+              .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+            
+            await logChannel.send({ embeds: [logEmbed] });
+          }
+        }
+      } catch (logError) {
+        console.error('Error posting to log channel:', logError.message);
+      }
+      
+    } catch (error) {
+      console.error('Error deleting project:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error deleting project: ${error.message}`, ephemeral: true });
+      } else {
+        await interaction.reply({ content: `Error deleting project: ${error.message}`, ephemeral: true });
+      }
+    }
   }
 });
 
 // Combined autocomplete handler for send-esdt command
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isAutocomplete()) return;
+
+  // PROJECT NAME AUTOCOMPLETE FOR SEND-ESDT
+  if (interaction.commandName === 'send-esdt' && interaction.options.getFocused(true).name === 'project-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const projects = getProjects(guildId);
+      const availableProjects = Object.keys(projects);
+      
+      const filtered = availableProjects.filter(projectName =>
+        projectName.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      
+      await interaction.respond(
+        filtered.slice(0, 25).map(projectName => ({ name: projectName, value: projectName }))
+      );
+    } catch (error) {
+      await interaction.respond([]);
+    }
+    return;
+  }
 
   // USER AUTOCOMPLETE
   if (interaction.commandName === 'send-esdt' && interaction.options.getFocused(true).name === 'user-tag') {
@@ -795,15 +1222,151 @@ client.on('interactionCreate', async (interaction) => {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
       const projects = getProjects(guildId);
-      const availableProjects = Object.keys(projects);
+      
+      // Get the selected project from the interaction
+      const selectedProject = interaction.options.getString('project-name');
+      
       let supportedTokens = [];
-      for (const projectName of availableProjects) {
-        const project = projects[projectName];
-        if (project && Array.isArray(project.supportedTokens)) {
-          supportedTokens.push(...project.supportedTokens);
+      if (selectedProject && projects[selectedProject]) {
+        // If a project is selected, only show tokens supported by that project
+        supportedTokens = projects[selectedProject].supportedTokens || [];
+      } else {
+        // If no project is selected, show all tokens from all projects
+        const availableProjects = Object.keys(projects);
+        for (const projectName of availableProjects) {
+          const project = projects[projectName];
+          if (project && Array.isArray(project.supportedTokens)) {
+            supportedTokens.push(...project.supportedTokens);
+          }
         }
+        supportedTokens = [...new Set(supportedTokens)];
       }
-      supportedTokens = [...new Set(supportedTokens)];
+      
+      const filtered = supportedTokens.filter(token =>
+        token.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      await interaction.respond(
+        filtered.slice(0, 25).map(token => ({ name: token, value: token }))
+      );
+    } catch (error) {
+      await interaction.respond([]);
+    }
+    return;
+  }
+
+  // PROJECT NAME AUTOCOMPLETE FOR UPDATE-PROJECT
+  if (interaction.commandName === 'update-project' && interaction.options.getFocused(true).name === 'project-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const projects = getProjects(guildId);
+      const availableProjects = Object.keys(projects);
+      
+      const filtered = availableProjects.filter(projectName =>
+        projectName.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      
+      await interaction.respond(
+        filtered.slice(0, 25).map(projectName => ({ name: projectName, value: projectName }))
+      );
+    } catch (error) {
+      await interaction.respond([]);
+    }
+    return;
+  }
+
+  // PROJECT NAME AUTOCOMPLETE FOR DELETE-PROJECT
+  if (interaction.commandName === 'delete-project' && interaction.options.getFocused(true).name === 'project-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const projects = getProjects(guildId);
+      const availableProjects = Object.keys(projects);
+      
+      const filtered = availableProjects.filter(projectName =>
+        projectName.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      
+      await interaction.respond(
+        filtered.slice(0, 25).map(projectName => ({ name: projectName, value: projectName }))
+      );
+    } catch (error) {
+      await interaction.respond([]);
+    }
+    return;
+  }
+
+  // PROJECT NAME AUTOCOMPLETE FOR SET-COMMUNITY-FUND
+  if (interaction.commandName === 'set-community-fund' && interaction.options.getFocused(true).name === 'project-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const projects = getProjects(guildId);
+      const availableProjects = Object.keys(projects);
+      const filtered = availableProjects.filter(projectName =>
+        projectName.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      await interaction.respond(
+        filtered.slice(0, 25).map(projectName => ({ name: projectName, value: projectName }))
+      );
+    } catch (error) {
+      await interaction.respond([]);
+    }
+    return;
+  }
+
+  // USER AUTOCOMPLETE FOR TIP
+  if (interaction.commandName === 'tip' && interaction.options.getFocused(true).name === 'user-tag') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guild = interaction.guild;
+      const guildId = interaction.guildId;
+      let choices = [];
+      const userWallets = getUserWallets(guildId);
+      const userWalletEntries = Object.entries(userWallets).slice(0, 25);
+      if (userWalletEntries.length > 0) {
+        const walletUserPromises = userWalletEntries.map(async ([userId, wallet]) => {
+          try {
+            let member = guild.members.cache.get(userId);
+            if (!member) {
+              member = await guild.members.fetch(userId).catch(() => null);
+            }
+            if (member) {
+              return {
+                name: member.user.tag,
+                value: member.user.tag
+              };
+            }
+            return null;
+          } catch (error) {
+            return null;
+          }
+        });
+        const walletUsers = (await Promise.all(walletUserPromises)).filter(Boolean);
+        choices = walletUsers;
+      }
+      // Filter by user input
+      const filtered = choices.filter(choice =>
+        choice.name.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      await interaction.respond(filtered.slice(0, 25));
+    } catch (error) {
+      await interaction.respond([]);
+    }
+    return;
+  }
+
+  // TOKEN AUTOCOMPLETE FOR TIP
+  if (interaction.commandName === 'tip' && interaction.options.getFocused(true).name === 'token-ticker') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const fundProject = serverData[guildId]?.communityFundProject;
+      let supportedTokens = [];
+      const projects = getProjects(guildId);
+      if (fundProject && projects[fundProject]) {
+        supportedTokens = projects[fundProject].supportedTokens || [];
+      }
       const filtered = supportedTokens.filter(token =>
         token.toLowerCase().includes(focusedValue.toLowerCase())
       );
