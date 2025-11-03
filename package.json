@@ -1,0 +1,42 @@
+{
+  "name": "multiversx-esdt-tipping-bot",
+  "version": "1.0.0",
+  "description": "Multi-server Discord bot for ESDT token transfers on MultiversX",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "register-commands": "node register-commands.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "multiversx",
+    "esdt",
+    "tokens",
+    "blockchain",
+    "tipping"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "bignumber.js": "^9.3.1",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "your-repository-url"
+  },
+  "bugs": {
+    "url": "your-repository-url/issues"
+  },
+  "homepage": "your-repository-url#readme"
+}
