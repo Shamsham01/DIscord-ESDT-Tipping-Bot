@@ -62,6 +62,114 @@ const commands = [
         default_member_permissions: null, // Permissions are checked in code
     },
     {
+        name: 'send-nft',
+        description: 'Send NFT to a specified user (Admin only)',
+        options: [
+            {
+                name: 'project-name',
+                description: 'The project to use for this transfer',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'collection',
+                description: 'The NFT collection to transfer from',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'nft-name',
+                description: 'The specific NFT to transfer',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'user-tag',
+                description: 'The Discord username to send NFT to (without @ symbol)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'memo',
+                description: 'Optional memo or reason for the transfer',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+            },
+        ],
+        default_member_permissions: null, // Permissions are checked in code
+    },
+    {
+        name: 'create-auction',
+        description: 'Create an NFT auction (Admin only)',
+        options: [
+            {
+                name: 'project-name',
+                description: 'The project owning the NFT',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'collection',
+                description: 'The NFT collection',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'nft-name',
+                description: 'The specific NFT to auction',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'title',
+                description: 'Auction title',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+            },
+            {
+                name: 'description',
+                description: 'Auction description',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+            },
+            {
+                name: 'duration',
+                description: 'Auction duration in hours',
+                type: ApplicationCommandOptionType.Number,
+                required: true,
+                min_value: 1,
+                max_value: 168
+            },
+            {
+                name: 'token-ticker',
+                description: 'Token ticker for bidding',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'starting-amount',
+                description: 'Starting bid amount',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+            },
+            {
+                name: 'min-bid-increase',
+                description: 'Minimum bid increase amount',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+            },
+        ],
+        default_member_permissions: null, // Permissions are checked in code
+    },
+    {
         name: 'list-wallets',
         description: 'List registered wallets by username (Admin only)',
         options: [
@@ -511,6 +619,22 @@ const commands = [
                 required: true,
             },
             {
+                name: 'source',
+                description: 'Source of house balance to tip from',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                choices: [
+                    {
+                        name: '⚽ Betting House Balance',
+                        value: 'betting'
+                    },
+                    {
+                        name: '🎨 Auction House Balance',
+                        value: 'auction'
+                    }
+                ]
+            },
+            {
                 name: 'token',
                 description: 'Token to tip',
                 type: ApplicationCommandOptionType.String,
@@ -527,6 +651,56 @@ const commands = [
             {
                 name: 'memo',
                 description: 'Optional reason for the tip',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+            }
+        ],
+        default_member_permissions: null, // Permissions are checked in code
+    },
+    {
+        name: 'house-withdraw',
+        description: 'Withdraw from house balance to project wallet (on-chain, Admin only)',
+        options: [
+            {
+                name: 'source',
+                description: 'Source of house balance to withdraw from',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                choices: [
+                    {
+                        name: '⚽ Betting House Balance',
+                        value: 'betting'
+                    },
+                    {
+                        name: '🎨 Auction House Balance',
+                        value: 'auction'
+                    }
+                ]
+            },
+            {
+                name: 'project-name',
+                description: 'Project wallet to withdraw to',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'token',
+                description: 'Token to withdraw',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'amount',
+                description: 'Amount to withdraw',
+                type: ApplicationCommandOptionType.Number,
+                required: true,
+                min_value: 0
+            },
+            {
+                name: 'memo',
+                description: 'Optional reason for the withdrawal',
                 type: ApplicationCommandOptionType.String,
                 required: false,
             }
@@ -690,34 +864,88 @@ const commands = [
 
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
+// Add timeout wrapper
+function withTimeout(promise, timeoutMs, errorMessage) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => 
+            setTimeout(() => reject(new Error(errorMessage)), timeoutMs)
+        )
+    ]);
+}
+
 (async () => {
     try {
+        console.log(`\n📊 Registering ${commands.length} commands...`);
+        console.log(`⏱️  This may take up to 30 seconds due to Discord rate limits.\n`);
+        
         // Delete all global commands first
-        console.log('Deleting all global slash commands...');
-        await rest.put(
-            Routes.applicationCommands(process.env.CLIENT_ID),
-            { body: [] }
-        );
-        console.log('All global commands deleted.');
+        console.log('🗑️  Step 1: Deleting all global slash commands...');
+        try {
+            await withTimeout(
+                rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: [] }),
+                30000, // 30 second timeout
+                'Command deletion timed out after 30 seconds'
+            );
+            console.log('✅ All global commands deleted.\n');
+        } catch (deleteError) {
+            console.error('❌ Error deleting commands:', deleteError.message);
+            if (deleteError.message.includes('429')) {
+                console.error('⚠️  Rate limited! Please wait 5-10 minutes and try again.');
+                process.exit(1);
+            }
+            // Continue anyway - commands might already be deleted
+        }
 
         // Wait a few seconds to ensure deletion is processed
+        console.log('⏳ Waiting 5 seconds for Discord to process deletion...');
         await new Promise(resolve => setTimeout(resolve, 5000));
 
         // Register new global commands
-        console.log('Registering new global slash commands...');
-        await rest.put(
-            Routes.applicationCommands(process.env.CLIENT_ID),
-            { body: commands }
-        );
-        console.log('Global slash commands were registered successfully!');
+        console.log('📝 Step 2: Registering new global slash commands...');
+        console.log(`📦 Total commands: ${commands.length}`);
         
-        console.log('Commands registered:');
-        commands.forEach(cmd => {
-            console.log(`- /${cmd.name}: ${cmd.description}`);
-        });
+        const startTime = Date.now();
+        const registeredCommands = await withTimeout(
+            rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands }),
+            60000, // 60 second timeout
+            'Command registration timed out after 60 seconds. Discord may be rate limiting.'
+        );
+        
+        const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`✅ Global slash commands were registered successfully! (took ${duration}s)\n`);
+        
+        console.log('📋 Commands registered:');
+        if (Array.isArray(registeredCommands)) {
+            registeredCommands.forEach((cmd, index) => {
+                console.log(`   ${index + 1}. /${cmd.name}: ${cmd.description}`);
+            });
+        } else {
+            commands.forEach((cmd, index) => {
+                console.log(`   ${index + 1}. /${cmd.name}: ${cmd.description}`);
+            });
+        }
+        
+        console.log(`\n✨ Registration complete! ${commands.length} commands are now available.\n`);
         
     } catch (error) {
-        console.log(`There was an error: ${error}`);
-        console.log('Error details:', error.stack);
+        console.error('\n❌ Registration failed!\n');
+        console.error('Error:', error.message);
+        
+        if (error.message.includes('429') || error.status === 429) {
+            console.error('\n⚠️  RATE LIMIT EXCEEDED!');
+            console.error('Discord allows 200 command updates per day per application.');
+            console.error('Please wait 5-10 minutes before trying again.\n');
+        } else if (error.message.includes('401') || error.status === 401) {
+            console.error('\n⚠️  AUTHENTICATION ERROR!');
+            console.error('Please check your TOKEN and CLIENT_ID in .env file.\n');
+        } else if (error.message.includes('timeout')) {
+            console.error('\n⚠️  TIMEOUT ERROR!');
+            console.error('Discord API is slow or rate limiting. Please wait 5-10 minutes and try again.\n');
+        } else {
+            console.error('\nError details:', error.stack);
+        }
+        
+        process.exit(1);
     }
 })(); 
