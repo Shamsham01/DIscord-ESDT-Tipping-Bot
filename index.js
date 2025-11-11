@@ -10,12 +10,22 @@ console.log('Environment variables:', {
 
 const { Client, IntentsBitField, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags } = require('discord.js');
 const fetch = require('node-fetch');
-const fs = require('fs');
 const BigNumber = require('bignumber.js');
 
 // Import virtual accounts and blockchain listener
 const virtualAccounts = require('./virtual-accounts.js');
 const blockchainListener = require('./blockchain-listener.js');
+
+// Import database modules
+const dbServerData = require('./db/server-data');
+const dbRpsGames = require('./db/rps-games');
+const dbFootball = require('./db/football');
+const dbAuctions = require('./db/auctions');
+const dbLeaderboard = require('./db/leaderboard');
+const dbLottery = require('./db/lottery');
+
+// Import lottery helpers
+const lotteryHelpers = require('./utils/lottery-helpers');
 
 const client = new Client({
   intents: [
@@ -37,115 +47,639 @@ const API_BASE_URL = process.env.API_BASE_URL;
 const API_TOKEN = process.env.API_TOKEN; // For MultiversX API
 const FD_TOKEN = process.env.FD_TOKEN; // For Football-Data.org API
 
-// Global state variables - organized by server
-let serverData = {};
-const SERVER_DATA_FILE = 'server-data.json';
+// All data is now stored in Supabase database
+// Wallet timestamps for blockchain listener are stored in Supabase (wallet_timestamps table)
 
-// Remove rpsChallenges and usedTxHashes from serverData
-// Add new files for RPS games and used tx hashes
-const RPS_GAMES_FILE = 'rps-games.json';
-const USED_TX_HASHES_FILE = 'used-tx-hashes.json';
+// All server data is stored in Supabase database
+// Use dbServerData module directly
 
-// Football game data files
-const FOOTBALL_MATCHES_FILE = 'data/matches.json';
-const FOOTBALL_BETS_FILE = 'data/bets.json';
-const FOOTBALL_LEADERBOARD_FILE = 'data/leaderboard.json';
+// Removed - data is saved to database immediately when changed
 
-// Auction data file
-const AUCTIONS_FILE = 'data/auctions.json';
-
-let rpsGamesData = {};
-let usedTxHashesData = {};
-let footballMatchesData = {};
-let footballBetsData = {};
-let footballLeaderboardData = {};
-let auctionsData = {};
-
-// Load server data from disk
-function loadServerData() {
+// Initialize server data if it doesn't exist (async version using database)
+async function initializeServerData(guildId) {
   try {
-    if (fs.existsSync(SERVER_DATA_FILE)) {
-      serverData = JSON.parse(fs.readFileSync(SERVER_DATA_FILE, 'utf8'));
-      console.log(`Loaded data for ${Object.keys(serverData).length} servers`);
+    const settings = await dbServerData.getGuildSettings(guildId);
+    if (!settings) {
+      // Create initial guild settings
+      await dbServerData.updateGuildSettings(guildId, {
+        createdAt: Date.now()
+      });
     }
   } catch (error) {
-    console.error('Error loading server data:', error.message);
-    serverData = {};
+    console.error(`[DB] Error initializing server data for guild ${guildId}:`, error.message);
   }
 }
 
-// Save server data to disk
-function saveServerData() {
+// Helper function to get community fund project name (for display)
+async function getCommunityFundProject(guildId) {
   try {
-    fs.writeFileSync(SERVER_DATA_FILE, JSON.stringify(serverData, null, 2));
+    const settings = await dbServerData.getGuildSettings(guildId);
+    return settings?.communityFundProject || null;
   } catch (error) {
-    console.error('Error saving server data:', error.message);
+    console.error(`[DB] Error getting community fund project:`, error.message);
+    return null;
   }
 }
 
-// Initialize server data if it doesn't exist
-function initializeServerData(guildId) {
-  if (!serverData[guildId]) {
-    serverData[guildId] = {
-      userWallets: {},
-      projects: {},
-      usedTxHashes: {}, // Store used transaction hashes
-      communityFundQR: {}, // Store QR code URLs for community fund projects
-      houseBalance: {
-        // Separate tracking for betting and auctions
-        bettingEarnings: {},
-        bettingSpending: {},
-        bettingPNL: {},
-        auctionEarnings: {},
-        auctionSpending: {},
-        auctionPNL: {}
-      },
-      createdAt: Date.now()
-    };
-    saveServerData();
-  } else {
-    // Initialize houseBalance if it doesn't exist (backward compatibility)
-    if (!serverData[guildId].houseBalance) {
-      serverData[guildId].houseBalance = {
-        bettingEarnings: {},
-        bettingSpending: {},
-        bettingPNL: {},
-        auctionEarnings: {},
-        auctionSpending: {},
-        auctionPNL: {}
+// Helper function to get the actual project name for lookups (always "Community Fund")
+function getCommunityFundProjectName() {
+  return 'Community Fund';
+}
+
+// Helper function to create error embed for insufficient balances
+async function createBalanceErrorEmbed(guildId, balanceCheck, commandName) {
+  const embed = new EmbedBuilder()
+    .setTitle('❌ Insufficient Community Fund Balances')
+    .setDescription(`Cannot proceed with **${commandName}** due to insufficient balances in the Community Fund wallet.`)
+    .setColor(0xFF0000)
+    .setTimestamp()
+    .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+  
+  // Format REWARD balances to 2 decimal places
+  const formatReward = (value) => {
+    const num = parseFloat(value || '0');
+    return isNaN(num) ? '0.00' : num.toFixed(2);
+  };
+  
+  // Calculate totals and differences
+  const onChainReward = parseFloat(balanceCheck.rewardBalanceOnChain || '0');
+  const virtualAccountReward = parseFloat(balanceCheck.rewardBalanceVirtualAccount || '0');
+  const houseBalanceReward = parseFloat(balanceCheck.rewardBalanceHouseBalance || '0');
+  const totalInVirtualAccounts = virtualAccountReward + houseBalanceReward;
+  const difference = onChainReward - totalInVirtualAccounts;
+  const usageFeeReward = parseFloat(balanceCheck.requiredReward || '0');
+  const neededToWithdraw = Math.max(0, -difference) + Math.ceil(usageFeeReward * 100) / 100; // Round up usage fee
+  
+  // Add simplified balance information
+  embed.addFields([
+    { name: '💰 EGLD Balance', value: `${balanceCheck.egldBalance} EGLD`, inline: true },
+    { name: '📊 Required EGLD', value: `${balanceCheck.requiredEgld} EGLD`, inline: true },
+    { name: '✅ EGLD Status', value: new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(balanceCheck.requiredEgld)) ? '✅ Sufficient' : '❌ Insufficient', inline: true },
+    { name: '💼 Total in Wallet (On-Chain)', value: `${formatReward(balanceCheck.rewardBalanceOnChain)} REWARD`, inline: false },
+    { name: '📦 Total in Virtual Accounts', value: `${formatReward(totalInVirtualAccounts)} REWARD\n• Virtual Accounts: ${formatReward(virtualAccountReward)}\n• House Balance: ${formatReward(houseBalanceReward)}`, inline: false },
+    { name: '📊 Difference', value: `${formatReward(difference)} REWARD`, inline: true },
+    { name: '💵 1 Transfer Usage Fee', value: `${formatReward(Math.ceil(usageFeeReward * 100) / 100)} REWARD`, inline: true },
+    { name: '⚠️ Needed to Perform Withdraw', value: `${formatReward(neededToWithdraw)} REWARD`, inline: true }
+  ]);
+  
+  // Add informational note about transferring REWARD
+  if (balanceCheck.walletAddress && neededToWithdraw > 0) {
+    embed.addFields({
+      name: 'ℹ️ How to Add REWARD',
+      value: `A REWARD transfer of **${formatReward(neededToWithdraw)} REWARD** to the Community Fund wallet address is required:\n\`${balanceCheck.walletAddress}\`\n\n⚠️ **Important:** Transfer must be made from a wallet that is **NOT** registered with this bot.\n\n💡 Ask admins to supply the required tokens to enable withdrawals.`,
+      inline: false
+    });
+  }
+  
+  // Add other errors (non-REWARD related, like EGLD issues)
+  const otherErrors = balanceCheck.errors?.filter(e => !e.includes('REWARD')) || [];
+  if (otherErrors.length > 0) {
+    embed.addFields({
+      name: '⚠️ Other Issues',
+      value: otherErrors.map(e => `• ${e}`).join('\n'),
+      inline: false
+    });
+  }
+  
+  // Get QR code URL if available
+  try {
+    const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+    const communityFundProjectName = getCommunityFundProjectName();
+    const qrCodeUrl = communityFundQRData?.[communityFundProjectName];
+    
+    if (qrCodeUrl) {
+      embed.setThumbnail(qrCodeUrl);
+    }
+  } catch (error) {
+    console.error('[BALANCE-CHECK] Error getting QR code:', error.message);
+  }
+  
+  return embed;
+}
+
+// Helper function to check Community Fund balances for withdrawals
+// Returns: { sufficient: boolean, egldBalance: string, rewardBalance: string, requiredEgld: string, requiredReward: string, errors: string[] }
+async function checkCommunityFundBalances(guildId, numberOfTransfers = 1) {
+  try {
+    const errors = [];
+    
+    // Get Community Fund project
+    const projects = await getProjects(guildId);
+    const communityFundProjectName = getCommunityFundProjectName();
+    const communityFundProject = projects[communityFundProjectName];
+    
+    if (!communityFundProject || !communityFundProject.walletAddress) {
+      return {
+        sufficient: false,
+        errors: ['Community Fund project not found or wallet address not configured.']
       };
-      saveServerData();
-    } else {
-      // Ensure all fields exist
-      if (!serverData[guildId].houseBalance.bettingEarnings) serverData[guildId].houseBalance.bettingEarnings = {};
-      if (!serverData[guildId].houseBalance.bettingSpending) serverData[guildId].houseBalance.bettingSpending = {};
-      if (!serverData[guildId].houseBalance.bettingPNL) serverData[guildId].houseBalance.bettingPNL = {};
-      if (!serverData[guildId].houseBalance.auctionEarnings) serverData[guildId].houseBalance.auctionEarnings = {};
-      if (!serverData[guildId].houseBalance.auctionSpending) serverData[guildId].houseBalance.auctionSpending = {};
-      if (!serverData[guildId].houseBalance.auctionPNL) serverData[guildId].houseBalance.auctionPNL = {};
     }
+    
+    const walletAddress = communityFundProject.walletAddress;
+    
+    // Constants
+    const EGLD_DECIMALS = 18;
+    const EGLD_PER_TX = 0.00025; // Conservative estimate
+    const USAGE_FEE_USD = 0.03; // $0.03 per transfer
+    
+    // Calculate required amounts
+    const requiredEgld = EGLD_PER_TX * numberOfTransfers;
+    const requiredEgldWei = new BigNumber(requiredEgld).multipliedBy(new BigNumber(10).pow(EGLD_DECIMALS)).toString();
+    
+    // 1. Fetch EGLD balance
+    let egldBalanceWei = '0';
+    let egldBalanceHuman = '0';
+    try {
+      const egldResponse = await fetch(`https://api.multiversx.com/accounts/${walletAddress}`);
+      if (egldResponse.ok) {
+        const egldData = await egldResponse.json();
+        egldBalanceWei = egldData.balance || '0';
+        egldBalanceHuman = new BigNumber(egldBalanceWei).dividedBy(new BigNumber(10).pow(EGLD_DECIMALS)).toString();
+      } else {
+        errors.push(`Failed to fetch EGLD balance: ${egldResponse.status} ${egldResponse.statusText}`);
+      }
+    } catch (error) {
+      errors.push(`Error fetching EGLD balance: ${error.message}`);
+    }
+    
+    // 2. Fetch REWARD balance from API
+    const REWARD_IDENTIFIER = 'REWARD-cf6eac';
+    let rewardBalanceWei = '0';
+    let rewardBalanceHuman = '0';
+    let rewardPriceUsd = 0;
+    let rewardDecimals = 8;
+    try {
+      const rewardResponse = await fetch(`https://api.multiversx.com/accounts/${walletAddress}/tokens/${REWARD_IDENTIFIER}`);
+      if (rewardResponse.ok) {
+        const rewardData = await rewardResponse.json();
+        rewardBalanceWei = rewardData.balance || '0';
+        rewardDecimals = rewardData.decimals || 8;
+        rewardPriceUsd = rewardData.price || 0;
+        rewardBalanceHuman = new BigNumber(rewardBalanceWei).dividedBy(new BigNumber(10).pow(rewardDecimals)).toString();
+      } else {
+        errors.push(`Failed to fetch REWARD balance: ${rewardResponse.status} ${rewardResponse.statusText}`);
+      }
+    } catch (error) {
+      errors.push(`Error fetching REWARD balance: ${error.message}`);
+    }
+    
+    // 3. Get Virtual Account REWARD balance from Supabase
+    // Sum ALL REWARD balances across ALL users in the guild (not just Community Fund wallet user)
+    let virtualAccountRewardBalance = '0';
+    try {
+      // Get all virtual accounts with balances for this guild
+      const allAccounts = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
+      
+      // Sum REWARD balances across all accounts
+      // Check both identifier (REWARD-cf6eac) and ticker (REWARD) for backward compatibility
+      const rewardTicker = REWARD_IDENTIFIER.split('-')[0]; // Extract "REWARD" from "REWARD-cf6eac"
+      let totalRewardBalance = new BigNumber('0');
+      
+      for (const account of allAccounts) {
+        const balances = account.balances || {};
+        let accountRewardBalance = new BigNumber('0');
+        
+        // Check for full identifier first (preferred) - case-insensitive match
+        for (const [tokenKey, balance] of Object.entries(balances)) {
+          if (tokenKey.toLowerCase() === REWARD_IDENTIFIER.toLowerCase()) {
+            accountRewardBalance = accountRewardBalance.plus(new BigNumber(balance || '0'));
+            break; // Found identifier match, use it and skip ticker check
+          }
+        }
+        
+        // If no identifier match found, check for ticker-only key (backward compatibility)
+        if (accountRewardBalance.isZero() && balances[rewardTicker]) {
+          accountRewardBalance = accountRewardBalance.plus(new BigNumber(balances[rewardTicker] || '0'));
+        }
+        
+        totalRewardBalance = totalRewardBalance.plus(accountRewardBalance);
+      }
+      
+      virtualAccountRewardBalance = totalRewardBalance.toString();
+      console.log(`[BALANCE-CHECK] Total Virtual Account REWARD balance across ${allAccounts.length} accounts: ${virtualAccountRewardBalance}`);
+    } catch (error) {
+      console.error('[BALANCE-CHECK] Error fetching Virtual Account REWARD balance:', error.message);
+      // Don't add to errors, as this is optional
+    }
+    
+    // 4. Get House Balance REWARD (betting + auction + lottery PNL)
+    // House balances represent funds locked in the house system and shouldn't be available for withdrawals
+    let houseBalanceRewardTotal = '0';
+    try {
+      const houseBalanceData = await getAllHouseBalances(guildId);
+      const rewardTicker = REWARD_IDENTIFIER.split('-')[0]; // Extract "REWARD" from "REWARD-cf6eac"
+      
+      // Aggregate house balances similar to house-balance command
+      const aggregatedBalances = {
+        bettingPNL: {},
+        auctionPNL: {},
+        lotteryPNL: {}
+      };
+      
+      // Aggregate PNL from all token records
+      for (const [tokenIdentifier, tokenData] of Object.entries(houseBalanceData || {})) {
+        // Merge betting PNL
+        if (tokenData.bettingPNL) {
+          for (const [token, amount] of Object.entries(tokenData.bettingPNL)) {
+            if (!aggregatedBalances.bettingPNL[token]) {
+              aggregatedBalances.bettingPNL[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.bettingPNL[token] || '0');
+            aggregatedBalances.bettingPNL[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge auction PNL
+        if (tokenData.auctionPNL) {
+          for (const [token, amount] of Object.entries(tokenData.auctionPNL)) {
+            if (!aggregatedBalances.auctionPNL[token]) {
+              aggregatedBalances.auctionPNL[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.auctionPNL[token] || '0');
+            aggregatedBalances.auctionPNL[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge lottery PNL
+        if (tokenData.lotteryPNL) {
+          for (const [token, amount] of Object.entries(tokenData.lotteryPNL)) {
+            if (!aggregatedBalances.lotteryPNL[token]) {
+              aggregatedBalances.lotteryPNL[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotteryPNL[token] || '0');
+            aggregatedBalances.lotteryPNL[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+      }
+      
+      // Calculate total house balance for REWARD
+      // Check both identifier and ticker (for backward compatibility)
+      const bettingPNLId = aggregatedBalances.bettingPNL[REWARD_IDENTIFIER] || '0';
+      const bettingPNLTicker = aggregatedBalances.bettingPNL[rewardTicker] || '0';
+      const bettingPNL = new BigNumber(bettingPNLId).plus(new BigNumber(bettingPNLTicker));
+      
+      const auctionPNLId = aggregatedBalances.auctionPNL[REWARD_IDENTIFIER] || '0';
+      const auctionPNLTicker = aggregatedBalances.auctionPNL[rewardTicker] || '0';
+      const auctionPNL = new BigNumber(auctionPNLId).plus(new BigNumber(auctionPNLTicker));
+      
+      const lotteryPNLId = aggregatedBalances.lotteryPNL[REWARD_IDENTIFIER] || '0';
+      const lotteryPNLTicker = aggregatedBalances.lotteryPNL[rewardTicker] || '0';
+      const lotteryPNL = new BigNumber(lotteryPNLId).plus(new BigNumber(lotteryPNLTicker));
+      
+      // Sum all PNL (this is the total house balance)
+      const totalHousePNL = bettingPNL.plus(auctionPNL).plus(lotteryPNL);
+      
+      // Convert from wei to human-readable format
+      houseBalanceRewardTotal = totalHousePNL.dividedBy(new BigNumber(10).pow(rewardDecimals)).toString();
+      
+      console.log(`[BALANCE-CHECK] House Balance REWARD: ${houseBalanceRewardTotal} (Betting: ${bettingPNL.dividedBy(new BigNumber(10).pow(rewardDecimals)).toString()}, Auction: ${auctionPNL.dividedBy(new BigNumber(10).pow(rewardDecimals)).toString()}, Lottery: ${lotteryPNL.dividedBy(new BigNumber(10).pow(rewardDecimals)).toString()})`);
+    } catch (error) {
+      console.error('[BALANCE-CHECK] Error fetching House Balance REWARD:', error.message);
+      // Don't add to errors, continue with 0 house balance
+    }
+    
+    // 5. Calculate available REWARD (on-chain minus virtual account minus house balance)
+    const virtualAccountRewardBN = new BigNumber(virtualAccountRewardBalance || '0');
+    const houseBalanceRewardBN = new BigNumber(houseBalanceRewardTotal || '0');
+    const onChainRewardBN = new BigNumber(rewardBalanceHuman);
+    const availableRewardBN = onChainRewardBN.minus(virtualAccountRewardBN).minus(houseBalanceRewardBN);
+    // Ensure we don't return negative values
+    const availableRewardHuman = availableRewardBN.isGreaterThan(0) ? availableRewardBN.toString() : '0';
+    
+    // 6. Calculate required REWARD based on usage fee
+    let requiredRewardHuman = '0';
+    if (rewardPriceUsd > 0) {
+      const requiredRewardUsd = USAGE_FEE_USD * numberOfTransfers;
+      requiredRewardHuman = new BigNumber(requiredRewardUsd).dividedBy(rewardPriceUsd).toString();
+    } else {
+      errors.push('REWARD token price not available, cannot calculate required amount.');
+    }
+    
+    // 7. Check if balances are sufficient
+    const egldSufficient = new BigNumber(egldBalanceWei).isGreaterThanOrEqualTo(new BigNumber(requiredEgldWei));
+    const rewardSufficient = new BigNumber(availableRewardHuman).isGreaterThanOrEqualTo(new BigNumber(requiredRewardHuman));
+    
+    if (!egldSufficient) {
+      errors.push(`Insufficient EGLD: Have ${egldBalanceHuman} EGLD, need ${requiredEgld} EGLD (${numberOfTransfers} transfer(s) × ${EGLD_PER_TX} EGLD)`);
+    }
+    
+    if (!rewardSufficient) {
+      errors.push(`Insufficient REWARD: Have ${availableRewardHuman} REWARD available (${rewardBalanceHuman} on-chain - ${virtualAccountRewardBalance} in Virtual Account - ${houseBalanceRewardTotal} in House Balance), need ${requiredRewardHuman} REWARD (${numberOfTransfers} transfer(s) × $${USAGE_FEE_USD} ÷ $${rewardPriceUsd.toFixed(8)} per REWARD)`);
+    }
+    
+    return {
+      sufficient: egldSufficient && rewardSufficient,
+      walletAddress: walletAddress,
+      egldBalance: egldBalanceHuman,
+      rewardBalanceOnChain: rewardBalanceHuman,
+      rewardBalanceVirtualAccount: virtualAccountRewardBalance,
+      rewardBalanceHouseBalance: houseBalanceRewardTotal,
+      rewardBalanceAvailable: availableRewardHuman,
+      requiredEgld: requiredEgld.toString(),
+      requiredReward: requiredRewardHuman,
+      rewardPriceUsd: rewardPriceUsd,
+      numberOfTransfers: numberOfTransfers,
+      errors: errors
+    };
+  } catch (error) {
+    console.error('[BALANCE-CHECK] Error checking Community Fund balances:', error);
+    return {
+      sufficient: false,
+      errors: [`Error checking balances: ${error.message}`]
+    };
   }
 }
 
-// Get user wallets for a specific server
-function getUserWallets(guildId) {
-  initializeServerData(guildId);
-  return serverData[guildId].userWallets;
-}
-
-// Get projects for a specific server
-function getProjects(guildId) {
-  initializeServerData(guildId);
-  return serverData[guildId].projects;
-}
-
-// Get RPS challenges for a specific server (using rps-games.json)
-function getRPSChallenges(guildId) {
-  if (!rpsGamesData[guildId]) {
-    rpsGamesData[guildId] = {};
-    saveRpsGamesData();
+// Helper function to get project logo URL for DM notifications
+// For admin-controlled projects: returns their project_logo_url
+// For Community Fund: returns admin project logo (if available), then Community Fund QR logo, then default
+async function getProjectLogoUrl(guildId, projectName) {
+  try {
+    const projects = await getProjects(guildId);
+    
+    // First, try to get the project by the provided name
+    let project = projects[projectName];
+    
+    // If this is an admin-controlled project (not Community Fund) and has a logo, use it
+    if (project && project.projectLogoUrl && projectName !== 'Community Fund') {
+      return project.projectLogoUrl;
+    }
+    
+    // For Community Fund or if the requested project has no logo:
+    // 1. Try to find any admin-controlled project (not "Community Fund") with a logo
+    //    This identifies which guild/project the notification is from
+    let adminProjectLogo = null;
+    for (const [name, proj] of Object.entries(projects)) {
+      if (name !== 'Community Fund' && proj.projectLogoUrl) {
+        adminProjectLogo = proj.projectLogoUrl;
+        console.log(`[HELPER] Using admin project logo: ${name} for guild ${guildId}`);
+        break;
+      }
+    }
+    
+    if (adminProjectLogo) {
+      return adminProjectLogo;
+    }
+    
+    // 2. If no admin project logo, try Community Fund QR logo
+    if (projectName === 'Community Fund') {
+      try {
+        const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+        const communityFundProjectName = getCommunityFundProjectName();
+        const qrLogoUrl = communityFundQRData?.[communityFundProjectName];
+        
+        if (qrLogoUrl) {
+          console.log(`[HELPER] Using Community Fund QR logo for guild ${guildId}`);
+          return qrLogoUrl;
+        }
+      } catch (qrError) {
+        console.error('[HELPER] Error getting Community Fund QR logo:', qrError.message);
+      }
+    }
+    
+    // 3. Default thumbnail if no logo found
+    return 'https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif';
+  } catch (error) {
+    console.error('[HELPER] Error getting project logo URL:', error.message);
+    return 'https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif';
   }
-  return rpsGamesData[guildId];
+}
+
+// Helper function to get last competition
+async function getLastCompetition(guildId) {
+  try {
+    const settings = await dbServerData.getGuildSettings(guildId);
+    return settings?.lastCompetition || null;
+  } catch (error) {
+    console.error(`[DB] Error getting last competition:`, error.message);
+    return null;
+  }
+}
+
+// Mass refund function - refunds all virtual account balances to users' wallets
+async function processMassRefund(guildId, communityFundProject, progressCallback = null) {
+  try {
+    console.log(`[MASS-REFUND] Starting mass refund for guild ${guildId} using project ${communityFundProject}`);
+    
+    // Get all virtual accounts with balances
+    const accountsWithBalances = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
+    
+    if (accountsWithBalances.length === 0) {
+      console.log(`[MASS-REFUND] No accounts with balances found`);
+      return {
+        success: true,
+        totalAccounts: 0,
+        successfulRefunds: 0,
+        failedRefunds: 0,
+        results: []
+      };
+    }
+    
+    console.log(`[MASS-REFUND] Found ${accountsWithBalances.length} accounts with balances`);
+    
+    // Get all user wallets
+    const userWallets = await getUserWallets(guildId);
+    
+    // Prepare refund queue
+    const refundQueue = [];
+    for (const account of accountsWithBalances) {
+      const userWallet = userWallets[account.userId];
+      if (!userWallet || !userWallet.startsWith('erd1') || userWallet.length !== 62) {
+        console.log(`[MASS-REFUND] Skipping user ${account.userId} - invalid or missing wallet`);
+        continue;
+      }
+      
+      // Add each token balance as a separate refund
+      for (const [tokenTicker, balance] of Object.entries(account.balances)) {
+        const balanceBN = new BigNumber(balance);
+        if (balanceBN.isGreaterThan(0)) {
+          refundQueue.push({
+            userId: account.userId,
+            username: account.username || `User ${account.userId}`,
+            wallet: userWallet,
+            tokenTicker: tokenTicker,
+            amount: balance,
+            amountBN: balanceBN
+          });
+        }
+      }
+    }
+    
+    console.log(`[MASS-REFUND] Prepared ${refundQueue.length} refund transactions`);
+    
+    if (progressCallback) {
+      await progressCallback({
+        stage: 'prepared',
+        total: refundQueue.length,
+        message: `Prepared ${refundQueue.length} refund transactions`
+      });
+    }
+    
+    // Process refunds one by one
+    const results = [];
+    let successfulRefunds = 0;
+    let failedRefunds = 0;
+    
+    for (let i = 0; i < refundQueue.length; i++) {
+      const refund = refundQueue[i];
+      const progress = i + 1;
+      
+      console.log(`[MASS-REFUND] Processing refund ${progress}/${refundQueue.length}: ${refund.amount} ${refund.tokenTicker} to ${refund.username} (${refund.wallet})`);
+      
+      if (progressCallback) {
+        await progressCallback({
+          stage: 'processing',
+          current: progress,
+          total: refundQueue.length,
+          currentRefund: refund,
+          message: `Processing refund ${progress}/${refundQueue.length}: ${refund.amount} ${refund.tokenTicker} to ${refund.username}`
+        });
+      }
+      
+      try {
+        // Get token decimals
+        const storedDecimals = await getStoredTokenDecimals(guildId, refund.tokenTicker);
+        if (storedDecimals === null) {
+          throw new Error(`Token metadata missing for ${refund.tokenTicker}`);
+        }
+        
+        // Resolve token identifier from ticker/identifier BEFORE transfer
+        const tokenIdentifier = await resolveTokenIdentifier(guildId, refund.tokenTicker);
+        
+        // Validate identifier format
+        const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+        if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+          throw new Error(`Invalid token identifier for refund: "${refund.tokenTicker}" -> "${tokenIdentifier}". Must be full identifier format.`);
+        }
+        
+        // Perform blockchain transfer
+        const transferResult = await transferESDTFromCommunityFund(
+          refund.wallet,
+          tokenIdentifier,
+          refund.amount,
+          communityFundProject,
+          guildId
+        );
+        
+        if (transferResult.success && transferResult.txHash) {
+          
+          // Deduct from virtual account (using identifier)
+          const deductResult = await virtualAccounts.deductFundsFromAccount(
+            guildId,
+            refund.userId,
+            tokenIdentifier,
+            refund.amount,
+            'mass_refund',
+            `Mass refund - server deletion`
+          );
+          
+          if (deductResult.success) {
+            successfulRefunds++;
+            results.push({
+              userId: refund.userId,
+              username: refund.username,
+              wallet: refund.wallet,
+              tokenTicker: refund.tokenTicker,
+              amount: refund.amount,
+              txHash: transferResult.txHash,
+              success: true
+            });
+            console.log(`[MASS-REFUND] ✅ Success: ${refund.amount} ${refund.tokenTicker} refunded to ${refund.username} (tx: ${transferResult.txHash})`);
+          } else {
+            failedRefunds++;
+            results.push({
+              userId: refund.userId,
+              username: refund.username,
+              wallet: refund.wallet,
+              tokenTicker: refund.tokenTicker,
+              amount: refund.amount,
+              error: `Failed to update virtual account: ${deductResult.error}`,
+              success: false
+            });
+            console.error(`[MASS-REFUND] ❌ Failed: Could not update virtual account for ${refund.username}`);
+          }
+        } else {
+          failedRefunds++;
+          results.push({
+            userId: refund.userId,
+            username: refund.username,
+            wallet: refund.wallet,
+            tokenTicker: refund.tokenTicker,
+            amount: refund.amount,
+            error: transferResult.errorMessage || 'Transaction failed',
+            success: false
+          });
+          console.error(`[MASS-REFUND] ❌ Failed: Transaction failed for ${refund.username} - ${transferResult.errorMessage || 'Unknown error'}`);
+        }
+        
+        // Small delay between transactions to avoid rate limiting
+        if (i < refundQueue.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
+        }
+      } catch (error) {
+        failedRefunds++;
+        results.push({
+          userId: refund.userId,
+          username: refund.username,
+          wallet: refund.wallet,
+          tokenTicker: refund.tokenTicker,
+          amount: refund.amount,
+          error: error.message,
+          success: false
+        });
+        console.error(`[MASS-REFUND] ❌ Error processing refund for ${refund.username}:`, error.message);
+      }
+    }
+    
+    console.log(`[MASS-REFUND] Completed: ${successfulRefunds} successful, ${failedRefunds} failed out of ${refundQueue.length} total`);
+    
+    return {
+      success: failedRefunds === 0,
+      totalAccounts: accountsWithBalances.length,
+      totalRefunds: refundQueue.length,
+      successfulRefunds: successfulRefunds,
+      failedRefunds: failedRefunds,
+      results: results
+    };
+  } catch (error) {
+    console.error(`[MASS-REFUND] Error in mass refund process:`, error.message);
+    throw error;
+  }
+}
+
+// Helper function to get house balance
+async function getHouseBalance(guildId, tokenIdentifier) {
+  try {
+    return await dbServerData.getHouseBalance(guildId, tokenIdentifier);
+  } catch (error) {
+    console.error(`[DB] Error getting house balance:`, error.message);
+    return null;
+  }
+}
+
+// Helper function to get all house balances for a guild
+async function getAllHouseBalances(guildId) {
+  try {
+    return await dbServerData.getAllHouseBalances(guildId);
+  } catch (error) {
+    console.error(`[DB] Error getting all house balances:`, error.message);
+    return {};
+  }
+}
+
+// Get user wallets for a specific server (using database)
+async function getUserWallets(guildId) {
+  return await dbServerData.getUserWallets(guildId);
+}
+
+// Get projects for a specific server (using database)
+async function getProjects(guildId) {
+  return await dbServerData.getAllProjects(guildId);
+}
+
+// Get RPS challenges for a specific server (using database)
+async function getRPSChallenges(guildId) {
+  return await dbRpsGames.getRpsGames(guildId);
 }
 
 // Generate a unique challenge ID
@@ -178,56 +712,63 @@ async function cleanupExpiredChallenges() {
   const now = Date.now();
   let changed = false;
   
-  for (const guildId in rpsGamesData) {
-    const challenges = rpsGamesData[guildId];
-    const expiredChallengeIds = [];
+  try {
+    // Get all guilds
+    const allGuilds = await client.guilds.fetch();
     
-    for (const [challengeId, challenge] of Object.entries(challenges)) {
-      if (challenge.status === 'waiting' && now > challenge.expiresAt) {
-        // Mark as expired
-        challenge.status = 'expired';
-        changed = true;
+    for (const [guildId, guild] of allGuilds) {
+      try {
+        // Get all games (both waiting and active) that might be expired
+        const allGames = await dbRpsGames.getGamesByGuild(guildId);
         
-        // Refund challenger to virtual account
-        try {
-          if (challenge.humanAmount && challenge.token) {
-            const memo = `RPS refund: challenge expired (${challengeId})`;
-            const refundResult = virtualAccounts.addFundsToAccount(
-              guildId,
-              challenge.challengerId,
-              challenge.token,
-              challenge.humanAmount,
-              null, // No transaction hash for virtual refund
-              'rps_refund',
-              null // Username will be updated when user runs commands
-            );
+        for (const [gameId, challenge] of Object.entries(allGames)) {
+          // Check if challenge is expired (waiting or active status)
+          if ((challenge.status === 'waiting' || challenge.status === 'active') && 
+              challenge.expiresAt && 
+              now > challenge.expiresAt) {
             
-            if (refundResult) {
-              console.log(`[RPS CLEANUP] Refunded challenger for expired challenge ${challengeId}: ${challenge.humanAmount} ${challenge.token}`);
-              
-              // Send notifications for successful refund
-              await sendExpiredChallengeNotifications(guildId, challengeId, challenge);
+            // Mark as expired in database
+            await dbRpsGames.updateGame(guildId, gameId, { status: 'expired' });
+            changed = true;
+            
+            // Refund challenger to virtual account
+            try {
+              if (challenge.humanAmount && challenge.token) {
+                const memo = `RPS refund: challenge expired (${gameId})`;
+                const refundResult = await virtualAccounts.addFundsToAccount(
+                  guildId,
+                  challenge.challengerId,
+                  challenge.token,
+                  challenge.humanAmount,
+                  null, // No transaction hash for virtual refund
+                  'rps_refund',
+                  null // Username will be updated when user runs commands
+                );
+                
+                if (refundResult && refundResult.success) {
+                  console.log(`[RPS CLEANUP] Refunded challenger for expired challenge ${gameId}: ${challenge.humanAmount} ${challenge.token}`);
+                  
+                  // Send notifications for successful refund
+                  await sendExpiredChallengeNotifications(guildId, gameId, challenge);
+                } else {
+                  console.error(`[RPS CLEANUP] Refund failed for challenge ${gameId}:`, refundResult?.error || 'Unknown error');
+                }
+              }
+            } catch (refundError) {
+              console.error(`[RPS CLEANUP] Failed to refund challenger for expired challenge ${gameId}:`, refundError.message);
             }
           }
-        } catch (refundError) {
-          console.error(`[RPS CLEANUP] Failed to refund challenger for expired challenge ${challengeId}:`, refundError.message);
         }
-        
-        // Mark for cleanup
-        expiredChallengeIds.push(challengeId);
+      } catch (error) {
+        console.error(`[RPS CLEANUP] Error processing guild ${guildId}:`, error.message);
       }
     }
     
-    // Remove expired challenges
-    for (const challengeId of expiredChallengeIds) {
-      delete challenges[challengeId];
-      changed = true;
+    if (changed) {
+      console.log(`[RPS CLEANUP] Processed expired challenges and refunds`);
     }
-  }
-  
-  if (changed) {
-    saveRpsGamesData();
-    console.log(`[RPS CLEANUP] Processed expired challenges and refunds`);
+  } catch (error) {
+    console.error('[RPS CLEANUP] Error during cleanup:', error.message);
   }
 }
 
@@ -240,11 +781,20 @@ async function sendExpiredChallengeNotifications(guildId, challengeId, challenge
       return;
     }
 
-    // Get the original channel where the challenge was created
-    const originalChannel = guild.channels.cache.get(challenge.channelId);
+    // Try to find a channel to send notification (challenges don't store channelId)
+    // Try to find the first text channel where bot can send messages
+    let originalChannel = null;
+    if (challenge.channelId) {
+      originalChannel = guild.channels.cache.get(challenge.channelId);
+    }
+    
+    // If no channelId or channel not found, try to find any text channel
     if (!originalChannel) {
-      console.error(`[RPS CLEANUP] Original channel not found: ${challenge.channelId}`);
-      return;
+      originalChannel = guild.channels.cache.find((c) => 
+        c.isTextBased() && 
+        c.viewable && 
+        c.permissionsFor(guild.members.me)?.has([PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.EmbedLinks])
+      );
     }
 
     // Create refund notification embed
@@ -263,31 +813,39 @@ async function sendExpiredChallengeNotifications(guildId, challengeId, challenge
       .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
       .setTimestamp();
 
-    // Send channel announcement
-    try {
-      const botMember = guild.members.cache.get(client.user.id);
-      const hasChannelPermissions = botMember?.permissionsIn(originalChannel).has([
-        PermissionsBitField.Flags.SendMessages,
-        PermissionsBitField.Flags.EmbedLinks
-      ]);
+    // Send channel announcement (if channel found)
+    if (originalChannel) {
+      try {
+        const botMember = guild.members.cache.get(client.user.id);
+        const hasChannelPermissions = botMember?.permissionsIn(originalChannel).has([
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks
+        ]);
 
-      if (hasChannelPermissions) {
-        await originalChannel.send({ 
-          content: `🕐 **RPS Challenge Timeout** 🕐`,
-          embeds: [refundEmbed]
-        });
-        console.log(`[RPS CLEANUP] Sent channel notification for expired challenge ${challengeId}`);
-      } else {
-        console.warn(`[RPS CLEANUP] Bot lacks permissions to send messages in channel ${originalChannel.id}`);
+        if (hasChannelPermissions) {
+          await originalChannel.send({ 
+            content: `🕐 **RPS Challenge Timeout** 🕐`,
+            embeds: [refundEmbed]
+          });
+          console.log(`[RPS CLEANUP] Sent channel notification for expired challenge ${challengeId}`);
+        } else {
+          console.warn(`[RPS CLEANUP] Bot lacks permissions to send messages in channel ${originalChannel.id}`);
+        }
+      } catch (channelError) {
+        console.error(`[RPS CLEANUP] Failed to send channel notification:`, channelError.message);
       }
-    } catch (channelError) {
-      console.error(`[RPS CLEANUP] Failed to send channel notification:`, channelError.message);
+    } else {
+      console.warn(`[RPS CLEANUP] No suitable channel found to send notification for expired challenge ${challengeId}`);
     }
 
     // Send DM to challenger
     try {
       const challenger = await client.users.fetch(challenge.challengerId);
       if (challenger) {
+        // Get Community Fund project logo for RPS refund notification
+        const communityFundProjectName = getCommunityFundProjectName();
+        const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
+        
         const dmEmbed = new EmbedBuilder()
           .setTitle('💰 RPS Challenge Refund')
           .setDescription(`Your RPS challenge has been refunded due to inactivity.`)
@@ -299,7 +857,7 @@ async function sendExpiredChallengeNotifications(guildId, challengeId, challenge
             { name: 'Refund Status', value: '✅ Successfully refunded to your virtual account', inline: false }
           ])
           .setColor(0x4d55dc)
-          .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
+          .setThumbnail(projectLogoUrl)
           .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
           .setTimestamp();
 
@@ -315,43 +873,7 @@ async function sendExpiredChallengeNotifications(guildId, challengeId, challenge
   }
 }
 
-// Clean up expired tx hashes (older than 24h)
-function cleanupExpiredTxHashes() {
-  const now = Date.now();
-  const expireMs = 24 * 60 * 60 * 1000; // 24 hours
-  for (const guildId in usedTxHashesData) {
-    const hashes = usedTxHashesData[guildId];
-    if (hashes) {
-      for (const txHash in hashes) {
-        if (now - hashes[txHash].usedAt > expireMs) {
-          delete hashes[txHash];
-        }
-      }
-    }
-  }
-  saveUsedTxHashesData();
-}
-
-// Clean up FINISHED football matches (once a day)
-function cleanupFinishedMatches() {
-  try {
-    let removedCount = 0;
-    
-    for (const [matchId, match] of Object.entries(footballMatchesData)) {
-      if (match.status === 'FINISHED') {
-        delete footballMatchesData[matchId];
-        removedCount++;
-      }
-    }
-    
-    if (removedCount > 0) {
-      saveFootballMatchesData();
-      console.log(`[FOOTBALL CLEANUP] Removed ${removedCount} FINISHED matches from matches.json`);
-    }
-  } catch (error) {
-    console.error('[FOOTBALL CLEANUP] Error cleaning up finished matches:', error.message);
-  }
-}
+// Cleanup is handled by database - matches with status FINISHED remain in database for historical records
 
 // Verify transaction details from MultiversX explorer API
 async function verifyTransaction(txHash, expectedRecipient, expectedAmount, expectedToken, expectedSender) {
@@ -396,19 +918,9 @@ async function verifyTransaction(txHash, expectedRecipient, expectedAmount, expe
   }
 }
 
-// Load data on startup
-console.log('📂 Loading server data...');
-loadServerData();
-console.log('🎮 Loading RPS games data...');
-loadRpsGamesData();
-console.log('🔗 Loading used transaction hashes...');
-loadUsedTxHashesData();
-console.log('⚽ Loading football games data...');
-loadFootballData();
-console.log('🔨 Loading auctions data...');
-loadAuctionsData();
-console.log('💰 Loading virtual accounts data...');
-virtualAccounts.loadVirtualAccountsData();
+// Load data on startup (now using database - no file loading needed)
+console.log('📂 Database connection ready (Supabase)');
+console.log('✅ All data will be loaded from database on demand');
 
 // Helper functions
 function isValidPemFormat(pemContent) {
@@ -450,7 +962,7 @@ function debugUserInAutocomplete(userId, guildId, commandName) {
 // Get user wallet address for a specific server
 async function getUserWallet(userId, guildId) {
   try {
-    const userWallets = getUserWallets(guildId);
+    const userWallets = await getUserWallets(guildId);
     if (userWallets[userId]) {
       return userWallets[userId];
     }
@@ -469,7 +981,7 @@ async function getUserByWallet(walletAddress, guildId) {
     }
     
     const normalizedWallet = walletAddress.toLowerCase();
-    const userWallets = getUserWallets(guildId);
+    const userWallets = await getUserWallets(guildId);
     
     for (const [userId, userWallet] of Object.entries(userWallets)) {
       if (userWallet.toLowerCase() === normalizedWallet) {
@@ -491,13 +1003,20 @@ async function getUserByWallet(walletAddress, guildId) {
 }
 
 // Transfer ESDT tokens using project wallet
-async function transferESDT(recipientWallet, tokenTicker, amount, projectName, guildId) {
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") - required for API
+async function transferESDT(recipientWallet, tokenIdentifier, amount, projectName, guildId) {
   try {
     if (!API_BASE_URL || !API_TOKEN) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
     }
 
-    const projects = getProjects(guildId);
+    // Validate token identifier format
+    const identifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!identifierRegex.test(tokenIdentifier)) {
+      throw new Error(`Invalid token identifier: "${tokenIdentifier}". Must be full identifier format: TICKER-6hexchars (e.g., "USDC-c76f1f").`);
+    }
+
+    const projects = await getProjects(guildId);
     const project = projects[projectName];
     
     if (!project) {
@@ -508,9 +1027,22 @@ async function transferESDT(recipientWallet, tokenTicker, amount, projectName, g
       throw new Error(`Project "${projectName}" has no wallet configured.`);
     }
 
-    if (!project.supportedTokens || !project.supportedTokens.includes(tokenTicker)) {
-      const supportedTokens = project.supportedTokens || [];
-      throw new Error(`Token "${tokenTicker}" is not supported by project "${projectName}". Supported tokens: ${supportedTokens.join(', ') || 'None configured'}`);
+    // Extract ticker from identifier for supported tokens check
+    const tokenTicker = tokenIdentifier.split('-')[0];
+    
+    // Normalize supported tokens list - extract tickers from identifiers if needed
+    const supportedTokens = Array.isArray(project.supportedTokens) 
+      ? project.supportedTokens.map(t => t.includes('-') ? t.split('-')[0] : t)
+      : (project.supportedTokens || '').split(',').map(t => {
+          const trimmed = t.trim();
+          return trimmed.includes('-') ? trimmed.split('-')[0] : trimmed;
+        });
+    
+    if (!supportedTokens.length || !supportedTokens.includes(tokenTicker)) {
+      const displayTokens = Array.isArray(project.supportedTokens) 
+        ? project.supportedTokens.join(', ')
+        : (project.supportedTokens || 'None configured');
+      throw new Error(`Token "${tokenTicker}" is not supported by project "${projectName}". Supported tokens: ${displayTokens}`);
     }
     
     // Restore PEM line breaks if needed
@@ -524,19 +1056,42 @@ async function transferESDT(recipientWallet, tokenTicker, amount, projectName, g
         .replace(/ ([A-Za-z0-9+/=]+)-----END/, '\n$1-----END'); // Final line before footer
     }
 
+    // Ensure amount is a number (API expects human-readable amount as number)
+    const amountNum = typeof amount === 'number' ? amount : parseFloat(amount);
+    if (isNaN(amountNum)) {
+      throw new Error(`Invalid amount format: "${amount}". Must be a valid number.`);
+    }
+    
+    // Ensure tokenIdentifier is a plain string (remove any JSON stringification or quotes)
+    let cleanTokenIdentifier = typeof tokenIdentifier === 'string' ? tokenIdentifier.trim() : String(tokenIdentifier).trim();
+    cleanTokenIdentifier = cleanTokenIdentifier.replace(/^["']+|["']+$/g, ''); // Remove surrounding quotes
+    cleanTokenIdentifier = cleanTokenIdentifier.replace(/\\"/g, '"'); // Remove JSON escape sequences
+    
+    // Validate cleaned identifier format (reuse the regex from above)
+    if (!identifierRegex.test(cleanTokenIdentifier)) {
+      throw new Error(`Invalid token identifier format after cleaning: "${cleanTokenIdentifier}". Expected format: TICKER-6hexchars`);
+    }
+    
     const requestBody = {
       recipient: recipientWallet,
-      amount: amount,
-      tokenTicker: tokenTicker,
+      amount: amountNum, // Human-readable amount as number
+      tokenTicker: cleanTokenIdentifier, // API expects field name "tokenTicker" but value should be full identifier
       walletPem: pemToSend,
     };
     
+    // Old working code: API_BASE_URL was base URL, appended /execute/esdtTransfer
+    // This matches the old implementation that was working
     const fullEndpoint = API_BASE_URL.endsWith('/') 
       ? `${API_BASE_URL}execute/esdtTransfer` 
       : `${API_BASE_URL}/execute/esdtTransfer`;
     
-    console.log(`Transferring ${amount} ${tokenTicker} tokens to: ${recipientWallet} using project: ${projectName}`);
-    console.log(`API endpoint: ${fullEndpoint}`);
+    // Log the exact JSON payload for debugging
+    const payloadForLogging = {
+      recipient: recipientWallet,
+      amount: amountNum,
+      tokenTicker: cleanTokenIdentifier, // Field name is tokenTicker, but value is full identifier
+      walletPem: '[REDACTED]'
+    };
     
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000);
@@ -628,22 +1183,39 @@ async function transferESDT(recipientWallet, tokenTicker, amount, projectName, g
 }
 
 // Transfer ESDT from Community Fund (without supported tokens restriction)
-async function transferESDTFromCommunityFund(recipientWallet, tokenTicker, amount, projectName, guildId) {
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") - required for API
+async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, amount, projectName, guildId) {
   try {
     if (!API_BASE_URL || !API_TOKEN) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
     }
 
-    const projects = getProjects(guildId);
+    // Validate token identifier format
+    const identifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!identifierRegex.test(tokenIdentifier)) {
+      throw new Error(`Invalid token identifier: "${tokenIdentifier}". Must be full identifier format: TICKER-6hexchars (e.g., "USDC-c76f1f").`);
+    }
+
+    const projects = await getProjects(guildId);
     const project = projects[projectName];
     
     if (!project) {
       throw new Error(`Project "${projectName}" not found. Use /register-project to add it.`);
     }
 
-    if (!project.walletPem) {
-      throw new Error(`Project "${projectName}" has no wallet configured.`);
+    if (!project.walletPem || project.walletPem.trim().length === 0) {
+      console.error(`[WITHDRAW] Project "${projectName}" has empty PEM. Wallet address: ${project.walletAddress}`);
+      throw new Error(`Project "${projectName}" has no wallet configured or PEM is empty. Please reconfigure the Community Fund using /set-community-fund.`);
     }
+    
+    // Validate PEM format
+    if (!project.walletPem.includes('BEGIN') || !project.walletPem.includes('END')) {
+      console.error(`[WITHDRAW] Project "${projectName}" has invalid PEM format. PEM length: ${project.walletPem.length} characters`);
+      throw new Error(`Project "${projectName}" has an invalid PEM format. Please reconfigure the Community Fund using /set-community-fund.`);
+    }
+    
+    // Log PEM info for debugging (no sensitive content)
+    console.log(`[WITHDRAW] Using PEM for project "${projectName}". PEM length: ${project.walletPem.length} characters`);
     
     // Restore PEM line breaks if needed
     let pemToSend = project.walletPem;
@@ -655,20 +1227,49 @@ async function transferESDTFromCommunityFund(recipientWallet, tokenTicker, amoun
         .replace(/ ([A-Za-z0-9+/=]{64})/g, '\n$1') // Break base64 into lines of 64 chars
         .replace(/ ([A-Za-z0-9+/=]+)-----END/, '\n$1-----END'); // Final line before footer
     }
+    
+    // Validate PEM after processing
+    if (!pemToSend || pemToSend.trim().length === 0) {
+      console.error(`[WITHDRAW] PEM became empty after processing for project "${projectName}"`);
+      throw new Error(`PEM processing failed for project "${projectName}". Please reconfigure the Community Fund.`);
+    }
 
+    // Ensure amount is a number (API expects human-readable amount as number)
+    const amountNum = typeof amount === 'number' ? amount : parseFloat(amount);
+    if (isNaN(amountNum)) {
+      throw new Error(`Invalid amount format: "${amount}". Must be a valid number.`);
+    }
+    
+    // Ensure tokenIdentifier is a plain string (remove any JSON stringification or quotes)
+    let cleanTokenIdentifier = typeof tokenIdentifier === 'string' ? tokenIdentifier.trim() : String(tokenIdentifier).trim();
+    cleanTokenIdentifier = cleanTokenIdentifier.replace(/^["']+|["']+$/g, ''); // Remove surrounding quotes
+    cleanTokenIdentifier = cleanTokenIdentifier.replace(/\\"/g, '"'); // Remove JSON escape sequences
+    
+    // Validate cleaned identifier format (reuse the regex from above)
+    if (!identifierRegex.test(cleanTokenIdentifier)) {
+      throw new Error(`Invalid token identifier format after cleaning: "${cleanTokenIdentifier}". Expected format: TICKER-6hexchars`);
+    }
+    
     const requestBody = {
       recipient: recipientWallet,
-      amount: amount,
-      tokenTicker: tokenTicker,
+      amount: amountNum, // Human-readable amount as number
+      tokenTicker: cleanTokenIdentifier, // API expects field name "tokenTicker" but value should be full identifier
       walletPem: pemToSend,
     };
     
+    // Old working code: API_BASE_URL was base URL, appended /execute/esdtTransfer
+    // This matches the old implementation that was working
     const fullEndpoint = API_BASE_URL.endsWith('/') 
       ? `${API_BASE_URL}execute/esdtTransfer` 
       : `${API_BASE_URL}/execute/esdtTransfer`;
     
-    console.log(`[WITHDRAW] Transferring ${amount} ${tokenTicker} tokens to: ${recipientWallet} using Community Fund: ${projectName}`);
-    console.log(`[WITHDRAW] API endpoint: ${fullEndpoint}`);
+    // Log the exact JSON payload for debugging
+    const payloadForLogging = {
+      recipient: recipientWallet,
+      amount: amountNum,
+      tokenTicker: cleanTokenIdentifier, // Field name is tokenTicker, but value is full identifier
+      walletPem: '[REDACTED]'
+    };
     
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 60000);
@@ -735,9 +1336,9 @@ async function transferESDTFromCommunityFund(recipientWallet, tokenTicker, amoun
       };
       
       if (result.success) {
-        console.log(`[WITHDRAW] Successfully sent ${amount} ${tokenTicker} to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
+        console.log(`[WITHDRAW] Successfully sent ${amount} ${tokenIdentifier} to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
       } else {
-        console.error(`[WITHDRAW] API reported failure for ${tokenTicker} transfer: ${errorMessage || 'Unknown error'}`);
+        console.error(`[WITHDRAW] API reported failure for ${tokenIdentifier} transfer: ${errorMessage || 'Unknown error'}`);
         if (txHash) {
           console.log(`[WITHDRAW] Transaction hash was returned (${txHash}), but transaction failed (status: ${txStatus}).`);
         }
@@ -766,7 +1367,7 @@ async function transferNFT(recipientWallet, tokenIdentifier, tokenNonce, project
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
     }
 
-    const projects = getProjects(guildId);
+    const projects = await getProjects(guildId);
     const project = projects[projectName];
     
     if (!project) {
@@ -928,29 +1529,71 @@ client.on('interactionCreate', async (interaction) => {
 
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       
-      const userWallets = getUserWallets(guildId);
-      
-      // Create backup
-      const backupFileName = `user-wallets-backup-${guildId}-${Date.now()}.json`;
-      if (fs.existsSync('user-wallets.json')) {
-        fs.copyFileSync('user-wallets.json', backupFileName);
-        console.log(`Created backup of user wallets: ${backupFileName}`);
-      }
-      
-      const previousWallets = JSON.parse(JSON.stringify(userWallets));
-      
-      userWallets[interaction.user.id] = wallet;
-      
       try {
-        saveServerData();
+        await dbServerData.setUserWallet(guildId, interaction.user.id, wallet);
+        
+        // Initialize virtual account (this will create it if it doesn't exist)
+        const dbVirtualAccounts = require('./db/virtual-accounts');
+        await dbVirtualAccounts.getUserAccount(guildId, interaction.user.id, interaction.user.username);
+        
         console.log(`Wallet for user ${interaction.user.tag} (${interaction.user.id}) in guild ${guildId} set to: ${wallet}`);
+        
+        // Get Community Fund wallet address and QR code
+        let communityFundAddress = null;
+        let qrCodeUrl = null;
+        try {
+          const projects = await getProjects(guildId);
+          const communityFundProjectName = getCommunityFundProjectName();
+          const communityFundProject = projects[communityFundProjectName];
+          
+          if (communityFundProject && communityFundProject.walletAddress) {
+            communityFundAddress = communityFundProject.walletAddress;
+            
+            // Get QR code if available
+            const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+            qrCodeUrl = communityFundQRData?.[communityFundProjectName] || null;
+          }
+        } catch (error) {
+          console.error(`[SET-WALLET] Error getting Community Fund info:`, error.message);
+          // Continue without Community Fund info if there's an error
+        }
+        
+        const embed = new EmbedBuilder()
+          .setTitle('✅ Wallet Registered Successfully!')
+          .setDescription('Your wallet address has been registered and your virtual account has been set up.')
+          .addFields([
+            { name: 'Wallet Address', value: `\`${wallet}\``, inline: false }
+          ])
+          .setColor('#00FF00')
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        // Add Community Fund address field if available
+        if (communityFundAddress) {
+          embed.addFields([
+            { name: '💰 Community Fund Deposit Address', value: `\`${communityFundAddress}\``, inline: false }
+          ]);
+        }
+        
+        // Add QR code as thumbnail if available
+        if (qrCodeUrl) {
+          embed.setThumbnail(qrCodeUrl);
+        }
+        
+        // Add Next Steps field
+        const nextStepsValue = communityFundAddress 
+          ? `1. Send tokens to the Community Fund address above\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance\` to view your balance`
+          : `1. Send tokens to the Community Fund address\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance\` to view your balance`;
+        
+        embed.addFields([
+          { name: 'Next Steps', value: nextStepsValue, inline: false }
+        ]);
+        
+        await interaction.editReply({ embeds: [embed] });
       } catch (writeError) {
-        userWallets = previousWallets;
-        console.error(`Failed to save user wallets for guild ${guildId}:`, writeError.message);
+        console.error(`Failed to save user wallet for guild ${guildId}:`, writeError.message);
         throw new Error(`Failed to save wallet address: ${writeError.message}`);
       }
-
-      await interaction.editReply({ content: 'Wallet address registered successfully.' });
     } catch (error) {
       console.error(`Error setting wallet for ${interaction.user.tag} in guild ${guildId}:`, error.message);
       
@@ -973,7 +1616,7 @@ client.on('interactionCreate', async (interaction) => {
       const walletAddress = interaction.options.getString('wallet-address');
       const walletPem = interaction.options.getString('wallet-pem');
       const supportedTokensStr = interaction.options.getString('supported-tokens');
-      const qrCodeUrl = interaction.options.getString('qr-code-url');
+      const projectLogoUrl = interaction.options.getString('project-logo-url');
       const userInput = interaction.options.getString('user-input') || '';
 
       // Validate wallet address format
@@ -1000,7 +1643,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const projects = getProjects(guildId);
+      const projects = await getProjects(guildId);
       
       // Check if project already exists
       if (projects[projectName]) {
@@ -1011,17 +1654,16 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      projects[projectName] = {
+      // Save project to database
+      await dbServerData.setProject(guildId, projectName, {
         walletAddress: walletAddress,
         walletPem: walletPem,
         supportedTokens: supportedTokens,
-        qrCodeUrl: qrCodeUrl,
+        projectLogoUrl: projectLogoUrl,
         userInput: userInput,
         registeredBy: interaction.user.id,
         registeredAt: Date.now()
-      };
-
-      saveServerData();
+      });
 
       const embed = new EmbedBuilder()
         .setTitle('Project Registered Successfully')
@@ -1102,10 +1744,11 @@ client.on('interactionCreate', async (interaction) => {
       const walletAddress = interaction.options.getString('wallet-address');
       const walletPem = interaction.options.getString('wallet-pem');
       const supportedTokensStr = interaction.options.getString('supported-tokens');
+      const projectLogoUrl = interaction.options.getString('project-logo-url');
       const qrCodeUrl = interaction.options.getString('qr-code-url');
       const userInput = interaction.options.getString('user-input');
 
-      const projects = getProjects(guildId);
+      const projects = await getProjects(guildId);
       
       if (!projects[projectName]) {
         await interaction.editReply({ content: `Project "${projectName}" not found. Use /register-project to create it first.`, flags: [MessageFlags.Ephemeral] });
@@ -1122,13 +1765,11 @@ client.on('interactionCreate', async (interaction) => {
       let hasChanges = false;
       const changes = [];
 
+      const finalProjectName = newProjectName || projectName;
+      let updatedProject = { ...currentProject };
+      
       // Update project name if provided
       if (newProjectName && newProjectName !== projectName) {
-        projects[newProjectName] = {
-          ...currentProject,
-          registeredAt: Date.now()
-        };
-        delete projects[projectName];
         changes.push(`Project name: "${projectName}" → "${newProjectName}"`);
         hasChanges = true;
       }
@@ -1139,8 +1780,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply({ content: 'Invalid wallet address format. Please provide a valid MultiversX wallet address (erd1...).', flags: [MessageFlags.Ephemeral] });
           return;
         }
-        const targetProject = newProjectName ? projects[newProjectName] : projects[projectName];
-        targetProject.walletAddress = walletAddress;
+        updatedProject.walletAddress = walletAddress;
         changes.push(`Wallet address updated to: ${walletAddress}`);
         hasChanges = true;
       }
@@ -1152,8 +1792,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply({ content: 'Invalid PEM format. Please provide a valid MultiversX wallet PEM file content.', flags: [MessageFlags.Ephemeral] });
           return;
         }
-        const targetProject = newProjectName ? projects[newProjectName] : projects[projectName];
-        targetProject.walletPem = walletPem;
+        updatedProject.walletPem = walletPem;
         changes.push('Wallet PEM updated');
         hasChanges = true;
       }
@@ -1171,26 +1810,91 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         
-        const targetProject = newProjectName ? projects[newProjectName] : projects[projectName];
-        targetProject.supportedTokens = supportedTokens;
+        updatedProject.supportedTokens = supportedTokens;
         changes.push(`Supported tokens updated to: ${supportedTokens.join(', ')}`);
         hasChanges = true;
       }
 
-
-
-      // Update QR code URL if provided
+      // Check if this is a Community Fund project (hardcoded name)
+      const isCommunityFund = projectName === getCommunityFundProjectName();
+      
+      // Block restricted fields for Community Fund projects
+      if (isCommunityFund) {
+        // Block renaming Community Fund project (would break the system)
+        if (newProjectName && newProjectName !== projectName) {
+          await interaction.editReply({ 
+            content: `❌ **Cannot rename Community Fund project.**\n\nThe Community Fund project name is fixed and cannot be changed.\n\n**To change the fund display name:**\nThe fund name is stored separately in guild settings. If you need to change the display name, you would need to delete and recreate the Community Fund.\n\n**Note:** The internal project name must always be "Community Fund" for the system to work correctly.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        // Block wallet address changes (auto-generated, shouldn't be changed)
+        if (walletAddress) {
+          await interaction.editReply({ 
+            content: `❌ **Cannot update wallet address for Community Fund.**\n\nThe Community Fund wallet is auto-generated and cannot be manually changed.\n\n**Why this is blocked:**\n• The wallet is automatically generated by the bot\n• Changing it would break Virtual Accounts tracking\n• The blockchain listener monitors the original wallet address\n\n**To change the wallet:**\nYou must delete the existing Community Fund and create a new one using \`/set-community-fund\`.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        // Block wallet PEM changes (auto-generated, shouldn't be changed)
+        if (walletPem) {
+          await interaction.editReply({ 
+            content: `❌ **Cannot update wallet PEM for Community Fund.**\n\nThe Community Fund wallet PEM is auto-generated and encrypted. It cannot be manually changed.\n\n**Why this is blocked:**\n• The PEM is automatically generated by the bot\n• It's encrypted and stored securely in the database\n• Changing it would break wallet functionality\n\n**To change the wallet:**\nYou must delete the existing Community Fund and create a new one using \`/set-community-fund\`.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        // Block project logo URL (Community Fund uses QR codes instead)
+        if (projectLogoUrl !== null) {
+          await interaction.editReply({ 
+            content: `⚠️ **Project Logo URL cannot be updated for Community Fund projects.**\n\nCommunity Fund projects use QR codes instead. Use the \`qr-code-url\` option to update the Community Fund QR code.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        // Block user input (Community Fund is auto-generated, notes shouldn't be stored in projects table)
+        if (userInput !== null) {
+          await interaction.editReply({ 
+            content: `❌ **Cannot update user input/notes for Community Fund projects.**\n\nThe Community Fund is auto-generated and notes should not be stored in the projects table.\n\n**Why this is blocked:**\n• The Community Fund is automatically generated by the bot\n• Notes are not used for Community Fund projects\n• This field is intended for manually registered projects only`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+      }
+      
+      // Update project logo URL if provided (stored in projects table)
+      // Only allowed for non-Community Fund projects
+      if (projectLogoUrl !== null) {
+        updatedProject.projectLogoUrl = projectLogoUrl;
+        changes.push(`Project logo URL updated: ${projectLogoUrl || 'Removed'}`);
+        hasChanges = true;
+      }
+      
+      // Update QR code URL if provided (stored in community_fund_qr table)
+      // Only allowed for Community Fund projects
       if (qrCodeUrl !== null) {
-        const targetProject = newProjectName ? projects[newProjectName] : projects[projectName];
-        targetProject.qrCodeUrl = qrCodeUrl;
-        changes.push(`QR code URL updated: ${qrCodeUrl || 'Removed'}`);
+        if (!isCommunityFund) {
+          await interaction.editReply({ 
+            content: `⚠️ **QR Code URL can only be updated for Community Fund projects.**\n\nProject "${projectName}" is not the Community Fund.\n\nUse the \`project-logo-url\` option to update the project logo instead.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        // This is the Community Fund project, update the QR code
+        // Use the internal project name "Community Fund" for the QR code lookup
+        await dbServerData.setCommunityFundQR(guildId, getCommunityFundProjectName(), qrCodeUrl);
+        changes.push(`Community Fund QR code URL updated: ${qrCodeUrl || 'Removed'}`);
         hasChanges = true;
       }
 
       // Update user input if provided
+      // Only allowed for non-Community Fund projects
       if (userInput !== null) {
-        const targetProject = newProjectName ? projects[newProjectName] : projects[projectName];
-        targetProject.userInput = userInput;
+        updatedProject.userInput = userInput;
         changes.push(`Notes updated: ${userInput}`);
         hasChanges = true;
       }
@@ -1200,9 +1904,15 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      saveServerData();
+      // Save to database
+      if (newProjectName && newProjectName !== projectName) {
+        // Delete old project and create new one
+        await dbServerData.deleteProject(guildId, projectName);
+        await dbServerData.setProject(guildId, newProjectName, updatedProject);
+      } else {
+        await dbServerData.setProject(guildId, projectName, updatedProject);
+      }
 
-      const finalProjectName = newProjectName || projectName;
       const embed = new EmbedBuilder()
         .setTitle('Project Updated Successfully')
         .setDescription(`Project **${finalProjectName}** has been updated.`)
@@ -1218,7 +1928,8 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.editReply({ embeds: [embed] });
       
       // Fetch and store token metadata for updated supported tokens with rate limiting
-      const targetProject = newProjectName ? projects[newProjectName] : projects[projectName];
+      // Use updatedProject which has the latest data (whether renamed or not)
+      const targetProject = updatedProject;
       if (targetProject.supportedTokens && targetProject.supportedTokens.length > 0) {
         console.log(`[TOKEN] Fetching metadata for ${targetProject.supportedTokens.length} tokens: ${targetProject.supportedTokens.join(', ')}`);
         let metadataSuccessCount = 0;
@@ -1287,8 +1998,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       // Get available projects for this server
-      const projects = getProjects(guildId);
-      const communityFundProject = serverData[guildId]?.communityFundProject;
+      const projects = await getProjects(guildId);
       
       if (!projects[projectName]) {
         await interaction.editReply({ 
@@ -1299,9 +2009,11 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       // Prevent using community fund project for /send-esdt
-      if (projectName === communityFundProject) {
+      // Check against internal project name "Community Fund"
+      const communityFundProjectName = getCommunityFundProjectName();
+      if (projectName === communityFundProjectName) {
         await interaction.editReply({ 
-          content: `❌ **Cannot use Community Fund project for /send-esdt!**\n\nThe project "${projectName}" is configured as the Community Fund and is used for virtual account deposits.\n\nPlease select a different project for admin transfers.`, 
+          content: `❌ **Cannot use Community Fund project for /send-esdt!**\n\nThe Community Fund is a hot wallet used for virtual account deposits and withdrawals.\n\n**Why this is blocked:**\n• The Community Fund holds user deposits for virtual accounts\n• Sending funds out would reduce available balance for withdrawals\n• This could cause users to lose funds when trying to withdraw\n\n**Please select a different project for admin transfers.**`, 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
@@ -1334,7 +2046,8 @@ client.on('interactionCreate', async (interaction) => {
         if (targetMember) {
           targetUserId = targetMember.user.id;
           targetUser = targetMember.user;
-          recipientWallet = getUserWallets(guildId)[targetUserId];
+          const userWallets = await getUserWallets(guildId);
+          recipientWallet = userWallets[targetUserId];
         }
       } catch (fetchError) {
         console.error('Error fetching guild members:', fetchError.message);
@@ -1364,7 +2077,20 @@ client.on('interactionCreate', async (interaction) => {
       console.log(`Admin ${interaction.user.tag} (${interaction.user.id}) is sending ${amount} ${tokenTicker} to ${userTag} (${recipientWallet}) using project ${projectName}`);
       console.log(`Transfer memo: ${memo}`);
       
-      const transferResult = await transferESDT(recipientWallet, tokenTicker, amount, projectName, guildId);
+      // Resolve token identifier from ticker/identifier BEFORE transfer
+      const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
+      
+      // Validate identifier format
+      const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+      if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid token identifier!**\n\nCould not resolve full token identifier for "${tokenTicker}". Please ensure token metadata is registered using /update-token-metadata.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      const transferResult = await transferESDT(recipientWallet, tokenIdentifier, amount, projectName, guildId);
       
       if (transferResult.success) {
         const explorerUrl = transferResult.txHash
@@ -1445,6 +2171,7 @@ client.on('interactionCreate', async (interaction) => {
         
         try {
           if (targetUser) {
+            const projectLogoUrl = await getProjectLogoUrl(guildId, projectName);
             const dmEmbed = new EmbedBuilder()
               .setTitle('You Received ESDT Tokens!')
               .setDescription(`You have received **${amount} ${tokenTicker}** from an administrator.`)
@@ -1456,7 +2183,7 @@ client.on('interactionCreate', async (interaction) => {
                 { name: 'Status', value: '✅ Success', inline: true }
               ])
               .setColor(0x4d55dc)
-              .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
+              .setThumbnail(projectLogoUrl)
               .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
               .setTimestamp();
             
@@ -1523,8 +2250,8 @@ client.on('interactionCreate', async (interaction) => {
       const memo = interaction.options.getString('memo') || 'No memo provided';
 
       // Get available projects for this server
-      const projects = getProjects(guildId);
-      const communityFundProject = serverData[guildId]?.communityFundProject;
+      const projects = await getProjects(guildId);
+      const communityFundProject = await getCommunityFundProject(guildId);
       
       if (!projects[projectName]) {
         await interaction.editReply({ 
@@ -1610,7 +2337,8 @@ client.on('interactionCreate', async (interaction) => {
         if (targetMember) {
           targetUserId = targetMember.user.id;
           targetUser = targetMember.user;
-          recipientWallet = getUserWallets(guildId)[targetUserId];
+          const userWallets = await getUserWallets(guildId);
+          recipientWallet = userWallets[targetUserId];
         }
       } catch (fetchError) {
         console.error('Error fetching guild members:', fetchError.message);
@@ -1632,17 +2360,20 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      // Use the actual collection identifier from NFT details (canonical identifier from API)
+      const collectionIdentifier = nftDetails.collection || collection;
+      
       await interaction.editReply({ 
-        content: `Preparing to send ${nftName} (${collection}#${nftDetails.nonce}) to ${userTag}...\nMemo: ${memo}`, 
+        content: `Preparing to send ${nftName} (${collectionIdentifier}#${nftDetails.nonce}) to ${userTag}...\nMemo: ${memo}`, 
         flags: [MessageFlags.Ephemeral] 
       });
       
-      console.log(`Admin ${interaction.user.tag} (${interaction.user.id}) is sending NFT ${nftName} (${collection}#${nftDetails.nonce}) to ${userTag} (${recipientWallet}) using project ${projectName}`);
+      console.log(`Admin ${interaction.user.tag} (${interaction.user.id}) is sending NFT ${nftName} (${collectionIdentifier}#${nftDetails.nonce}) to ${userTag} (${recipientWallet}) using project ${projectName}`);
       console.log(`Transfer memo: ${memo}`);
       
       const transferResult = await transferNFT(
         recipientWallet, 
-        collection, // tokenIdentifier
+        collectionIdentifier, // Use canonical collection identifier from API
         nftDetails.nonce, // tokenNonce
         projectName, 
         guildId
@@ -1668,10 +2399,10 @@ client.on('interactionCreate', async (interaction) => {
 
         const successEmbed = new EmbedBuilder()
           .setTitle('NFT Transfer Successful')
-          .setDescription(`Successfully sent **${nftName}** (${collection}#${nftDetails.nonce}) to ${targetUser ? `<@${targetUserId}>` : userTag}`)
+          .setDescription(`Successfully sent **${nftName}** (${collectionIdentifier}#${nftDetails.nonce}) to ${targetUser ? `<@${targetUserId}>` : userTag}`)
           .addFields([
             { name: 'NFT Name', value: nftName, inline: true },
-            { name: 'Collection', value: collection, inline: true },
+            { name: 'Collection', value: collectionIdentifier, inline: true },
             { name: 'Nonce', value: String(nftDetails.nonce), inline: true },
             { name: 'Project Used', value: projectName, inline: true },
             { name: 'Recipient Wallet', value: `\`${recipientWallet}\``, inline: false },
@@ -1746,12 +2477,13 @@ client.on('interactionCreate', async (interaction) => {
         
         try {
           if (targetUser) {
+            const projectLogoUrl = await getProjectLogoUrl(guildId, projectName);
             const dmEmbed = new EmbedBuilder()
               .setTitle('You Received an NFT!')
-              .setDescription(`You have received **${nftName}** (${collection}#${nftDetails.nonce}) from an administrator.`)
+              .setDescription(`You have received **${nftName}** (${collectionIdentifier}#${nftDetails.nonce}) from an administrator.`)
               .addFields([
                 { name: 'NFT Name', value: nftName, inline: true },
-                { name: 'Collection', value: collection, inline: true },
+                { name: 'Collection', value: collectionIdentifier, inline: true },
                 { name: 'Nonce', value: String(nftDetails.nonce), inline: true },
                 { name: 'Project Used', value: projectName, inline: true },
                 { name: 'Transaction Hash', value: txHashFieldValue, inline: false },
@@ -1763,11 +2495,11 @@ client.on('interactionCreate', async (interaction) => {
               .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
               .setTimestamp();
             
-            // Set NFT image as thumbnail if available, otherwise use default thumbnail
+            // Set NFT image as thumbnail if available, otherwise use project logo
             if (nftImageUrl) {
               dmEmbed.setThumbnail(nftImageUrl);
             } else {
-              dmEmbed.setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif');
+              dmEmbed.setThumbnail(projectLogoUrl);
             }
             
             await targetUser.send({ embeds: [dmEmbed] });
@@ -1779,10 +2511,10 @@ client.on('interactionCreate', async (interaction) => {
       } else {
           const errorEmbed = new EmbedBuilder()
           .setTitle('NFT Transfer Failed')
-          .setDescription(`Failed to send **${nftName}** (${collection}#${nftDetails.nonce}) to ${targetUser ? `<@${targetUserId}>` : userTag}`)
+          .setDescription(`Failed to send **${nftName}** (${collectionIdentifier}#${nftDetails.nonce}) to ${targetUser ? `<@${targetUserId}>` : userTag}`)
           .addFields([
             { name: 'NFT Name', value: nftName, inline: true },
-            { name: 'Collection', value: collection, inline: true },
+            { name: 'Collection', value: collectionIdentifier, inline: true },
             { name: 'Nonce', value: String(nftDetails.nonce), inline: true },
             { name: 'Project Used', value: projectName, inline: true },
             { name: 'Recipient Wallet', value: `\`${recipientWallet}\``, inline: false },
@@ -1840,8 +2572,8 @@ client.on('interactionCreate', async (interaction) => {
       const minBidIncrease = interaction.options.getString('min-bid-increase');
 
       // Get available projects for this server
-      const projects = getProjects(guildId);
-      const communityFundProject = serverData[guildId]?.communityFundProject;
+      const projects = await getProjects(guildId);
+      const communityFundProjectName = getCommunityFundProjectName(); // Always "Community Fund"
       
       if (!projects[projectName]) {
         await interaction.editReply({ 
@@ -1852,7 +2584,8 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       // Prevent using community fund project for auctions
-      if (projectName === communityFundProject) {
+      // Check by internal project name "Community Fund" to ensure it's always blocked
+      if (projectName === communityFundProjectName) {
         await interaction.editReply({ 
           content: `❌ **Cannot use Community Fund project for auctions!**\n\nThe project "${projectName}" is configured as the Community Fund and is used for virtual account deposits.\n\nPlease select a different project for auctions.`, 
           flags: [MessageFlags.Ephemeral] 
@@ -1884,6 +2617,16 @@ client.on('interactionCreate', async (interaction) => {
       if (!supportedTokens.some(t => t.toLowerCase() === tokenTicker.toLowerCase())) {
         await interaction.editReply({ 
           content: `Token "${tokenTicker}" is not supported by project "${projectName}". Supported tokens: ${supportedTokens.join(', ') || 'None configured'}`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+
+      // Resolve token identifier from ticker/identifier
+      const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
+      if (!tokenIdentifier) {
+        await interaction.editReply({ 
+          content: `❌ Could not resolve token identifier for "${tokenTicker}". Please ensure token metadata is registered.`, 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
@@ -2021,13 +2764,10 @@ client.on('interactionCreate', async (interaction) => {
         // Don't return - continue without thread
       }
 
-      // Store auction data
-      const auctions = getAuctions(guildId);
+      // Store auction data in database
       console.log(`[AUCTIONS] Storing auction ${auctionId} in guild ${guildId}`);
-      console.log(`[AUCTIONS] Auctions object before save:`, Object.keys(auctions));
       
-      auctions[auctionId] = {
-        auctionId,
+      await dbAuctions.createAuction(guildId, auctionId, {
         creatorId: interaction.user.id,
         creatorTag: interaction.user.tag,
         projectName,
@@ -2040,7 +2780,8 @@ client.on('interactionCreate', async (interaction) => {
         description,
         duration: duration * 60 * 60 * 1000,
         endTime,
-        tokenTicker,
+        tokenTicker, // Keep for display
+        tokenIdentifier, // Store identifier for operations
         startingAmount,
         minBidIncrease,
         currentBid: startingAmount,
@@ -2049,22 +2790,11 @@ client.on('interactionCreate', async (interaction) => {
         messageId: auctionMessage.id,
         threadId: threadId,
         channelId: interaction.channel.id,
-        status: 'active',
-        createdAt: Date.now(),
-        bids: []
-      };
+        status: 'ACTIVE',
+        createdAt: Date.now()
+      });
       
-      console.log(`[AUCTIONS] Auctions object after assignment:`, Object.keys(auctions));
-      console.log(`[AUCTIONS] Full auctionsData for guild ${guildId}:`, Object.keys(auctionsData[guildId] || {}));
-      
-      saveAuctionsData();
-      
-      // Verify the save worked
-      const verifyAuctions = getAuctions(guildId);
-      console.log(`[AUCTIONS] Verification after save - auctions in guild ${guildId}:`, Object.keys(verifyAuctions));
-      if (!verifyAuctions[auctionId]) {
-        console.error(`[AUCTIONS] CRITICAL: Auction ${auctionId} was not found after save!`);
-      }
+      console.log(`[AUCTIONS] Auction ${auctionId} stored successfully in database`);
 
       // Post initial message in thread (if thread was created)
       if (thread) {
@@ -2096,65 +2826,213 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ content: 'Only administrators can set the Community Tip Fund.', flags: [MessageFlags.Ephemeral] });
         return;
       }
-      const projectName = interaction.options.getString('project-name');
+      
+      const fundName = interaction.options.getString('fund-name');
+      const supportedTokensInput = interaction.options.getString('supported-tokens');
       const qrCodeUrl = interaction.options.getString('qr-code-url');
-      const confirm = interaction.options.getString('confirm');
-      const projects = getProjects(guildId);
-      if (!projects[projectName]) {
-        await interaction.editReply({ content: `Project "${projectName}" not found. Use /list-projects to see available projects.`, flags: [MessageFlags.Ephemeral] });
-        return;
+      
+      // Fixed project name for community fund (internal project name)
+      const projectName = 'Community Fund';
+      
+      // Check if community fund already exists - prevent multiple community funds
+      const currentFund = await getCommunityFundProject(guildId);
+      const projects = await getProjects(guildId);
+      const existingCommunityFundProject = projects[projectName];
+      
+      // Check if Community Fund already exists
+      if (currentFund || existingCommunityFundProject) {
+        const existingFundName = currentFund || 'Community Fund';
+        const existingWalletAddress = existingCommunityFundProject?.walletAddress || 'Unknown';
+        
+        // Check if the existing PEM is valid
+        let allowOverwrite = false;
+        let invalidPemReason = null;
+        
+        if (existingCommunityFundProject) {
+          const existingPem = existingCommunityFundProject.walletPem;
+          
+          // Check if PEM is missing or empty
+          if (!existingPem || existingPem.trim().length === 0) {
+            allowOverwrite = true;
+            invalidPemReason = 'PEM is missing or empty';
+          }
+          // Check if PEM format is invalid
+          else if (!existingPem.includes('BEGIN') || !existingPem.includes('END')) {
+            allowOverwrite = true;
+            invalidPemReason = 'PEM format is invalid (missing BEGIN/END markers)';
+          }
+          // Check if PEM is too short (less than 200 characters)
+          else if (existingPem.length < 200) {
+            allowOverwrite = true;
+            invalidPemReason = `PEM is too short (${existingPem.length} chars, expected 200+)`;
+          }
+        }
+        
+        // If PEM is invalid, allow overwriting with a warning
+        if (allowOverwrite) {
+          console.log(`[COMMUNITY-FUND] Allowing overwrite of Community Fund due to invalid PEM: ${invalidPemReason}`);
+          await interaction.editReply({ 
+            content: `⚠️ **Warning: Invalid Community Fund PEM Detected**\n\nA Community Fund exists but has an **invalid PEM**: ${invalidPemReason}\n\n**Current Configuration:**\n• **Fund Name:** ${existingFundName}\n• **Wallet Address:** \`${existingWalletAddress}\`\n\n**This will be overwritten** with a new valid wallet.\n\n⚠️ **Important:**\n• The wallet address will change\n• Users will need to update their deposit addresses\n• Existing funds in the old wallet will NOT be transferred\n• Mass refund will work with the new valid PEM\n\nProceeding with wallet generation...`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          // Continue with wallet generation (don't return)
+        } else {
+          // PEM is valid, block overwriting
+          await interaction.editReply({ 
+            content: `❌ **Error: Community Fund Already Exists**\n\nA Community Tip Fund is already configured for this server.\n\n**Current Configuration:**\n• **Fund Name:** ${existingFundName}\n• **Wallet Address:** \`${existingWalletAddress}\`\n\n**Why this is blocked:**\n• Only one Community Fund is allowed per server\n• Multiple funds would cause issues with Virtual Accounts tracking\n• The blockchain listener monitors a single Community Fund wallet per guild\n\n**To change the Community Fund:**\n1. First delete the existing Community Fund project using \`/delete-project\`\n2. Then run \`/set-community-fund\` again\n\n⚠️ **Note:** Deleting the Community Fund will trigger a mass refund of all virtual account balances.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
       }
-      const currentFund = serverData[guildId]?.communityFundProject;
-      if (currentFund && currentFund !== projectName && confirm !== 'CONFIRM') {
-        await interaction.editReply({ content: `⚠️ Warning: This will replace the current Community Tip Fund (**${currentFund}**) with **${projectName}**.\n\nIf you are sure, run the command again and type CONFIRM in the confirm field.`, flags: [MessageFlags.Ephemeral] });
+      
+      // Parse supported tokens (required field)
+      const supportedTokens = supportedTokensInput
+        .split(',')
+        .map(t => t.trim())
+        .filter(t => t.length > 0);
+      
+      if (supportedTokens.length === 0) {
+        await interaction.editReply({ 
+          content: '❌ **Invalid supported tokens!**\n\nPlease provide at least one valid token ticker (e.g., EGLD,USDC,USDT).', 
+          flags: [MessageFlags.Ephemeral] 
+        });
         return;
       }
       
-      // Initialize communityFundQR if it doesn't exist
-      if (!serverData[guildId].communityFundQR) {
-        serverData[guildId].communityFundQR = {};
+      // Generate wallet using MultiversX SDK
+      const walletGenerator = require('./utils/wallet-generator');
+      await interaction.editReply({ 
+        content: '🔄 **Generating Community Fund Wallet...**\n\nCreating a new MultiversX wallet using the SDK...', 
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+      const wallet = await walletGenerator.generateCompleteWallet();
+      
+      // Validate generated PEM before storing
+      if (!wallet.pem || wallet.pem.trim().length === 0) {
+        throw new Error('Failed to generate wallet: PEM is empty');
       }
       
-      // Set the community fund project
-      serverData[guildId].communityFundProject = projectName;
+      if (!wallet.pem.includes('BEGIN') || !wallet.pem.includes('END')) {
+        throw new Error('Failed to generate wallet: Invalid PEM format');
+      }
+      
+      // Validate PEM length (should be at least 90 characters)
+      // Short PEM format (from seed phrase tools): ~98 chars (44 char base64 for 32-byte key)
+      // Long PEM format (from SDK with address): ~250+ chars (address + secret key, multi-line base64)
+      // Both formats are valid for signing MultiversX transactions
+      if (wallet.pem.length < 90) {
+        console.error(`[COMMUNITY-FUND] Generated PEM is too short: ${wallet.pem.length} characters (expected 90+)`);
+        throw new Error(`Failed to generate wallet: PEM is too short (${wallet.pem.length} chars, expected 90+). Please try again.`);
+      }
+      
+      // Validate PEM structure - must have BEGIN and END markers on separate lines
+      const pemLines = wallet.pem.split('\n');
+      const beginLine = pemLines.find(line => line.includes('BEGIN'));
+      const endLine = pemLines.find(line => line.includes('END'));
+      const base64Content = pemLines.filter(line => !line.includes('BEGIN') && !line.includes('END') && line.trim().length > 0).join('');
+      
+      if (!beginLine || !endLine) {
+        console.error(`[COMMUNITY-FUND] PEM missing BEGIN or END markers`);
+        throw new Error('Failed to generate wallet: PEM missing BEGIN or END markers');
+      }
+      
+      // Validate base64 content (minimum 40 chars for 32-byte key, but can be longer with address)
+      // Short PEM: ~44 chars base64 (secret key only)
+      // Long PEM: ~192+ chars base64 (address + secret key)
+      if (base64Content.length < 40) {
+        console.error(`[COMMUNITY-FUND] PEM base64 content too short: ${base64Content.length} characters (expected 40+)`);
+        throw new Error(`Failed to generate wallet: PEM base64 content too short (${base64Content.length} chars, expected 40+). Please try again.`);
+      }
+      
+      console.log(`[COMMUNITY-FUND] Generated wallet with PEM length: ${wallet.pem.length} characters`);
+      console.log(`[COMMUNITY-FUND] PEM structure: BEGIN marker: ${!!beginLine}, END marker: ${!!endLine}, Base64 length: ${base64Content.length}`);
+      
+      // Create/update the Community Fund project
+      await dbServerData.setProject(guildId, projectName, {
+        walletAddress: wallet.address,
+        walletPem: wallet.pem,
+        supportedTokens: supportedTokens,
+        userInput: null,
+        registeredBy: interaction.user.id,
+        registeredAt: Date.now(),
+        projectLogoUrl: null // Community Fund doesn't use project logo
+      });
+      
+      // Verify the PEM was stored correctly by reading it back
+      console.log(`[COMMUNITY-FUND] Verifying stored PEM...`);
+      const storedProject = await dbServerData.getProject(guildId, projectName);
+      if (!storedProject || !storedProject.walletPem) {
+        throw new Error('Failed to verify stored PEM: PEM not found after storage');
+      }
+      
+      if (storedProject.walletPem.length !== wallet.pem.length) {
+        console.error(`[COMMUNITY-FUND] PEM length mismatch! Original: ${wallet.pem.length}, Stored: ${storedProject.walletPem.length}`);
+        throw new Error(`PEM length mismatch after storage! Original: ${wallet.pem.length}, Stored: ${storedProject.walletPem.length}`);
+      }
+      
+      if (storedProject.walletPem !== wallet.pem) {
+        console.error(`[COMMUNITY-FUND] PEM content mismatch after storage!`);
+        throw new Error('PEM content mismatch after storage! The PEM may have been corrupted during encryption/storage.');
+      }
+      
+      console.log(`[COMMUNITY-FUND] ✅ PEM verified successfully after storage (length: ${storedProject.walletPem.length} chars)`);
+      
+      // Update guild settings to set this as community fund
+      // Store the user-provided fund name in community_fund_project column
+      await dbServerData.updateGuildSettings(guildId, {
+        communityFundProject: fundName
+      });
       
       // Store the QR code URL if provided
       if (qrCodeUrl) {
-        serverData[guildId].communityFundQR[projectName] = qrCodeUrl;
-        // Also store it in the project itself for consistency
-        projects[projectName].qrCodeUrl = qrCodeUrl;
-        console.log(`QR code URL stored for project ${projectName}: ${qrCodeUrl}`);
+        await dbServerData.setCommunityFundQR(guildId, projectName, qrCodeUrl);
+        console.log(`QR code URL stored for Community Fund: ${qrCodeUrl}`);
       }
       
-      saveServerData();
+      // Initialize wallet timestamp in blockchain listener immediately
+      await blockchainListener.initializeWalletTimestamp(wallet.address, fundName);
+      console.log(`[COMMUNITY-FUND] Wallet timestamp initialized for blockchain listener`);
       
-      let replyMessage = `Community Tip Fund set to project: **${projectName}**. All /tip transactions will use this wallet.`;
+      // Build success message
+      const embed = new EmbedBuilder()
+        .setTitle('✅ Community Fund Wallet Created')
+        .setDescription('A new MultiversX wallet has been automatically generated and set as the Community Tip Fund.')
+        .addFields(
+          { name: '🏷️ Fund Name', value: fundName, inline: true },
+          { name: '📍 Wallet Address', value: `\`${wallet.address}\``, inline: false },
+          { name: '🔐 Security', value: 'Wallet was generated by the bot using MultiversX SDK. PEM is encrypted in the database.', inline: false },
+          { name: '📝 Supported Tokens', value: supportedTokens.join(', '), inline: false }
+        )
+        .setColor(0x00FF00)
+        .setTimestamp();
+      
+      
       if (qrCodeUrl) {
-        replyMessage += `\n\n✅ QR code URL has been saved and will be used as thumbnail in game embeds.`;
+        embed.addFields({ name: '📱 QR Code', value: 'QR code URL has been saved and will be used in game embeds.', inline: false });
       }
       
-      await interaction.editReply({ content: replyMessage, flags: [MessageFlags.Ephemeral] });
-      console.log(`Community Tip Fund set to ${projectName} for guild ${guildId}${qrCodeUrl ? ` with QR code URL` : ''}`);
+      await interaction.editReply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+      console.log(`[COMMUNITY-FUND] Created Community Fund wallet for guild ${guildId}: ${wallet.address}`);
     } catch (error) {
       console.error('Error setting Community Tip Fund:', error);
       if (interaction.deferred) {
-        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        await interaction.editReply({ 
+          content: `❌ **Error creating Community Fund wallet:**\n\n${error.message}\n\nPlease try again or contact support if the issue persists.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
       } else {
-        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        await interaction.reply({ 
+          content: `❌ **Error creating Community Fund wallet:**\n\n${error.message}`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
       }
     }
 
 
   } else if (commandName === 'list-wallets') {
     try {
-      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        await interaction.reply({ 
-          content: 'Only administrators can list registered wallets.', 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
       const filter = interaction.options.getString('filter')?.toLowerCase() || '';
       const page = interaction.options.getInteger('page') || 1;
       const isPublic = interaction.options.getBoolean('public') || false;
@@ -2164,12 +3042,12 @@ client.on('interactionCreate', async (interaction) => {
       const entriesPerPage = 20;
       const startIndex = (page - 1) * entriesPerPage;
       
-      console.log(`Admin ${interaction.user.tag} is listing wallets with filter: '${filter}', page: ${page}, public: ${isPublic}`);
+      console.log(`User ${interaction.user.tag} is listing wallets with filter: '${filter}', page: ${page}, public: ${isPublic}`);
       
       try {
         const guild = interaction.guild;
         const members = await guild.members.fetch();
-        const userWallets = getUserWallets(guildId);
+        const userWallets = await getUserWallets(guildId);
         
         const walletEntries = [];
         
@@ -2242,8 +3120,19 @@ client.on('interactionCreate', async (interaction) => {
           embed.setDescription(`No wallets found${filter ? ` matching filter '${filter}'` : ''}.`);
         }
         
+        // Add button to register wallet for easier onboarding
+        const registerButton = new ButtonBuilder()
+          .setCustomId('register-wallet')
+          .setLabel('Register My Wallet')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('📝');
+        
+        const buttonRow = new ActionRowBuilder()
+          .addComponents(registerButton);
+        
         await interaction.editReply({ 
           embeds: [embed],
+          components: [buttonRow],
           flags: isPublic ? [] : [MessageFlags.Ephemeral]
         });
         
@@ -2292,8 +3181,19 @@ client.on('interactionCreate', async (interaction) => {
           embed.setDescription(`No wallets found${filter ? ` matching filter '${filter}'` : ''}.`);
         }
         
+        // Add button to register wallet for easier onboarding
+        const registerButton = new ButtonBuilder()
+          .setCustomId('register-wallet')
+          .setLabel('Register My Wallet')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('📝');
+        
+        const buttonRow = new ActionRowBuilder()
+          .addComponents(registerButton);
+        
         await interaction.editReply({ 
           embeds: [embed],
+          components: [buttonRow],
           flags: isPublic ? [] : [MessageFlags.Ephemeral]
         });
       }
@@ -2311,9 +3211,9 @@ client.on('interactionCreate', async (interaction) => {
       const isPublic = interaction.options.getBoolean('public') || false;
       await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
       console.log(`User ${interaction.user.tag} is listing projects, public: ${isPublic}`);
-      const projects = getProjects(guildId);
+      const projects = await getProjects(guildId);
       const projectNames = Object.keys(projects);
-      const communityFund = serverData[guildId]?.communityFundProject;
+      const communityFund = await getCommunityFundProject(guildId);
       if (projectNames.length === 0) {
         const embed = new EmbedBuilder()
           .setTitle('No Projects Registered')
@@ -2336,7 +3236,10 @@ client.on('interactionCreate', async (interaction) => {
         const project = projects[projectName];
         const registeredBy = project.registeredBy ? `<@${project.registeredBy}>` : 'Unknown';
         const registeredAt = project.registeredAt ? new Date(project.registeredAt).toLocaleDateString() : 'Unknown';
-        const isFund = communityFund === projectName;
+        // Check if this is the Community Fund by comparing with internal project name
+        const isFund = projectName === getCommunityFundProjectName();
+        // Display the user-provided fund name if it's the Community Fund, otherwise use the project name
+        const displayName = isFund && communityFund ? communityFund : projectName;
         
         const supportedTokens = project.supportedTokens || [];
         let projectValue = `**Supported Tokens:** ${supportedTokens.join(', ') || 'None configured'}\n**Registered By:** ${registeredBy}\n**Registered:** ${registeredAt}`;
@@ -2352,7 +3255,7 @@ client.on('interactionCreate', async (interaction) => {
         }
         
         embed.addFields({
-          name: `${isFund ? '💰 ' : ''}📁 ${projectName}${isFund ? ' (Community Fund)' : ''}`,
+          name: `${isFund ? '💰 ' : ''}📁 ${displayName}${isFund ? ' (Community Fund)' : ''}`,
           value: projectValue,
           inline: false
         });
@@ -2378,15 +3281,16 @@ client.on('interactionCreate', async (interaction) => {
       const memo = interaction.options.getString('memo') || 'No memo provided';
       
       // Check if community fund is set
-      const fundProject = serverData[guildId]?.communityFundProject;
+      const fundProject = await getCommunityFundProject(guildId);
       if (!fundProject) {
         await interaction.editReply({ content: 'No Community Tip Fund is set for this server. Please ask an admin to run /set-community-fund.', flags: [MessageFlags.Ephemeral] });
         return;
       }
       
-      const projects = getProjects(guildId);
-      if (!projects[fundProject]) {
-        await interaction.editReply({ content: `The Community Tip Fund project ("${fundProject}") no longer exists. Please ask an admin to set it again.`, flags: [MessageFlags.Ephemeral] });
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      if (!projects[projectName]) {
+        await interaction.editReply({ content: `The Community Tip Fund project no longer exists. Please ask an admin to set it again.`, flags: [MessageFlags.Ephemeral] });
         return;
       }
       
@@ -2398,7 +3302,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Check if user has sufficient virtual balance
-      const currentBalance = virtualAccounts.getUserBalance(guildId, interaction.user.id, tokenTicker);
+      const currentBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, tokenTicker);
       if (new BigNumber(currentBalance).isLessThan(amountNum)) {
         await interaction.editReply({ 
           content: `❌ **Insufficient virtual balance!**\n\nYou have: **${currentBalance}** ${tokenTicker}\nRequired: **${amountNum}** ${tokenTicker}\n\nTop up your account by making a transfer to any Community Fund wallet!`, 
@@ -2425,7 +3329,8 @@ client.on('interactionCreate', async (interaction) => {
         if (targetMember) {
           targetUserId = targetMember.user.id;
           targetUser = targetMember.user;
-          recipientWallet = getUserWallets(guildId)[targetUserId];
+          const userWallets = await getUserWallets(guildId);
+          recipientWallet = userWallets[targetUserId];
         }
       } catch (fetchError) {
         console.error('Error fetching guild members:', fetchError.message);
@@ -2443,7 +3348,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Check if the token is supported by the community fund
-      const fundSupportedTokens = projects[fundProject].supportedTokens || [];
+      const fundSupportedTokens = projects[projectName].supportedTokens || [];
       if (!fundSupportedTokens.includes(tokenTicker)) {
         await interaction.editReply({ 
           content: `❌ **Unsupported token!**\n\nToken "${tokenTicker}" is not supported by the Community Fund.\n\nSupported tokens: ${fundSupportedTokens.join(', ') || 'None configured'}`, 
@@ -2452,11 +3357,14 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      // Resolve token identifier from ticker/identifier
+      const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
+      
       // Deduct funds from virtual account
-      const deductionResult = virtualAccounts.deductFundsFromAccount(
+      const deductionResult = await virtualAccounts.deductFundsFromAccount(
         guildId, 
         interaction.user.id, 
-        tokenTicker, 
+        tokenIdentifier, 
         amountNum.toString(), 
         `RPS challenge vs ${userTag}`
       );
@@ -2471,37 +3379,28 @@ client.on('interactionCreate', async (interaction) => {
         
       // Create the challenge
       const challengeId = generateChallengeId();
-      const challenges = getRPSChallenges(guildId);
-      if (!challenges) {
-        rpsGamesData[guildId] = {};
-        saveRpsGamesData();
-        console.log('[RPS DEBUG] rpsGamesData was undefined, re-initialized!');
-      }
-      // Now safe to set challenge
-      challenges[challengeId] = {
+      const userWallets = await getUserWallets(guildId);
+      
+      // Create game in database
+      await dbRpsGames.createGame(guildId, challengeId, {
         challengerId: interaction.user.id,
         challengerTag: interaction.user.tag,
-        challengerWallet: getUserWallets(guildId)[interaction.user.id],
+        challengerWallet: userWallets[interaction.user.id],
         challengedId: targetUserId,
         challengedTag: userTag,
         challengedWallet: recipientWallet,
         amount: amountNum.toString(), // virtual amount
         humanAmount: amountNum.toString(), // human value (string)
-        amountWei: amountNum.toString(), // wei amount for virtual accounts (same as amount for virtual)
         decimals: 0, // Virtual amounts don't need decimals
-        token: tokenTicker,
-        transactionHash: null, // No blockchain transaction needed
+        token: tokenIdentifier, // Store identifier instead of ticker
+        transactionHash: '', // No blockchain transaction needed
         memo: memo,
         status: 'waiting', // waiting, active, completed, expired
         createdAt: Date.now(),
         expiresAt: Date.now() + (30 * 60 * 1000), // 30 minutes
         rounds: [],
-        currentRound: 1,
-        virtualChallenge: true, // Mark as virtual challenge
-        channelId: interaction.channel.id // Store channel ID for notifications
-      };
-        
-        saveRpsGamesData();
+        currentRound: 1
+      });
         
       const embed = new EmbedBuilder()
         .setTitle('🎮 Rock, Paper, Scissors Challenge Created!')
@@ -2548,8 +3447,9 @@ client.on('interactionCreate', async (interaction) => {
       // Send DM to challenged user
       try {
         if (targetUser) {
-          // Use RPS GIF as thumbnail for DM
-          const dmThumbnail = 'https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif';
+          // Get Community Fund project logo for RPS challenge notification
+          const communityFundProjectName = getCommunityFundProjectName();
+          const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
           
           const dmEmbed = new EmbedBuilder()
             .setTitle('🎮 You have been challenged!')
@@ -2563,7 +3463,7 @@ client.on('interactionCreate', async (interaction) => {
               { name: 'Memo', value: memo, inline: false }
             ])
             .setColor('#FF6B35')
-            .setThumbnail(dmThumbnail)
+            .setThumbnail(projectLogoUrl)
             .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
             .setTimestamp();
           
@@ -2592,21 +3492,21 @@ client.on('interactionCreate', async (interaction) => {
       const challengeId = interaction.options.getString('challenge-id');
       
       // Check if community fund is set
-      const fundProject = serverData[guildId]?.communityFundProject;
+      const fundProject = await getCommunityFundProject(guildId);
       if (!fundProject) {
         await interaction.editReply({ content: 'No Community Tip Fund is set for this server. Please ask an admin to run /set-community-fund.', flags: [MessageFlags.Ephemeral] });
         return;
       }
       
-      const projects = getProjects(guildId);
-      if (!projects[fundProject]) {
-        await interaction.editReply({ content: `The Community Tip Fund project ("${fundProject}") no longer exists. Please ask an admin to set it again.`, flags: [MessageFlags.Ephemeral] });
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      if (!projects[projectName]) {
+        await interaction.editReply({ content: `The Community Tip Fund project no longer exists. Please ask an admin to set it again.`, flags: [MessageFlags.Ephemeral] });
         return;
       }
       
       // Get the challenge
-      const challenges = getRPSChallenges(guildId);
-      const challenge = challenges[challengeId];
+      const challenge = await dbRpsGames.getGame(guildId, challengeId);
       
       if (!challenge) {
         await interaction.editReply({ content: `Challenge ID "${challengeId}" not found or has expired.`, flags: [MessageFlags.Ephemeral] });
@@ -2626,15 +3526,50 @@ client.on('interactionCreate', async (interaction) => {
       
       // Check if challenge has expired
       if (Date.now() > challenge.expiresAt) {
-        challenge.status = 'expired';
-        saveServerData();
+        await dbRpsGames.updateGame(guildId, challengeId, { status: 'expired' });
         await interaction.editReply({ content: `Challenge "${challengeId}" has expired.`, flags: [MessageFlags.Ephemeral] });
         return;
       }
       
       // Check if user has sufficient virtual balance
-      const currentBalance = virtualAccounts.getUserBalance(guildId, interaction.user.id, challenge.token);
-      const requiredAmount = parseFloat(challenge.amount);
+      let currentBalance;
+      try {
+        console.log(`[RPS JOIN DEBUG] Getting balance for user ${interaction.user.id}, token: ${challenge.token}`);
+        currentBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, challenge.token);
+        console.log(`[RPS JOIN DEBUG] Retrieved balance: ${currentBalance} (type: ${typeof currentBalance})`);
+        
+        // Ensure balance is always a valid string
+        if (currentBalance === null || currentBalance === undefined) {
+          console.log(`[RPS JOIN DEBUG] Balance was null/undefined, setting to '0'`);
+          currentBalance = '0';
+        }
+        currentBalance = currentBalance.toString();
+      } catch (balanceError) {
+        console.error('[RPS] Error getting balance:', balanceError.message);
+        currentBalance = '0';
+      }
+      
+      // Use humanAmount (display value) or amount (stored value) - prefer humanAmount for consistency
+      const amountToCheck = challenge.humanAmount || challenge.amount;
+      console.log(`[RPS JOIN DEBUG] Challenge amount check - humanAmount: ${challenge.humanAmount}, amount: ${challenge.amount}, amountToCheck: ${amountToCheck}`);
+      const requiredAmount = parseFloat(amountToCheck);
+      
+      if (isNaN(requiredAmount) || requiredAmount <= 0) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid challenge amount!** The challenge amount could not be determined.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Validate balance value
+      const balanceBN = new BigNumber(currentBalance);
+      if (balanceBN.isNaN()) {
+        console.error(`[RPS] Invalid balance value: ${currentBalance}, resetting to 0`);
+        currentBalance = '0';
+      }
+      
+      console.log(`[RPS JOIN DEBUG] Final balance check - Balance: ${currentBalance}, Required: ${requiredAmount}, Comparison: ${new BigNumber(currentBalance).isLessThan(requiredAmount)}`);
       
       if (new BigNumber(currentBalance).isLessThan(requiredAmount)) {
         await interaction.editReply({ 
@@ -2645,7 +3580,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Deduct funds from virtual account
-      const deductionResult = virtualAccounts.deductFundsFromAccount(
+      const deductionResult = await virtualAccounts.deductFundsFromAccount(
         guildId, 
         interaction.user.id, 
         challenge.token, 
@@ -2665,10 +3600,11 @@ client.on('interactionCreate', async (interaction) => {
       }
         
       // Update challenge status
-      challenge.status = 'active';
-      challenge.joinedAt = Date.now();
-      challenge.joinerTransactionHash = null; // No blockchain transaction needed
-      saveServerData();
+      await dbRpsGames.updateGame(guildId, challengeId, {
+        status: 'active',
+        joinedAt: Date.now(),
+        joinerTransactionHash: null // No blockchain transaction needed
+      });
 
         // Create the embed first
         const embed = new EmbedBuilder()
@@ -2734,21 +3670,21 @@ client.on('interactionCreate', async (interaction) => {
       const isPublic = interaction.options.getBoolean('public') || false;
       await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
       
-      const challenges = getRPSChallenges(guildId);
+      const challenges = await getRPSChallenges(guildId);
       let changed = false;
       const now = Date.now();
       // Collect expired challenge IDs for cleanup
       const expiredChallengeIds = [];
       for (const [challengeId, challenge] of Object.entries(challenges)) {
         if (challenge.status === 'waiting' && now > challenge.expiresAt) {
-          // Mark as expired
-          challenge.status = 'expired';
+          // Mark as expired in database
+          await dbRpsGames.updateGame(guildId, challengeId, { status: 'expired' });
           changed = true;
           // Refund challenger to virtual account
           try {
             if (challenge.humanAmount && challenge.token) {
               const memo = `RPS refund: challenge expired (${challengeId})`;
-              const refundResult = virtualAccounts.addFundsToAccount(
+              const refundResult = await virtualAccounts.addFundsToAccount(
                 guildId,
                 challenge.challengerId,
                 challenge.token,
@@ -2763,7 +3699,11 @@ client.on('interactionCreate', async (interaction) => {
                 const member = await guild.members.fetch(challenge.challengerId).catch(() => null);
                 if (member) {
                   // Get updated virtual balance
-                  const newBalance = virtualAccounts.getUserBalance(guildId, challenge.challengerId, challenge.token);
+                  const newBalance = await virtualAccounts.getUserBalance(guildId, challenge.challengerId, challenge.token);
+                  
+                  // Get Community Fund project logo for RPS refund notification
+                  const communityFundProjectName = getCommunityFundProjectName();
+                  const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
                   
                   await member.send({
                     embeds: [
@@ -2778,7 +3718,7 @@ client.on('interactionCreate', async (interaction) => {
                         ])
                         .setColor('#FF9900')
                         .setTimestamp()
-                        .setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif')
+                        .setThumbnail(projectLogoUrl)
                         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
                     ]
                   });
@@ -2822,12 +3762,11 @@ client.on('interactionCreate', async (interaction) => {
           expiredChallengeIds.push(challengeId);
         }
       }
-      // Remove expired challenges from rpsGamesData
+      // Remove expired challenges from database
       for (const challengeId of expiredChallengeIds) {
-        delete challenges[challengeId];
+        await dbRpsGames.deleteGame(guildId, challengeId);
         changed = true;
       }
-      if (changed) saveRpsGamesData();
       // Only show non-expired, non-completed challenges
       const activeChallenges = Object.entries(challenges).filter(([id, challenge]) => 
         (challenge.status === 'waiting' || challenge.status === 'active')
@@ -2874,21 +3813,22 @@ client.on('interactionCreate', async (interaction) => {
       
       const guildId = interaction.guildId;
       
-      if (!serverData[guildId] || !serverData[guildId].communityFundProject) {
+      const communityFundProject = await getCommunityFundProject(guildId);
+      if (!communityFundProject) {
         await interaction.editReply({ 
           content: '❌ No community fund project is configured for this server. Please contact an administrator to set up a community fund project.', 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
       }
-      
-      const communityFundProject = serverData[guildId].communityFundProject;
-      const projects = getProjects(guildId);
-      const project = projects[communityFundProject];
+      const projects = await getProjects(guildId);
+      // Use fixed project name for lookup
+      const projectName = getCommunityFundProjectName();
+      const project = projects[projectName];
       
       if (!project) {
         await interaction.editReply({ 
-          content: `❌ Community fund project "${communityFundProject}" not found. Please contact an administrator to fix this configuration.`, 
+          content: `❌ Community fund project not found. Please contact an administrator to fix this configuration.`, 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
@@ -2896,30 +3836,45 @@ client.on('interactionCreate', async (interaction) => {
       
       if (!project.walletAddress) {
         await interaction.editReply({ 
-          content: `❌ Community fund project "${communityFundProject}" has no wallet address configured. Please contact an administrator to fix this configuration.`, 
+          content: `❌ Community fund project has no wallet address configured. Please contact an administrator to fix this configuration.`, 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
       }
       
+      // Get community fund QR code from community_fund_qr table (use project name, not fund name)
+      const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+      const qrCodeUrl = communityFundQRData?.[projectName] || null;
+      
       const embed = new EmbedBuilder()
         .setTitle('💰 Community Fund Deposit Address')
         .setDescription(`Send tokens to the community fund to participate in games and activities!`)
         .addFields([
-          { name: 'Project Name', value: `**${communityFundProject}**`, inline: true },
+          { name: '⚠️ Important: Register First!', value: '**You must register your wallet BEFORE sending tokens!**\n\nIf you send tokens without registering your wallet first, the bot cannot track your deposits and you may lose your funds.\n\n**Click the "Register My Wallet" button below to register your wallet address.**', inline: false },
+          { name: 'Fund Name', value: `**${communityFundProject || 'Community Fund'}**`, inline: true },
           { name: 'Wallet Address', value: `\`${project.walletAddress}\``, inline: false },
-          { name: 'How to Deposit', value: '1. Copy the wallet address above\n2. Send your tokens to this address\n3. Your virtual account will be automatically updated\n4. Use `/check-balance` to verify your deposit', inline: false }
+          { name: 'How to Deposit', value: '1. **First:** Click "Register My Wallet" button below\n2. Enter your wallet address in the form\n3. Copy the wallet address above\n4. Send your tokens to this address\n5. Your virtual account will be automatically updated\n6. Use `/check-balance` to verify your deposit', inline: false }
         ])
-        .setColor('#00FF00')
+        .setColor('#FF9900')
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
       
-      // Add QR code as thumbnail if available
-      if (project.qrCodeUrl) {
-        embed.setThumbnail(project.qrCodeUrl);
+      // Add QR code as thumbnail if available (from community_fund_qr table)
+      if (qrCodeUrl) {
+        embed.setThumbnail(qrCodeUrl);
       }
       
-      await interaction.editReply({ embeds: [embed] });
+      // Add button to register wallet for easier onboarding
+      const registerButton = new ButtonBuilder()
+        .setCustomId('register-wallet')
+        .setLabel('Register My Wallet')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('📝');
+      
+      const buttonRow = new ActionRowBuilder()
+        .addComponents(registerButton);
+      
+      await interaction.editReply({ embeds: [embed], components: [buttonRow] });
       
     } catch (error) {
       console.error('Error showing community fund address:', error);
@@ -2949,7 +3904,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const projects = getProjects(guildId);
+      const projects = await getProjects(guildId);
       
       if (!projects[projectName]) {
         await interaction.editReply({ content: `Project "${projectName}" not found.`, flags: [MessageFlags.Ephemeral] });
@@ -2964,9 +3919,94 @@ client.on('interactionCreate', async (interaction) => {
       const walletAddress = projectInfo.walletAddress || 'Not set';
       const userInput = projectInfo.userInput || 'No notes';
 
-      // Delete the project
-      delete projects[projectName];
-      saveServerData();
+      // Check if this project is set as community fund
+      const communityFundProject = await getCommunityFundProject(guildId);
+      let isCommunityFund = false;
+      if (communityFundProject === projectName) {
+        isCommunityFund = true;
+        
+        // Check for virtual account balances before deleting community fund
+        const accountsWithBalances = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
+        
+        if (accountsWithBalances.length > 0) {
+          // Calculate total balances
+          let totalRefunds = 0;
+          const balanceSummary = {};
+          for (const account of accountsWithBalances) {
+            for (const [token, balance] of Object.entries(account.balances)) {
+              totalRefunds++;
+              if (!balanceSummary[token]) {
+                balanceSummary[token] = new BigNumber(0);
+              }
+              balanceSummary[token] = balanceSummary[token].plus(new BigNumber(balance));
+            }
+          }
+
+          // Check Community Fund balances (totalRefunds transfers needed)
+          const balanceCheck = await checkCommunityFundBalances(guildId, totalRefunds);
+          if (!balanceCheck.sufficient) {
+            const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/delete-project');
+            await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
+            return;
+          }
+
+          const balanceSummaryText = Object.entries(balanceSummary)
+            .map(([token, amount]) => `${amount.toString()} ${token}`)
+            .join(', ');
+
+          await interaction.editReply({ 
+            content: `🔄 **Initiating Mass Refund...**\n\nThis project is set as the Community Fund and there are **${accountsWithBalances.length}** accounts with balances.\nTotal refunds to process: **${totalRefunds}**\nTotal amounts: ${balanceSummaryText}\n\nProcessing refunds one by one. This may take several minutes...`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+
+          // Process mass refund
+          let lastProgressUpdate = Date.now();
+          const refundResult = await processMassRefund(guildId, projectName, async (progress) => {
+            if (Date.now() - lastProgressUpdate > 5000) {
+              lastProgressUpdate = Date.now();
+              try {
+                await interaction.editReply({ 
+                  content: `🔄 **Mass Refund in Progress...**\n\n${progress.message}\n\nProcessed: ${progress.current || 0}/${progress.total || 0}\n\nPlease wait...`, 
+                  flags: [MessageFlags.Ephemeral] 
+                });
+              } catch (updateError) {
+                // Ignore update errors during processing
+              }
+            }
+          });
+
+          // Verify all balances are zero
+          const remainingAccounts = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
+          
+          if (remainingAccounts.length > 0) {
+            await interaction.editReply({ 
+              content: `❌ **Mass Refund Incomplete!**\n\n**${refundResult.successfulRefunds}** refunds succeeded, **${refundResult.failedRefunds}** failed.\n\nThere are still **${remainingAccounts.length}** accounts with balances.\n\n**Project deletion cancelled for safety.**\n\nPlease resolve failed refunds and try again.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+            return;
+          }
+
+          await interaction.editReply({ 
+            content: `✅ **Mass Refund Complete!**\n\nSuccessfully refunded **${refundResult.successfulRefunds}** transactions.\nAll virtual account balances are now zero.\n\nProceeding with project deletion...`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+        }
+        
+        // Clear community fund reference before deleting project
+        await dbServerData.updateGuildSettings(guildId, {
+          communityFundProject: null
+        });
+        console.log(`[DELETE-PROJECT] Cleared community fund reference for deleted project ${projectName}`);
+      }
+
+      // Delete the project from database
+      await dbServerData.deleteProject(guildId, projectName);
+      
+      // Clean up wallet timestamp if this was a Community Fund project
+      if (isCommunityFund && walletAddress) {
+        await blockchainListener.removeWalletTimestamp(walletAddress, projectName);
+        console.log(`[DELETE-PROJECT] Removed timestamp for deleted Community Fund wallet: ${walletAddress}`);
+      }
 
       const embed = new EmbedBuilder()
         .setTitle('Project Deleted Successfully')
@@ -2983,6 +4023,15 @@ client.on('interactionCreate', async (interaction) => {
         .setColor('#FF0000')
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      // Add warning if community fund was cleared
+      if (isCommunityFund) {
+        embed.addFields({
+          name: '⚠️ Community Fund Cleared',
+          value: 'This project was set as the Community Fund. The Community Fund reference has been cleared. Blockchain listener will stop monitoring this wallet.',
+          inline: false
+        });
+      }
 
       await interaction.editReply({ embeds: [embed] });
       
@@ -3019,13 +4068,193 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error deleting project: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (commandName === 'delete-all-server-data') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ content: '❌ **Admin Only!** This command is restricted to server administrators.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      const confirm = interaction.options.getString('confirm');
+
+      if (confirm !== 'DELETE ALL DATA') {
+        await interaction.editReply({ 
+          content: `❌ **Deletion Cancelled**\n\nTo delete ALL server data, you must type "DELETE ALL DATA" in the confirm field.\n\n⚠️ **WARNING:** This will permanently delete:\n- All projects\n- All user wallets\n- All virtual accounts and balances\n- All transaction history\n- All RPS games\n- All football matches and bets\n- All leaderboard data\n- All auction data\n- All house balances\n- All server settings\n\nThis action is **IRREVERSIBLE**!`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+
+      const guildId = interaction.guildId;
+
+      // Check for virtual account balances
+      const accountsWithBalances = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
+      
+      if (accountsWithBalances.length > 0) {
+        // Get community fund project for mass refund
+        const communityFundProject = await getCommunityFundProject(guildId);
+        
+        if (!communityFundProject) {
+          await interaction.editReply({ 
+            content: `❌ **Cannot proceed with deletion!**\n\nThere are **${accountsWithBalances.length}** virtual accounts with balances, but no Community Fund is configured.\n\nPlease set a Community Fund project using \`/set-community-fund\` to enable mass refund before deletion.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+
+        const projects = await getProjects(guildId);
+        const projectName = getCommunityFundProjectName();
+        if (!projects[projectName]) {
+          await interaction.editReply({ 
+            content: `❌ **Cannot proceed with deletion!**\n\nThe Community Fund project no longer exists.\n\nPlease set a valid Community Fund project using \`/set-community-fund\` to enable mass refund before deletion.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+
+        // Calculate total balances
+        let totalRefunds = 0;
+        const balanceSummary = {};
+        for (const account of accountsWithBalances) {
+          for (const [token, balance] of Object.entries(account.balances)) {
+            totalRefunds++;
+            if (!balanceSummary[token]) {
+              balanceSummary[token] = new BigNumber(0);
+            }
+            balanceSummary[token] = balanceSummary[token].plus(new BigNumber(balance));
+          }
+        }
+
+        // Check Community Fund balances (totalRefunds transfers needed)
+        const balanceCheck = await checkCommunityFundBalances(guildId, totalRefunds);
+        if (!balanceCheck.sufficient) {
+          const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/delete-all-server-data');
+          await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+
+        // Show mass refund initiation
+        const balanceSummaryText = Object.entries(balanceSummary)
+          .map(([token, amount]) => `${amount.toString()} ${token}`)
+          .join(', ');
+
+        await interaction.editReply({ 
+          content: `🔄 **Initiating Mass Refund...**\n\nFound **${accountsWithBalances.length}** accounts with balances.\nTotal refunds to process: **${totalRefunds}**\nTotal amounts: ${balanceSummaryText}\n\nProcessing refunds one by one. This may take several minutes...`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+
+        // Process mass refund with progress updates (use project name for lookup)
+        let lastProgressUpdate = Date.now();
+        const refundResult = await processMassRefund(guildId, projectName, async (progress) => {
+          // Update progress every 5 seconds
+          if (Date.now() - lastProgressUpdate > 5000) {
+            lastProgressUpdate = Date.now();
+            try {
+              await interaction.editReply({ 
+                content: `🔄 **Mass Refund in Progress...**\n\n${progress.message}\n\nProcessed: ${progress.current || 0}/${progress.total || 0}\n\nPlease wait...`, 
+                flags: [MessageFlags.Ephemeral] 
+              });
+            } catch (updateError) {
+              // Ignore update errors during processing
+            }
+          }
+        });
+
+        // Verify all balances are zero
+        const remainingAccounts = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
+        
+        if (remainingAccounts.length > 0) {
+          await interaction.editReply({ 
+            content: `❌ **Mass Refund Incomplete!**\n\n**${refundResult.successfulRefunds}** refunds succeeded, **${refundResult.failedRefunds}** failed.\n\nThere are still **${remainingAccounts.length}** accounts with balances.\n\n**Deletion cancelled for safety.**\n\nPlease resolve failed refunds and try again.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+
+        // All balances cleared, proceed with deletion
+        await interaction.editReply({ 
+          content: `✅ **Mass Refund Complete!**\n\nSuccessfully refunded **${refundResult.successfulRefunds}** transactions.\nAll virtual account balances are now zero.\n\nProceeding with server data deletion...`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+      } else {
+        // No balances, proceed directly to deletion
+        await interaction.editReply({ 
+          content: `✅ **No virtual account balances found.**\n\nProceeding with server data deletion...`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+      }
+
+      // Get Community Fund wallet address before deletion (for timestamp cleanup)
+      const communityFundProject = await getCommunityFundProject(guildId);
+      let communityFundWalletAddress = null;
+      if (communityFundProject) {
+        const project = await dbServerData.getProject(guildId, 'Community Fund');
+        if (project && project.walletAddress) {
+          communityFundWalletAddress = project.walletAddress;
+        }
+      }
+      
+      // Delete all server data
+      const deleteResult = await dbServerData.deleteAllServerData(guildId);
+      
+      // Clean up wallet timestamp for Community Fund wallet (if it existed)
+      if (communityFundWalletAddress) {
+        await blockchainListener.removeWalletTimestamp(communityFundWalletAddress, 'Community Fund');
+        console.log(`[DELETE-ALL] Removed timestamp for Community Fund wallet: ${communityFundWalletAddress}`);
+      }
+      
+      // Also run cleanup as a safety net to catch any other orphaned timestamps
+      await blockchainListener.cleanupOrphanedTimestamps();
+      console.log(`[DELETE-ALL] Cleaned up orphaned timestamps for guild ${guildId}`);
+
+      if (deleteResult.success) {
+        const embed = new EmbedBuilder()
+          .setTitle('🗑️ All Server Data Deleted')
+          .setDescription(`**Hard Reset Complete**\n\nAll server data has been permanently deleted.`)
+          .addFields([
+            { name: 'Deleted By', value: `<@${interaction.user.id}>`, inline: true },
+            { name: 'Status', value: '✅ Complete', inline: true },
+            { name: 'Timestamp', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
+          ])
+          .setColor('#FF0000')
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+
+        await interaction.editReply({ 
+          content: `✅ **Server data deletion complete!**`, 
+          embeds: [embed],
+          flags: [MessageFlags.Ephemeral] 
+        });
+
+        console.log(`All server data deleted for guild ${guildId} by ${interaction.user.tag}`);
+      } else {
+        const failedTables = Object.entries(deleteResult.results)
+          .filter(([_, result]) => !result.success)
+          .map(([table, result]) => `${table}: ${result.error || 'Unknown error'}`)
+          .join('\n');
+
+        await interaction.editReply({ 
+          content: `⚠️ **Deletion Partially Complete**\n\nSome tables failed to delete:\n\`\`\`${failedTables}\`\`\`\n\nPlease check logs and retry if needed.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+      }
+    } catch (error) {
+      console.error('Error deleting all server data:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
   } else if (commandName === 'play-rps') {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       const challengeId = interaction.options.getString('challenge-id');
       const move = interaction.options.getString('move');
       const guildId = interaction.guildId;
-      const challenges = getRPSChallenges(guildId);
+      const challenges = await getRPSChallenges(guildId);
       const challenge = challenges[challengeId];
       if (!challenge || challenge.status !== 'active') {
         await interaction.editReply({ content: 'This challenge is not active or does not exist.', flags: [MessageFlags.Ephemeral] });
@@ -3056,7 +4285,8 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       currentRound[playerChoiceKey] = move;
-      saveRpsGamesData();
+      // Update game in database
+      await dbRpsGames.updateGame(guildId, challengeId, { rounds: challenge.rounds });
       // Send game state embed to user after their move
       const moveEmbed = new EmbedBuilder()
         .setTitle('🎮 RPS Move Submitted')
@@ -3087,7 +4317,11 @@ client.on('interactionCreate', async (interaction) => {
             winner: null,
             result: null
           };
-          saveRpsGamesData();
+          // Update game in database
+          await dbRpsGames.updateGame(guildId, challengeId, { 
+            currentRound: challenge.currentRound,
+            rounds: challenge.rounds 
+          });
           const roundEmbed = new EmbedBuilder()
             .setTitle('🎮 RPS Round Draw!')
             .setDescription(`Round ${currentRound.round} ended in a draw! Both players, choose again for round ${challenge.currentRound}.`)
@@ -3136,12 +4370,22 @@ client.on('interactionCreate', async (interaction) => {
           challenge.loserId = loserId;
           challenge.loserTag = loserTag;
           challenge.completedAt = Date.now();
-          saveRpsGamesData();
+          // Update game in database
+          await dbRpsGames.updateGame(guildId, challengeId, {
+            status: 'completed',
+            winner: winner,
+            winnerId: winnerId,
+            winnerTag: winnerTag,
+            loserId: loserId,
+            loserTag: loserTag,
+            completedAt: Date.now(),
+            rounds: challenge.rounds
+          });
           
           // Get balances BEFORE adding prize to ensure we have correct loser balance
           virtualAccounts.forceReloadData();
-          const loserBalance = virtualAccounts.getUserBalance(guildId, loserId, challenge.token);
-          const winnerBalanceBeforePrize = virtualAccounts.getUserBalance(guildId, winnerId, challenge.token);
+          const loserBalance = await virtualAccounts.getUserBalance(guildId, loserId, challenge.token);
+          const winnerBalanceBeforePrize = await virtualAccounts.getUserBalance(guildId, winnerId, challenge.token);
           
           console.log(`[RPS DEBUG] Before prize - Winner: ${winnerId}, Loser: ${loserId}, Token: ${challenge.token}`);
           console.log(`[RPS DEBUG] Winner balance before prize: ${winnerBalanceBeforePrize}, Loser balance: ${loserBalance}`);
@@ -3151,7 +4395,7 @@ client.on('interactionCreate', async (interaction) => {
           let prizeResult = null;
           if (challenge.humanAmount && challenge.token) {
             try {
-              prizeResult = virtualAccounts.addFundsToAccount(
+              prizeResult = await virtualAccounts.addFundsToAccount(
                 guildId,
                 winnerId,
                 challenge.token,
@@ -3166,7 +4410,7 @@ client.on('interactionCreate', async (interaction) => {
           }
           
           // Get winner's final balance after prize
-          const winnerBalance = virtualAccounts.getUserBalance(guildId, winnerId, challenge.token);
+          const winnerBalance = await virtualAccounts.getUserBalance(guildId, winnerId, challenge.token);
           
           console.log(`[RPS DEBUG] After prize - Winner final balance: ${winnerBalance}, Loser balance: ${loserBalance}`);
           
@@ -3191,6 +4435,10 @@ client.on('interactionCreate', async (interaction) => {
           try {
             const winnerUser = await client.users.fetch(winnerId);
             if (winnerUser) {
+              // Get Community Fund project logo for RPS winner notification
+              const communityFundProjectName = getCommunityFundProjectName();
+              const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
+              
               const winnerDMEmbed = new EmbedBuilder()
                 .setTitle('🎉 You Won Rock, Paper, Scissors!')
                 .setDescription(`Congratulations! You won the RPS game and received **${totalPrizeHuman} ${challenge.token}** in your virtual account.`)
@@ -3200,7 +4448,7 @@ client.on('interactionCreate', async (interaction) => {
                   { name: 'Your New Balance', value: `${winnerBalance} ${challenge.token}`, inline: true }
                 ])
                 .setColor('#00FF00')
-                .setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif')
+                .setThumbnail(projectLogoUrl)
                 .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
                 .setTimestamp();
               await winnerUser.send({ embeds: [winnerDMEmbed] });
@@ -3226,10 +4474,11 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guildId;
       
       // Get server configuration
-      const serverConfig = serverData[guildId] || {};
-      const projects = getProjects(guildId);
-      const fundProject = serverConfig.communityFundProject;
-      const fundProjectData = fundProject ? projects[fundProject] : null;
+      const serverConfig = await dbServerData.getGuildSettings(guildId) || {};
+      const projects = await getProjects(guildId);
+      const fundProject = serverConfig.communityFundProject; // This is the fund name for display
+      const projectName = getCommunityFundProjectName(); // This is the actual project name for lookup
+      const fundProjectData = projects[projectName] || null;
       
       // Build debug embed
       const debugEmbed = new EmbedBuilder()
@@ -3239,7 +4488,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Server ID', value: guildId, inline: true },
           { name: 'Community Fund Project', value: fundProject || '❌ Not set', inline: true },
           { name: 'Total Projects', value: Object.keys(projects).length.toString(), inline: true },
-          { name: 'Total Users', value: Object.keys(serverConfig.userWallets || {}).length.toString(), inline: true }
+          { name: 'Total Users', value: Object.keys(await getUserWallets(guildId) || {}).length.toString(), inline: true }
         ])
         .setColor(fundProject ? '#00FF00' : '#FF0000')
         .setTimestamp();
@@ -3299,7 +4548,7 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guildId;
       
       // Get user wallets for this server
-      const userWallets = getUserWallets(guildId);
+      const userWallets = await getUserWallets(guildId);
       const userWallet = userWallets[userId];
       
       // Get guild member info
@@ -3395,9 +4644,9 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       // Check if community fund is set
-      const fundProject = serverData[guildId]?.communityFundProject;
+      const fundProject = await getCommunityFundProject(guildId);
       if (!fundProject) {
-        const availableProjects = Object.keys(getProjects(guildId));
+        const availableProjects = Object.keys(await getProjects(guildId));
         await interaction.editReply({ 
           content: `❌ **No Community Tip Fund configured!**\n\nThis server needs a Community Tip Fund to create football fixtures.\n\n**To fix this:**\n1. Ask an admin to run \`/set-community-fund\`\n2. Select a project that supports the tokens you want to use for betting\n\n**Current projects:** ${availableProjects.length > 0 ? availableProjects.join(', ') : 'None'}\n\n**Example:** \`/set-community-fund project-name:YourProjectName\``, 
           flags: [MessageFlags.Ephemeral] 
@@ -3405,14 +4654,15 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const projects = getProjects(guildId);
-      if (!projects[fundProject]) {
-        await interaction.editReply({ content: `The Community Tip Fund project ("${fundProject}") no longer exists. Please ask an admin to set it again.`, flags: [MessageFlags.Ephemeral] });
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      if (!projects[projectName]) {
+        await interaction.editReply({ content: `The Community Tip Fund project no longer exists. Please ask an admin to set it again.`, flags: [MessageFlags.Ephemeral] });
         return;
       }
 
       // Validate token is supported by community fund
-      const fundSupportedTokens = projects[fundProject].supportedTokens || [];
+      const fundSupportedTokens = projects[projectName].supportedTokens || [];
       if (!fundSupportedTokens.includes(tokenTicker)) {
         await interaction.editReply({ content: `Token "${tokenTicker}" is not supported by the Community Fund. Supported tokens: ${fundSupportedTokens.join(', ') || 'None configured'}`, flags: [MessageFlags.Ephemeral] });
         return;
@@ -3471,12 +4721,11 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // Store last competition used
-        if (!serverData[guildId]) serverData[guildId] = {};
-        serverData[guildId].lastCompetition = competition;
-        saveServerData();
+        await dbServerData.updateGuildSettings(guildId, {
+          lastCompetition: competition
+        });
 
         // Initialize football data for this guild
-        initializeFootballData(guildId);
 
         let createdMatches = 0;
         let skippedMatches = 0;
@@ -3487,14 +4736,16 @@ client.on('interactionCreate', async (interaction) => {
           const matchId = fixture.id.toString();
           const kickoffTime = new Date(fixture.utcDate);
           
-          // Check if match already exists (multi-server support)
-          const existingMatch = footballMatchesData[matchId];
+          // Check if match already exists in database
+          const existingMatch = await dbFootball.getMatch(matchId);
           
           // Check if this match already has an embed for this guild
-          const hasEmbedForGuild = existingMatch && 
-            existingMatch.embeds && 
-            existingMatch.embeds[guildId] && 
-            existingMatch.embeds[guildId].messageId;
+          let hasEmbedForGuild = false;
+          if (existingMatch) {
+            const guildMatches = await dbFootball.getMatchesByGuild(guildId);
+            const matchInGuild = guildMatches[matchId];
+            hasEmbedForGuild = matchInGuild && matchInGuild.embeds && matchInGuild.embeds[guildId] && matchInGuild.embeds[guildId].messageId;
+          }
           
           if (hasEmbedForGuild) {
             // Match already exists and has embed for this guild - skip to avoid duplication
@@ -3503,51 +4754,7 @@ client.on('interactionCreate', async (interaction) => {
             continue;
           }
           
-          if (existingMatch) {
-            // Match exists but no embed for this guild - add this guild to the existing match
-            console.log(`[FOOTBALL] Match ${matchId} already exists, adding guild ${guildId} to existing match`);
-            
-            // Add guild to guildIds if not already present
-            if (!existingMatch.guildIds.includes(guildId)) {
-              existingMatch.guildIds.push(guildId);
-            }
-            
-            // Initialize embeds for this guild if not exists
-            if (!existingMatch.embeds) {
-              existingMatch.embeds = {};
-            }
-            // Don't clear existing embed data - only initialize if it doesn't exist
-            if (!existingMatch.embeds[guildId]) {
-              existingMatch.embeds[guildId] = {};
-            }
-            
-            // Initialize requiredAmountWeiPerGuild if not exists (migration from old format)
-            if (!existingMatch.requiredAmountWeiPerGuild) {
-              existingMatch.requiredAmountWeiPerGuild = {};
-              // Migrate existing global requiredAmountWei to per-guild format
-              if (existingMatch.requiredAmountWei) {
-                for (const existingGuildId of existingMatch.guildIds) {
-                  existingMatch.requiredAmountWeiPerGuild[existingGuildId] = existingMatch.requiredAmountWei;
-                }
-              }
-            }
-            
-            // Store guild-specific stake (preserve other guilds' stakes)
-            existingMatch.requiredAmountWeiPerGuild[guildId] = requiredAmountWei;
-            
-            // Update token info if different (use the latest)
-            existingMatch.token = { 
-              ticker: tokenTicker, 
-              identifier: tokenIdentifier, 
-              decimals: decimals 
-            };
-            
-            // Keep old requiredAmountWei for backward compatibility, but use it only if no per-guild data exists
-            // Don't overwrite it, as it might be from another guild
-            
-            console.log(`[FOOTBALL] Updated existing match ${matchId} for guild ${guildId}. Total guilds: ${existingMatch.guildIds.length}`);
-          } else {
-            // New match - create fresh match data
+          // Prepare match data
           const matchData = {
             matchId: matchId,
             compCode: competition,
@@ -3560,18 +4767,34 @@ client.on('interactionCreate', async (interaction) => {
               identifier: tokenIdentifier, 
               decimals: decimals 
             },
-            requiredAmountWeiPerGuild: {
-              [guildId]: requiredAmountWei
-            },
-            requiredAmountWei: requiredAmountWei, // Keep for backward compatibility
+            requiredAmountWei: requiredAmountWei,
             status: 'SCHEDULED',
-              ftScore: { home: 0, away: 0 },
-              guildIds: [guildId],
-              embeds: {}
-            };
-
-            // Save new match
-            footballMatchesData[matchId] = matchData;
+            ftScore: { home: 0, away: 0 },
+            guildIds: existingMatch ? (existingMatch.guildIds || []).concat(existingMatch.guildIds && existingMatch.guildIds.includes(guildId) ? [] : [guildId]) : [guildId],
+            embeds: existingMatch && existingMatch.embeds ? existingMatch.embeds : {}
+          };
+          
+          if (existingMatch) {
+            // Match exists but no embed for this guild - add this guild to the existing match
+            console.log(`[FOOTBALL] Match ${matchId} already exists, adding guild ${guildId} to existing match`);
+            
+            // Ensure the new guild is in embeds (even if empty) so updateMatch processes it
+            if (!matchData.embeds[guildId]) {
+              matchData.embeds[guildId] = {};
+            }
+            
+            // Update match in database (only shared data, guild config is handled separately)
+            await dbFootball.updateMatch(matchId, {
+              guildIds: matchData.guildIds,
+              embeds: matchData.embeds,
+              // Include token and stake for the new guild being added
+              token: matchData.token,
+              requiredAmountWei: matchData.requiredAmountWei
+            });
+            console.log(`[FOOTBALL] Updated existing match ${matchId} for guild ${guildId}`);
+          } else {
+            // New match - create fresh match data
+            await dbFootball.createMatch(matchData);
             console.log(`[FOOTBALL] Created new match ${matchId} for guild ${guildId}`);
             newMatches++;
           }
@@ -3592,7 +4815,8 @@ client.on('interactionCreate', async (interaction) => {
             .setTimestamp();
           
           // Add QR code as thumbnail if available
-          const communityFundQR = serverData[guildId]?.communityFundQR?.[fundProject];
+          const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+          const communityFundQR = communityFundQRData?.[fundProject];
           if (communityFundQR) {
             matchEmbed.setThumbnail(communityFundQR);
           }
@@ -3618,10 +4842,20 @@ client.on('interactionCreate', async (interaction) => {
             });
 
             // Update match data with message and thread IDs
-            footballMatchesData[matchId].embeds[guildId] = {
-              messageId: matchMessage.id,
-              threadId: thread.id
-            };
+            const currentMatch = await dbFootball.getMatch(matchId);
+            if (currentMatch) {
+              const updatedEmbeds = currentMatch.embeds || {};
+              updatedEmbeds[guildId] = {
+                messageId: matchMessage.id,
+                threadId: thread.id
+              };
+              // Only update embeds - don't pass token/stake (guild already exists, will preserve existing config)
+              await dbFootball.updateMatch(matchId, {
+                embeds: updatedEmbeds,
+                guildIds: currentMatch.guildIds || [guildId]
+                // Don't pass token/requiredAmountWei - guild already exists, will preserve existing config
+              });
+            }
             
             console.log(`[FOOTBALL] Created thread ${thread.id} for match ${matchId}`);
             
@@ -3639,7 +4873,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         // Save all matches
-        saveFootballMatchesData();
+        // Removed - using database
 
         let resultMessage = `✅ **Football fixtures created successfully!**\n\n**Competition:** ${competition}\n**Matches Created:** ${createdMatches}\n**Channel:** ${channel}\n**Stake:** ${amount} ${tokenTicker}`;
         
@@ -3688,8 +4922,8 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       // Check if match still exists and is accepting bets
-      const match = footballMatchesData[matchId];
-      if (!match || !match.guildIds.includes(guildId)) {
+      const match = await dbFootball.getMatch(matchId);
+      if (!match || !match.guildIds || !match.guildIds.includes(guildId)) {
         await interaction.reply({ content: '❌ Match not found or no longer available for betting.', flags: [MessageFlags.Ephemeral] });
         return;
       }
@@ -3705,14 +4939,24 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // Check if user has sufficient virtual balance
+      // Get guild-specific token configuration
+      const token = getMatchTokenForGuild(match, guildId);
+      if (!token) {
+        await interaction.reply({ 
+          content: '❌ **Error:** No token configuration found for this match in this guild.', 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+
+      // Check if user has sufficient virtual balance (using identifier)
       const requiredAmountWei = getMatchStakeForGuild(match, guildId);
-      const requiredAmount = new BigNumber(requiredAmountWei).dividedBy(new BigNumber(10).pow(match.token.decimals)).toString();
-      const currentBalance = virtualAccounts.getUserBalance(guildId, interaction.user.id, match.token.ticker);
+      const requiredAmount = new BigNumber(requiredAmountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+      const currentBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, token.identifier);
       
       if (new BigNumber(currentBalance).isLessThan(requiredAmount)) {
         await interaction.reply({ 
-          content: `❌ **Insufficient virtual balance!**\n\nYou have: **${currentBalance}** ${match.token.ticker}\nRequired: **${requiredAmount}** ${match.token.ticker}\n\nTop up your account by making a transfer to any Community Fund wallet!`, 
+          content: `❌ **Insufficient virtual balance!**\n\nYou have: **${currentBalance}** ${token.ticker}\nRequired: **${requiredAmount}** ${token.ticker}\n\nTop up your account by making a transfer to any Community Fund wallet!`, 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
@@ -3721,11 +4965,11 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       await interaction.editReply({ content: '💸 Processing your virtual bet...', flags: [MessageFlags.Ephemeral] });
       
-      // Deduct funds from virtual account
-      const deductionResult = virtualAccounts.deductFundsFromAccount(
+      // Deduct funds from virtual account (using identifier)
+      const deductionResult = await virtualAccounts.deductFundsFromAccount(
         guildId, 
         interaction.user.id, 
-        match.token.ticker, 
+        token.identifier, 
         requiredAmount, 
         `Football bet: ${match.home} vs ${match.away} (${outcome})`
       );
@@ -3746,7 +4990,7 @@ client.on('interactionCreate', async (interaction) => {
         matchId: matchId,
         userId: interaction.user.id,
         outcome: outcome,
-        token: match.token,
+        token: token,
         amountWei: betAmountWei,
         txHash: null, // No blockchain transaction needed
         createdAtISO: new Date().toISOString(),
@@ -3754,13 +4998,22 @@ client.on('interactionCreate', async (interaction) => {
         virtualBet: true // Mark as virtual bet
       };
 
-      // Save bet
-      initializeFootballData(guildId);
-      footballBetsData[guildId][betId] = betData;
-      saveFootballBetsData();
+      // Save bet to database
+      await dbFootball.createBet({
+        betId: betId,
+        guildId: guildId,
+        matchId: matchId,
+        userId: interaction.user.id,
+        outcome: outcome,
+        tokenData: token,
+        amountWei: betAmountWei,
+        txHash: 'VIRTUAL_BET',
+        createdAtISO: new Date().toISOString(),
+        status: 'ACCEPTED'
+      });
 
-      // Track bet amount for PNL calculation
-      trackBetAmount(guildId, interaction.user.id, betAmountWei, match.token.ticker);
+      // Track bet amount for PNL calculation (using identifier)
+      await trackBetAmount(guildId, interaction.user.id, betAmountWei, token.identifier, token.ticker);
 
       // Update the main match embed with new pot size
       try {
@@ -3769,8 +5022,8 @@ client.on('interactionCreate', async (interaction) => {
         const matchMessage = await channel.messages.fetch(match.embeds[guildId].messageId);
         if (matchMessage && matchMessage.embeds && matchMessage.embeds.length > 0) {
           // Calculate current pot size using utility function
-          const potSize = calculateMatchPotSize(guildId, matchId);
-          console.log(`[FOOTBALL] Calculated pot size: ${potSize.totalPotHuman} ${match.token.ticker} (bet-virtual command)`);
+          const potSize = await calculateMatchPotSize(guildId, matchId);
+          console.log(`[FOOTBALL] Calculated pot size: ${potSize.totalPotHuman} ${token.ticker} (bet-virtual command)`);
           
           // Update the embed - handle both fetched message embeds and EmbedBuilder
           let updatedEmbed;
@@ -3782,16 +5035,31 @@ client.on('interactionCreate', async (interaction) => {
             updatedEmbed = EmbedBuilder.from(matchMessage.embeds[0]);
           }
           
-          // Check if fields exist and find the pot size field
+          // Check if fields exist and update both pot size and stake fields
           if (updatedEmbed.data && updatedEmbed.data.fields && Array.isArray(updatedEmbed.data.fields)) {
             const potSizeField = updatedEmbed.data.fields.find(field => field.name === '🏆 Pot Size');
+            const stakeField = updatedEmbed.data.fields.find(field => field.name === '💰 Stake');
+            
+            let needsUpdate = false;
+            
             if (potSizeField) {
-              potSizeField.value = `${potSize.totalPotHuman} ${match.token.ticker}`;
-              
+              potSizeField.value = `${potSize.totalPotHuman} ${token.ticker}`;
+              needsUpdate = true;
+            }
+            
+            // Also update stake field to ensure it shows the correct guild-specific stake
+            if (stakeField) {
+              const stakeAmountWei = getMatchStakeForGuild(match, guildId);
+              const stakeAmountHuman = new BigNumber(stakeAmountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+              stakeField.value = `${stakeAmountHuman} ${token.ticker}`;
+              needsUpdate = true;
+            }
+            
+            if (needsUpdate) {
               await matchMessage.edit({ embeds: [updatedEmbed] });
-              console.log(`[FOOTBALL] Updated match embed pot size to ${potSize.totalPotHuman} ${match.token.ticker} for match ${matchId} (bet-virtual command)`);
+              console.log(`[FOOTBALL] Updated match embed pot size to ${potSize.totalPotHuman} ${token.ticker} and stake for match ${matchId} (bet-virtual command)`);
             } else {
-              console.log(`[FOOTBALL] Pot size field not found in embed for match ${matchId}. Available fields:`, updatedEmbed.data.fields.map(f => f.name));
+              console.log(`[FOOTBALL] Pot size or stake field not found in embed for match ${matchId}. Available fields:`, updatedEmbed.data.fields.map(f => f.name));
             }
           } else {
             console.log(`[FOOTBALL] Embed fields not accessible for match ${matchId}. Fields type:`, typeof updatedEmbed.data?.fields);
@@ -3814,7 +5082,7 @@ client.on('interactionCreate', async (interaction) => {
               .setDescription(`${interaction.user} placed a virtual bet on **${match.home} vs ${match.away}**`)
               .addFields([
                 { name: 'Outcome', value: outcome === 'H' ? 'Home Win' : outcome === 'A' ? 'Away Win' : 'Draw', inline: true },
-                { name: 'Amount', value: `${requiredAmount} ${match.token.ticker}`, inline: true },
+                { name: 'Amount', value: `${requiredAmount} ${token.ticker}`, inline: true },
                 { name: 'Type', value: 'Virtual Balance', inline: true }
               ])
               .setColor('#00FF00')
@@ -3828,7 +5096,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       await interaction.editReply({ 
-        content: `✅ **Virtual bet placed successfully!**\n\n**Match:** ${match.home} vs ${match.away}\n**Outcome:** ${outcome === 'H' ? 'Home Win' : outcome === 'A' ? 'Away Win' : 'Draw'}\n**Amount:** ${requiredAmount} ${match.token.ticker}\n\nGood luck! 🍀`, 
+        content: `✅ **Virtual bet placed successfully!**\n\n**Match:** ${match.home} vs ${match.away}\n**Outcome:** ${outcome === 'H' ? 'Home Win' : outcome === 'A' ? 'Away Win' : 'Draw'}\n**Amount:** ${requiredAmount} ${token.ticker}\n\nGood luck! 🍀`, 
         flags: [MessageFlags.Ephemeral] 
       });
 
@@ -3851,15 +5119,20 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply();
       }
 
-      // Initialize football data for this guild
-      initializeFootballData(guildId);
-
-      const guildBets = footballBetsData[guildId] || {};
-
-      // Get matches for this guild from flat structure
-      const guildMatches = Object.values(footballMatchesData).filter(match => 
-        match.guildIds.includes(guildId)
-      );
+      // Get matches for this guild from database
+      const guildMatchesObj = await dbFootball.getMatchesByGuild(guildId);
+      const guildMatches = Object.values(guildMatchesObj || {});
+      
+      // Get all bets for this guild
+      const allBets = [];
+      for (const match of guildMatches) {
+        const matchBets = await dbFootball.getBetsByMatch(guildId, match.matchId);
+        allBets.push(...Object.values(matchBets || {}));
+      }
+      const guildBets = {};
+      allBets.forEach(bet => {
+        guildBets[bet.betId] = bet;
+      });
 
       if (guildMatches.length === 0) {
         await interaction.editReply({ 
@@ -3888,7 +5161,8 @@ client.on('interactionCreate', async (interaction) => {
 
       for (const match of currentMatches) {
         const matchBets = Object.values(guildBets).filter(bet => bet.matchId === match.matchId);
-        const potSize = calculateMatchPotSize(guildId, match.matchId);
+        const potSize = await calculateMatchPotSize(guildId, match.matchId);
+        const token = getMatchTokenForGuild(match, guildId);
         
         const kickoffTime = new Date(match.kickoffISO);
         const timeUntilKickoff = kickoffTime.getTime() - Date.now();
@@ -3902,7 +5176,7 @@ client.on('interactionCreate', async (interaction) => {
 
         embed.addFields({
           name: `${match.home} vs ${match.away}`,
-          value: `**Game ID:** \`${match.matchId}\`\n**Status:** ${statusText}\n**Pot Size:** ${potSize.totalPotHuman} ${match.token.ticker}\n**Bets:** ${matchBets.length}\n**Kickoff:** <t:${Math.floor(kickoffTime.getTime() / 1000)}:R>`,
+          value: `**Game ID:** \`${match.matchId}\`\n**Status:** ${statusText}\n**Pot Size:** ${potSize.totalPotHuman} ${token?.ticker || 'N/A'}\n**Bets:** ${matchBets.length}\n**Kickoff:** <t:${Math.floor(kickoffTime.getTime() / 1000)}:R>`,
           inline: true
         });
       }
@@ -3920,7 +5194,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
-      const lastCompetition = serverData[guildId]?.lastCompetition;
+      const lastCompetition = await getLastCompetition(guildId);
       
       if (!lastCompetition) {
         await interaction.editReply({ 
@@ -3991,7 +5265,7 @@ client.on('interactionCreate', async (interaction) => {
         '💰 Token Transfers': [
           '`/send-esdt` 🔴 Admin - Send tokens to a user',
           '`/house-tip` 🔴 Admin - Tip from house balance',
-          '`/list-wallets` 🔴 Admin - List registered wallets',
+          '`/list-wallets` - List registered wallets (verify your registration)',
           '`/show-community-fund-address` - View community fund address'
         ],
         '🔧 Utilities & Debug': [
@@ -4104,10 +5378,8 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply();
       }
 
-      // Initialize football data for this guild
-      initializeFootballData(guildId);
-
-      const guildLeaderboard = footballLeaderboardData[guildId] || {};
+      // Get leaderboard from database
+      const guildLeaderboard = await dbLeaderboard.getLeaderboard(guildId) || {};
       
       if (Object.keys(guildLeaderboard).length === 0) {
         await interaction.editReply({ 
@@ -4156,7 +5428,7 @@ client.on('interactionCreate', async (interaction) => {
           const tokenEarningsList = [];
           for (const [tokenTicker, earningsWei] of Object.entries(user.tokenEarnings)) {
             // Get stored decimals for this token - NO FALLBACKS
-            const storedDecimals = getStoredTokenDecimals(interaction.guildId, tokenTicker);
+            const storedDecimals = await getStoredTokenDecimals(interaction.guildId, tokenTicker);
             if (storedDecimals !== null) {
               const earningsHuman = new BigNumber(earningsWei || 0).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
               if (parseFloat(earningsHuman) > 0) {
@@ -4170,7 +5442,7 @@ client.on('interactionCreate', async (interaction) => {
           totalEarningsHuman = tokenEarningsList.length > 0 ? tokenEarningsList.join(', ') : '0.00 tokens';
         } else {
           // Old format: try to use stored metadata for REWARD-cf6eac
-          const storedDecimals = getStoredTokenDecimals(interaction.guildId, 'REWARD-cf6eac');
+          const storedDecimals = await getStoredTokenDecimals(interaction.guildId, 'REWARD-cf6eac');
           if (storedDecimals !== null) {
             totalEarningsHuman = new BigNumber(user.totalEarningsWei || 0).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
           } else {
@@ -4208,11 +5480,8 @@ client.on('interactionCreate', async (interaction) => {
       
       await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
 
-      // Initialize football data for this guild
-      initializeFootballData(guildId);
-
-      const guildLeaderboard = footballLeaderboardData[guildId] || {};
-      const userData = guildLeaderboard[interaction.user.id];
+      // Get user stats from database
+      const userData = await dbLeaderboard.getUserStats(guildId, interaction.user.id);
 
       if (!userData) {
         await interaction.editReply({ 
@@ -4234,28 +5503,35 @@ client.on('interactionCreate', async (interaction) => {
       embed.setDescription(`**${username}'s** Football Betting Statistics`);
 
       // Calculate win rate based on finished matches only
-      const userBets = Object.values(footballBetsData[guildId] || {}).filter(bet => bet.userId === interaction.user.id);
-      const userMatchIds = [...new Set(userBets.map(bet => bet.matchId))];
+      const userBets = await dbFootball.getBetsByUser(guildId, interaction.user.id);
+      const userBetsArray = Object.values(userBets || {});
+      const userMatchIds = [...new Set(userBetsArray.map(bet => bet.matchId))];
       
       // Count finished matches - check multiple indicators:
-      // 1. Matches still in footballMatchesData with status FINISHED
-      const finishedMatchesByStatus = userMatchIds.filter(matchId => {
-        const match = footballMatchesData[matchId];
-        return match && match.status === 'FINISHED';
-      }).length;
+      // 1. Matches with status FINISHED
+      let finishedMatchesByStatus = 0;
+      for (const matchId of userMatchIds) {
+        const match = await dbFootball.getMatch(matchId);
+        if (match && match.status === 'FINISHED') {
+          finishedMatchesByStatus++;
+        }
+      }
       
       // 2. Count unique match IDs where at least one bet from that match has a prize
       // (This indicates the match finished and prizes were distributed, even if match was cleaned up)
       const matchesWithPrizes = new Set();
-      userBets.forEach(bet => {
-        if (bet.prizeSent === true || bet.prizeAmount !== undefined) {
-          matchesWithPrizes.add(bet.matchId);
-        }
+      userBetsArray.forEach(bet => {
+        // Note: prize tracking would need to be added to database schema if needed
+        // For now, we'll rely on match status
       });
       
       // 3. For matches with prizes, also check if other users' bets from same match have prizes
       // This helps identify finished matches even if this user lost
-      const allBetsForMatches = Object.values(footballBetsData[guildId] || {});
+      const allBetsForMatches = [];
+      for (const matchId of userMatchIds) {
+        const matchBets = await dbFootball.getBetsByMatch(guildId, matchId);
+        allBetsForMatches.push(...Object.values(matchBets || {}));
+      }
       userMatchIds.forEach(matchId => {
         const matchBets = allBetsForMatches.filter(bet => bet.matchId === matchId);
         // If any bet from this match has a prize, the match finished
@@ -4292,48 +5568,126 @@ client.on('interactionCreate', async (interaction) => {
       const pnlWei = totalEarningsWei.minus(totalBetsWei);
 
       // Get all tokens with metadata
-      const allTokens = new Set();
+      // Note: tokenEarnings and tokenBets are stored by tokenIdentifier (e.g., "REWARD-cf6eac")
+      const allTokenIdentifiers = new Set();
       if (userData.tokenEarnings) {
-        Object.keys(userData.tokenEarnings).forEach(token => allTokens.add(token));
+        Object.keys(userData.tokenEarnings).forEach(token => allTokenIdentifiers.add(token));
       }
       if (userData.tokenBets) {
-        Object.keys(userData.tokenBets).forEach(token => allTokens.add(token));
+        Object.keys(userData.tokenBets).forEach(token => allTokenIdentifiers.add(token));
       }
+
+      // Get token metadata to map identifiers to tickers
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      
+      // Fetch token prices for USD calculations
+      const tokenPrices = {};
+      const uniqueTokenIds = Array.from(allTokenIdentifiers).filter(id => {
+        // Only fetch prices for valid identifiers (format: TICKER-6hexchars)
+        const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+        return esdtIdentifierRegex.test(id);
+      });
+      
+      // Fetch prices in parallel
+      const pricePromises = uniqueTokenIds.map(async (tokenIdentifier) => {
+        try {
+          const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+          if (priceResponse.ok) {
+            const priceData = await priceResponse.json();
+            return { tokenIdentifier, price: priceData.price || 0 };
+          }
+        } catch (error) {
+          console.error(`[MY-STATS] Error fetching price for ${tokenIdentifier}:`, error.message);
+        }
+        return { tokenIdentifier, price: 0 };
+      });
+      
+      const priceResults = await Promise.all(pricePromises);
+      priceResults.forEach(({ tokenIdentifier, price }) => {
+        tokenPrices[tokenIdentifier] = price;
+      });
+
+      // Calculate total USD spent and won
+      let totalBetsUsd = new BigNumber(0);
+      let totalEarningsUsd = new BigNumber(0);
 
       // Display token-specific stats
       const tokenStats = [];
-      for (const tokenTicker of allTokens) {
-        const tokenBets = new BigNumber(userData.tokenBets?.[tokenTicker] || '0');
-        const tokenEarnings = new BigNumber(userData.tokenEarnings?.[tokenTicker] || '0');
+      for (const tokenIdentifier of allTokenIdentifiers) {
+        // Check if it's a full identifier or just ticker (backward compatibility)
+        const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+        const isFullIdentifier = esdtIdentifierRegex.test(tokenIdentifier);
+        
+        // Get token metadata - try identifier first, then ticker
+        let tokenMeta = tokenMetadata[tokenIdentifier];
+        let tokenTicker = tokenMeta?.ticker || (isFullIdentifier ? tokenIdentifier.split('-')[0] : tokenIdentifier);
+        let decimals = tokenMeta?.decimals || 8;
+        
+        // If identifier not found, try to find by ticker
+        if (!tokenMeta && isFullIdentifier) {
+          const tickerOnly = tokenIdentifier.split('-')[0];
+          for (const [id, meta] of Object.entries(tokenMetadata)) {
+            if (meta.ticker === tickerOnly) {
+              tokenMeta = meta;
+              decimals = meta.decimals;
+              break;
+            }
+          }
+        }
+        
+        // Get decimals - try stored decimals function as fallback
+        if (decimals === 8 && !tokenMeta) {
+          const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
+          if (storedDecimals !== null) {
+            decimals = storedDecimals;
+          }
+        }
+
+        const tokenBets = new BigNumber(userData.tokenBets?.[tokenIdentifier] || '0');
+        const tokenEarnings = new BigNumber(userData.tokenEarnings?.[tokenIdentifier] || '0');
         const tokenPNL = tokenEarnings.minus(tokenBets);
 
-        const storedDecimals = getStoredTokenDecimals(guildId, tokenTicker);
+        const betsHuman = new BigNumber(tokenBets).dividedBy(new BigNumber(10).pow(decimals)).toFixed(2);
+        const earningsHuman = new BigNumber(tokenEarnings).dividedBy(new BigNumber(10).pow(decimals)).toFixed(2);
+        const pnlHuman = new BigNumber(tokenPNL).dividedBy(new BigNumber(10).pow(decimals)).toFixed(2);
+        const pnlSign = tokenPNL.isGreaterThan(0) ? '+' : '';
+        const pnlEmoji = tokenPNL.isGreaterThanOrEqualTo(0) ? '🟢' : '🔴';
         
-        if (storedDecimals !== null) {
-          const betsHuman = new BigNumber(tokenBets).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
-          const earningsHuman = new BigNumber(tokenEarnings).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
-          const pnlHuman = new BigNumber(tokenPNL).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
-          const pnlSign = tokenPNL.isGreaterThan(0) ? '+' : '';
-          const pnlEmoji = tokenPNL.isGreaterThanOrEqualTo(0) ? '🟢' : '🔴';
+        // Calculate USD values
+        const tokenPrice = tokenPrices[tokenIdentifier] || 0;
+        const betsUsd = new BigNumber(betsHuman).multipliedBy(tokenPrice).toFixed(2);
+        const earningsUsd = new BigNumber(earningsHuman).multipliedBy(tokenPrice).toFixed(2);
+        const pnlUsd = new BigNumber(pnlHuman).multipliedBy(tokenPrice).toFixed(2);
+        
+        // Add to totals
+        totalBetsUsd = totalBetsUsd.plus(new BigNumber(betsUsd));
+        totalEarningsUsd = totalEarningsUsd.plus(new BigNumber(earningsUsd));
+        
+        // Format USD display (only show if price > 0)
+        const betsUsdDisplay = parseFloat(tokenPrice) > 0 ? ` (≈ $${betsUsd})` : '';
+        const earningsUsdDisplay = parseFloat(tokenPrice) > 0 ? ` (≈ $${earningsUsd})` : '';
+        const pnlUsdDisplay = parseFloat(tokenPrice) > 0 ? ` (≈ $${pnlSign}${pnlUsd})` : '';
 
-          tokenStats.push({
-            token: tokenTicker,
-            bets: betsHuman,
-            earnings: earningsHuman,
-            pnl: pnlHuman,
-            pnlSign: pnlSign,
-            pnlEmoji: pnlEmoji
-          });
-        }
+        tokenStats.push({
+          token: tokenTicker,
+          bets: betsHuman,
+          earnings: earningsHuman,
+          pnl: pnlHuman,
+          pnlSign: pnlSign,
+          pnlEmoji: pnlEmoji,
+          betsUsdDisplay: betsUsdDisplay,
+          earningsUsdDisplay: earningsUsdDisplay,
+          pnlUsdDisplay: pnlUsdDisplay
+        });
       }
 
       if (tokenStats.length > 0) {
         let tokenStatsText = '';
         for (const stat of tokenStats) {
           tokenStatsText += `**${stat.token}:**\n`;
-          tokenStatsText += `  Bet: ${stat.bets}\n`;
-          tokenStatsText += `  Won: ${stat.earnings}\n`;
-          tokenStatsText += `  PNL: ${stat.pnlEmoji} ${stat.pnlSign}${stat.pnl}\n\n`;
+          tokenStatsText += `  Bet: ${stat.bets}${stat.betsUsdDisplay}\n`;
+          tokenStatsText += `  Won: ${stat.earnings}${stat.earningsUsdDisplay}\n`;
+          tokenStatsText += `  PNL: ${stat.pnlEmoji} ${stat.pnlSign}${stat.pnl}${stat.pnlUsdDisplay}\n\n`;
         }
 
         embed.addFields({
@@ -4341,6 +5695,18 @@ client.on('interactionCreate', async (interaction) => {
           value: tokenStatsText || 'No data',
           inline: false
         });
+        
+        // Add total USD summary if we have any prices
+        if (totalBetsUsd.isGreaterThan(0) || totalEarningsUsd.isGreaterThan(0)) {
+          const totalPnlUsd = totalEarningsUsd.minus(totalBetsUsd);
+          const pnlSign = totalPnlUsd.isGreaterThanOrEqualTo(0) ? '+' : '';
+          const pnlEmoji = totalPnlUsd.isGreaterThanOrEqualTo(0) ? '🟢' : '🔴';
+          embed.addFields({
+            name: '💵 Total USD Summary',
+            value: `**Total Bet:** $${totalBetsUsd.toFixed(2)}\n**Total Won:** $${totalEarningsUsd.toFixed(2)}\n**Total PNL:** ${pnlEmoji} ${pnlSign}$${Math.abs(totalPnlUsd.toNumber()).toFixed(2)}`,
+            inline: false
+          });
+        }
       }
 
       // Last win
@@ -4377,36 +5743,148 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // Initialize server data
-      initializeServerData(guildId);
-      const houseBalanceData = serverData[guildId].houseBalance;
+      const houseBalanceData = await getAllHouseBalances(guildId);
+
+      // Debug: Log the raw data structure for troubleshooting
+      console.log(`[HOUSE-BALANCE] Raw house balance data for guild ${guildId}:`, JSON.stringify(houseBalanceData, null, 2));
 
       const embed = new EmbedBuilder()
         .setTitle('🏛️ House Balance Overview')
-        .setDescription('Separate tracking for Betting and Auction house balances')
+        .setDescription('Separate tracking for Betting, Auction, and Lottery house balances')
         .setColor('#8B5CF6')
         .setTimestamp();
 
-      // Get all tokens across both sources
+      // Aggregate all tokens from all balance records
+      // houseBalanceData structure: {token_identifier: {bettingEarnings: {...}, bettingSpending: {...}, ...}}
+      const aggregatedBalances = {
+        bettingEarnings: {},
+        bettingSpending: {},
+        bettingPNL: {},
+        auctionEarnings: {},
+        auctionSpending: {},
+        auctionPNL: {},
+        lotteryEarnings: {},
+        lotterySpending: {},
+        lotteryPNL: {}
+      };
+      
       const allTokens = new Set();
-      if (houseBalanceData.bettingEarnings) Object.keys(houseBalanceData.bettingEarnings).forEach(token => allTokens.add(token));
-      if (houseBalanceData.auctionEarnings) Object.keys(houseBalanceData.auctionEarnings).forEach(token => allTokens.add(token));
+      
+      // Aggregate balances from all token records
+      for (const [tokenIdentifier, tokenData] of Object.entries(houseBalanceData || {})) {
+        allTokens.add(tokenIdentifier);
+        
+        // Debug: Log lottery earnings structure
+        if (tokenData.lotteryEarnings && Object.keys(tokenData.lotteryEarnings).length > 0) {
+          console.log(`[HOUSE-BALANCE] Found lottery earnings for tokenIdentifier ${tokenIdentifier}:`, JSON.stringify(tokenData.lotteryEarnings));
+        }
+        
+        // Merge betting earnings (JSONB structure: {"token": "amount"})
+        if (tokenData.bettingEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.bettingEarnings)) {
+            allTokens.add(token); // Add token from JSONB to the set
+            aggregatedBalances.bettingEarnings[token] = amount;
+          }
+        }
+        
+        // Merge betting spending
+        if (tokenData.bettingSpending) {
+          for (const [token, amount] of Object.entries(tokenData.bettingSpending)) {
+            allTokens.add(token); // Add token from JSONB to the set
+            aggregatedBalances.bettingSpending[token] = amount;
+          }
+        }
+        
+        // Merge auction earnings
+        if (tokenData.auctionEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.auctionEarnings)) {
+            allTokens.add(token); // Add token from JSONB to the set
+            aggregatedBalances.auctionEarnings[token] = amount;
+          }
+        }
+        
+        // Merge auction spending
+        if (tokenData.auctionSpending) {
+          for (const [token, amount] of Object.entries(tokenData.auctionSpending)) {
+            allTokens.add(token); // Add token from JSONB to the set
+            aggregatedBalances.auctionSpending[token] = amount;
+          }
+        }
+        
+        // Merge lottery earnings (sum if multiple entries exist)
+        if (tokenData.lotteryEarnings && typeof tokenData.lotteryEarnings === 'object' && Object.keys(tokenData.lotteryEarnings).length > 0) {
+          for (const [token, amount] of Object.entries(tokenData.lotteryEarnings)) {
+            allTokens.add(token); // Add token from JSONB to the set
+            if (!aggregatedBalances.lotteryEarnings[token]) {
+              aggregatedBalances.lotteryEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
+            aggregatedBalances.lotteryEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge lottery spending (sum if multiple entries exist)
+        if (tokenData.lotterySpending && typeof tokenData.lotterySpending === 'object' && Object.keys(tokenData.lotterySpending).length > 0) {
+          for (const [token, amount] of Object.entries(tokenData.lotterySpending)) {
+            allTokens.add(token); // Add token from JSONB to the set
+            if (!aggregatedBalances.lotterySpending[token]) {
+              aggregatedBalances.lotterySpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
+            aggregatedBalances.lotterySpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+      }
+      
+      // Debug: Log aggregated lottery balances
+      console.log(`[HOUSE-BALANCE] Aggregated lottery earnings:`, JSON.stringify(aggregatedBalances.lotteryEarnings));
+      console.log(`[HOUSE-BALANCE] All tokens:`, Array.from(allTokens));
 
       // Display token-specific balances for both sources
+      // Group tokens by ticker to avoid double-counting (identifier vs ticker)
+      const processedTokens = new Set();
+      
       if (allTokens.size > 0) {
-        for (const tokenTicker of allTokens) {
-          const storedDecimals = getStoredTokenDecimals(guildId, tokenTicker);
+        for (const tokenKey of allTokens) {
+          // Extract ticker from identifier if needed
+          const tokenTickerOnly = tokenKey.includes('-') ? tokenKey.split('-')[0] : tokenKey;
+          
+          // Skip if we've already processed a token with this ticker
+          // Prefer identifier over ticker-only
+          if (processedTokens.has(tokenTickerOnly)) {
+            // If current is ticker-only and we already processed an identifier, skip
+            if (!tokenKey.includes('-')) continue;
+            // If current is identifier and we processed ticker-only, remove ticker-only from processed
+            // (we'll process the identifier instead)
+          }
+          
+          processedTokens.add(tokenTickerOnly);
+          
+          // Use identifier if available, otherwise use ticker
+          const tokenTicker = tokenKey.includes('-') ? tokenKey : tokenTickerOnly;
+          const storedDecimals = await getStoredTokenDecimals(guildId, tokenTicker);
           if (storedDecimals === null) continue;
           
           // Betting balance
-          const bettingEarnings = new BigNumber(houseBalanceData.bettingEarnings?.[tokenTicker] || '0');
-          const bettingSpending = new BigNumber(houseBalanceData.bettingSpending?.[tokenTicker] || '0');
+          const bettingEarnings = new BigNumber(aggregatedBalances.bettingEarnings[tokenTicker] || aggregatedBalances.bettingEarnings[tokenTickerOnly] || '0');
+          const bettingSpending = new BigNumber(aggregatedBalances.bettingSpending[tokenTicker] || aggregatedBalances.bettingSpending[tokenTickerOnly] || '0');
           const bettingBalance = bettingEarnings.minus(bettingSpending);
           
           // Auction balance
-          const auctionEarnings = new BigNumber(houseBalanceData.auctionEarnings?.[tokenTicker] || '0');
-          const auctionSpending = new BigNumber(houseBalanceData.auctionSpending?.[tokenTicker] || '0');
+          const auctionEarnings = new BigNumber(aggregatedBalances.auctionEarnings[tokenTicker] || aggregatedBalances.auctionEarnings[tokenTickerOnly] || '0');
+          const auctionSpending = new BigNumber(aggregatedBalances.auctionSpending[tokenTicker] || aggregatedBalances.auctionSpending[tokenTickerOnly] || '0');
           const auctionBalance = auctionEarnings.minus(auctionSpending);
+          
+          // Lottery balance - check both identifier and ticker (for backward compatibility with old data)
+          // Sum them if both exist (they represent the same token, just stored differently)
+          const lotteryEarningsId = aggregatedBalances.lotteryEarnings[tokenTicker] || '0';
+          const lotteryEarningsTicker = tokenTicker !== tokenTickerOnly ? (aggregatedBalances.lotteryEarnings[tokenTickerOnly] || '0') : '0';
+          const lotteryEarnings = new BigNumber(lotteryEarningsId).plus(new BigNumber(lotteryEarningsTicker));
+          
+          const lotterySpendingId = aggregatedBalances.lotterySpending[tokenTicker] || '0';
+          const lotterySpendingTicker = tokenTicker !== tokenTickerOnly ? (aggregatedBalances.lotterySpending[tokenTickerOnly] || '0') : '0';
+          const lotterySpending = new BigNumber(lotterySpendingId).plus(new BigNumber(lotterySpendingTicker));
+          const lotteryBalance = lotteryEarnings.minus(lotterySpending);
           
           // Convert to human-readable
           const bettingEarningsHuman = new BigNumber(bettingEarnings).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
@@ -4417,6 +5895,10 @@ client.on('interactionCreate', async (interaction) => {
           const auctionSpendingHuman = new BigNumber(auctionSpending).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
           const auctionBalanceHuman = new BigNumber(auctionBalance).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
           
+          const lotteryEarningsHuman = new BigNumber(lotteryEarnings).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
+          const lotterySpendingHuman = new BigNumber(lotterySpending).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
+          const lotteryBalanceHuman = new BigNumber(lotteryBalance).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
+          
           // Status emojis
           let bettingEmoji = '🟢';
           if (bettingBalance.isLessThan(0)) bettingEmoji = '🔴';
@@ -4426,13 +5908,17 @@ client.on('interactionCreate', async (interaction) => {
           if (auctionBalance.isLessThan(0)) auctionEmoji = '🔴';
           else if (auctionBalance.isEqualTo(0)) auctionEmoji = '⚪';
           
+          let lotteryEmoji = '🟢';
+          if (lotteryBalance.isLessThan(0)) lotteryEmoji = '🔴';
+          else if (lotteryBalance.isEqualTo(0)) lotteryEmoji = '⚪';
+          
           // Total balance
-          const totalBalance = bettingBalance.plus(auctionBalance);
+          const totalBalance = bettingBalance.plus(auctionBalance).plus(lotteryBalance);
           const totalBalanceHuman = new BigNumber(totalBalance).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
           
           embed.addFields({
             name: `💰 ${tokenTicker}`,
-            value: `**⚽ Betting:** ${bettingBalanceHuman} (Earned: ${bettingEarningsHuman} | Spent: ${bettingSpendingHuman})\n**🎨 Auction:** ${auctionBalanceHuman} (Earned: ${auctionEarningsHuman} | Spent: ${auctionSpendingHuman})\n**📊 Total:** ${totalBalanceHuman}`,
+            value: `**⚽ Betting:** ${bettingBalanceHuman} (Earned: ${bettingEarningsHuman} | Spent: ${bettingSpendingHuman})\n**🎨 Auction:** ${auctionBalanceHuman} (Earned: ${auctionEarningsHuman} | Spent: ${auctionSpendingHuman})\n**🎲 Lottery:** ${lotteryBalanceHuman} (Earned: ${lotteryEarningsHuman} | Spent: ${lotterySpendingHuman})\n**📊 Total:** ${totalBalanceHuman}`,
             inline: false
           });
         }
@@ -4446,7 +5932,7 @@ client.on('interactionCreate', async (interaction) => {
 
       embed.addFields({
         name: 'ℹ️ How it Works',
-        value: '**Balance = Earnings - Spending**\n\n**⚽ Betting House:**\n• Earnings: From matches with no winners\n• Spending: When house pays prizes from betting balance\n\n**🎨 Auction House:**\n• Earnings: From successful NFT auction sales\n• Spending: When house pays prizes from auction balance',
+        value: '**Balance = Earnings - Spending**\n\n**⚽ Betting House:**\n• Earnings: From matches with no winners\n• Spending: When house pays prizes from betting balance\n\n**🎨 Auction House:**\n• Earnings: From successful NFT auction sales\n• Spending: When house pays prizes from auction balance\n\n**🎲 Lottery House:**\n• Earnings: From lottery commission on prize pools\n• Spending: When house pays prizes from lottery balance',
         inline: false
       });
 
@@ -4482,28 +5968,151 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       // Check house balance based on source
-      initializeServerData(guildId);
-      const houseBalanceData = serverData[guildId].houseBalance;
+      const houseBalanceData = await getAllHouseBalances(guildId);
       
-      // Get balance based on source
+      // Aggregate balances from all token records
+      const aggregatedBalances = {
+        bettingEarnings: {},
+        bettingSpending: {},
+        auctionEarnings: {},
+        auctionSpending: {},
+        lotteryEarnings: {},
+        lotterySpending: {}
+      };
+      
+      for (const [tokenIdentifier, tokenData] of Object.entries(houseBalanceData || {})) {
+        // Merge betting earnings
+        if (tokenData.bettingEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.bettingEarnings)) {
+            if (!aggregatedBalances.bettingEarnings[token]) {
+              aggregatedBalances.bettingEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.bettingEarnings[token] || '0');
+            aggregatedBalances.bettingEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge betting spending
+        if (tokenData.bettingSpending) {
+          for (const [token, amount] of Object.entries(tokenData.bettingSpending)) {
+            if (!aggregatedBalances.bettingSpending[token]) {
+              aggregatedBalances.bettingSpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.bettingSpending[token] || '0');
+            aggregatedBalances.bettingSpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge auction earnings
+        if (tokenData.auctionEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.auctionEarnings)) {
+            if (!aggregatedBalances.auctionEarnings[token]) {
+              aggregatedBalances.auctionEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.auctionEarnings[token] || '0');
+            aggregatedBalances.auctionEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge auction spending
+        if (tokenData.auctionSpending) {
+          for (const [token, amount] of Object.entries(tokenData.auctionSpending)) {
+            if (!aggregatedBalances.auctionSpending[token]) {
+              aggregatedBalances.auctionSpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.auctionSpending[token] || '0');
+            aggregatedBalances.auctionSpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge lottery earnings
+        if (tokenData.lotteryEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.lotteryEarnings)) {
+            if (!aggregatedBalances.lotteryEarnings[token]) {
+              aggregatedBalances.lotteryEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
+            aggregatedBalances.lotteryEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge lottery spending
+        if (tokenData.lotterySpending) {
+          for (const [token, amount] of Object.entries(tokenData.lotterySpending)) {
+            if (!aggregatedBalances.lotterySpending[token]) {
+              aggregatedBalances.lotterySpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
+            aggregatedBalances.lotterySpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+      }
+      
+      await interaction.editReply({ content: '💸 Transferring tokens from house balance...', flags: [MessageFlags.Ephemeral] });
+
+      // Resolve token identifier from ticker/identifier FIRST (needed for balance lookup and decimals)
+      const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
+      if (!tokenIdentifier) {
+        await interaction.editReply({ content: `❌ Could not resolve token identifier for ${tokenTicker}. Please run /update-token-metadata.`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Extract ticker from identifier if needed (for backward compatibility with old data stored by ticker)
+      const tokenTickerOnly = tokenTicker.includes('-') ? tokenTicker.split('-')[0] : tokenTicker;
+      
+      // Get balance based on source - check both identifier and ticker (for backward compatibility)
       let houseBalance;
       let sourceName;
       if (source === 'auction') {
         sourceName = 'Auction House Balance';
-        if (!houseBalanceData.auctionPNL || !houseBalanceData.auctionPNL[tokenTicker]) {
+        const auctionEarningsId = aggregatedBalances.auctionEarnings[tokenIdentifier] || '0';
+        const auctionEarningsTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.auctionEarnings[tokenTickerOnly] || '0') : '0';
+        const auctionEarnings = new BigNumber(auctionEarningsId).plus(new BigNumber(auctionEarningsTicker));
+        
+        const auctionSpendingId = aggregatedBalances.auctionSpending[tokenIdentifier] || '0';
+        const auctionSpendingTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.auctionSpending[tokenTickerOnly] || '0') : '0';
+        const auctionSpending = new BigNumber(auctionSpendingId).plus(new BigNumber(auctionSpendingTicker));
+        
+        houseBalance = auctionEarnings.minus(auctionSpending);
+        if (houseBalance.isLessThanOrEqualTo(0)) {
           await interaction.editReply({ content: '❌ Auction house has no balance for this token yet. No auctions have completed successfully.', flags: [MessageFlags.Ephemeral] });
           return;
         }
-        houseBalance = new BigNumber(houseBalanceData.auctionPNL[tokenTicker] || '0');
+      } else if (source === 'lottery') {
+        sourceName = 'Lottery House Balance';
+        // Check both identifier and ticker (for backward compatibility with old data stored by ticker)
+        const lotteryEarningsId = aggregatedBalances.lotteryEarnings[tokenIdentifier] || '0';
+        const lotteryEarningsTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.lotteryEarnings[tokenTickerOnly] || '0') : '0';
+        const lotteryEarnings = new BigNumber(lotteryEarningsId).plus(new BigNumber(lotteryEarningsTicker));
+        
+        const lotterySpendingId = aggregatedBalances.lotterySpending[tokenIdentifier] || '0';
+        const lotterySpendingTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.lotterySpending[tokenTickerOnly] || '0') : '0';
+        const lotterySpending = new BigNumber(lotterySpendingId).plus(new BigNumber(lotterySpendingTicker));
+        
+        houseBalance = lotteryEarnings.minus(lotterySpending);
+        if (houseBalance.isLessThanOrEqualTo(0)) {
+          await interaction.editReply({ content: '❌ Lottery house has no balance for this token yet. No lotteries have collected commission.', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
       } else {
         sourceName = 'Betting House Balance';
-        if (!houseBalanceData.bettingPNL || !houseBalanceData.bettingPNL[tokenTicker]) {
+        const bettingEarningsId = aggregatedBalances.bettingEarnings[tokenIdentifier] || '0';
+        const bettingEarningsTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.bettingEarnings[tokenTickerOnly] || '0') : '0';
+        const bettingEarnings = new BigNumber(bettingEarningsId).plus(new BigNumber(bettingEarningsTicker));
+        
+        const bettingSpendingId = aggregatedBalances.bettingSpending[tokenIdentifier] || '0';
+        const bettingSpendingTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.bettingSpending[tokenTickerOnly] || '0') : '0';
+        const bettingSpending = new BigNumber(bettingSpendingId).plus(new BigNumber(bettingSpendingTicker));
+        
+        houseBalance = bettingEarnings.minus(bettingSpending);
+        if (houseBalance.isLessThanOrEqualTo(0)) {
           await interaction.editReply({ content: '❌ Betting house has no balance for this token yet. No matches have had zero winners.', flags: [MessageFlags.Ephemeral] });
           return;
         }
-        houseBalance = new BigNumber(houseBalanceData.bettingPNL[tokenTicker] || '0');
       }
-      const storedDecimals = getStoredTokenDecimals(guildId, tokenTicker);
+
+      // Get decimals using token identifier (metadata is stored by identifier, not ticker)
+      const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
       if (storedDecimals === null) {
         await interaction.editReply({ content: `❌ Token metadata missing for ${tokenTicker}. Please run /update-token-metadata.`, flags: [MessageFlags.Ephemeral] });
         return;
@@ -4520,44 +6129,53 @@ client.on('interactionCreate', async (interaction) => {
         });
         return;
       }
-
-      await interaction.editReply({ content: '💸 Transferring tokens from house balance...', flags: [MessageFlags.Ephemeral] });
-
-      // Track house spending FIRST (before virtual transfer)
-      trackHouseSpending(guildId, amountWei, tokenTicker, memo, source);
+      
+      // Track house spending FIRST (before virtual transfer) - using identifier
+      await trackHouseSpending(guildId, amountWei, tokenIdentifier, memo, source);
       
       // Add to recipient's virtual account (virtual transfer, no on-chain transaction)
-      const addResult = virtualAccounts.addFundsToAccount(
+      const addResult = await virtualAccounts.addFundsToAccount(
         guildId,
         targetUser.id,
-        tokenTicker,
+        tokenIdentifier,
         amount.toString(),
         null, // No transaction hash for virtual transfers
         'house_tip',
         targetUser.tag
       );
 
-      if (addResult.success) {
-        const successEmbed = new EmbedBuilder()
-          .setTitle('💰 House Tip Completed')
-          .setDescription(`Sent **${amount} ${tokenTicker}** to ${targetUser.tag} from ${sourceName}`)
-          .addFields([
-            { name: 'Recipient', value: `<@${targetUser.id}>`, inline: true },
-            { name: 'Amount', value: `${amount} ${tokenTicker}`, inline: true },
-            { name: 'Source', value: source === 'auction' ? '🎨 Auction House' : '⚽ Betting House', inline: true },
-            { name: 'New Balance', value: `${addResult.newBalance} ${tokenTicker}`, inline: true },
-            { name: 'Memo', value: memo, inline: false },
-            { name: 'Sent By', value: `<@${interaction.user.id}>`, inline: true }
-          ])
-          .setColor('#8B5CF6')
-          .setTimestamp()
-          .setFooter({ text: 'Virtual Account Transfer', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      console.log(`[HOUSE-TIP] addFundsToAccount result:`, { success: addResult.success, error: addResult.error, newBalance: addResult.newBalance });
 
-        await interaction.editReply({ 
-          content: `✅ **Success!** House tip sent to ${targetUser.tag}`, 
-          embeds: [successEmbed],
-          flags: [MessageFlags.Ephemeral] 
-        });
+      if (addResult.success) {
+        try {
+          const successEmbed = new EmbedBuilder()
+            .setTitle('💰 House Tip Completed')
+            .setDescription(`Sent **${amount} ${tokenTicker}** to ${targetUser.tag} from ${sourceName}`)
+            .addFields([
+              { name: 'Recipient', value: `<@${targetUser.id}>`, inline: true },
+              { name: 'Amount', value: `${amount} ${tokenTicker}`, inline: true },
+              { name: 'Source', value: source === 'auction' ? '🎨 Auction House' : source === 'lottery' ? '🎲 Lottery House' : '⚽ Betting House', inline: true },
+              { name: 'New Balance', value: `${addResult.newBalance} ${tokenTicker}`, inline: true },
+              { name: 'Memo', value: memo, inline: false },
+              { name: 'Sent By', value: `<@${interaction.user.id}>`, inline: true }
+            ])
+            .setColor('#8B5CF6')
+            .setTimestamp()
+            .setFooter({ text: 'Virtual Account Transfer', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+
+          await interaction.editReply({ 
+            content: `✅ **Success!** House tip sent to ${targetUser.tag}`, 
+            embeds: [successEmbed],
+            flags: [MessageFlags.Ephemeral] 
+          });
+        } catch (embedError) {
+          console.error('[HOUSE-TIP] Error creating/sending success embed:', embedError.message);
+          // Fallback to simple success message
+          await interaction.editReply({ 
+            content: `✅ **Success!** Sent ${amount} ${tokenTicker} to ${targetUser.tag} from ${sourceName}. New balance: ${addResult.newBalance} ${tokenTicker}`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+        }
 
         // Send public notification
         try {
@@ -4573,7 +6191,7 @@ client.on('interactionCreate', async (interaction) => {
               .addFields([
                 { name: 'Recipient', value: `<@${targetUser.id}>`, inline: true },
                 { name: 'Amount', value: `${amount} ${tokenTicker}`, inline: true },
-                { name: 'Source', value: source === 'auction' ? '🎨 Auction House' : '⚽ Betting House', inline: true },
+                { name: 'Source', value: source === 'auction' ? '🎨 Auction House' : source === 'lottery' ? '🎲 Lottery House' : '⚽ Betting House', inline: true },
                 { name: 'Memo', value: memo, inline: false }
               ])
               .setColor('#8B5CF6')
@@ -4592,18 +6210,24 @@ client.on('interactionCreate', async (interaction) => {
         }
       } else {
         // Refund house balance if virtual transfer failed (reverse the spending)
-        initializeServerData(guildId);
-        const refundHouseBalance = serverData[guildId].houseBalance;
-        if (source === 'auction') {
-          const currentSpending = new BigNumber(refundHouseBalance.auctionSpending?.[tokenTicker] || '0');
-          refundHouseBalance.auctionSpending[tokenTicker] = currentSpending.minus(amountWei).toString();
-          refundHouseBalance.auctionPNL[tokenTicker] = new BigNumber(refundHouseBalance.auctionPNL[tokenTicker] || '0').plus(amountWei).toString();
-        } else {
-          const currentSpending = new BigNumber(refundHouseBalance.bettingSpending?.[tokenTicker] || '0');
-          refundHouseBalance.bettingSpending[tokenTicker] = currentSpending.minus(amountWei).toString();
-          refundHouseBalance.bettingPNL[tokenTicker] = new BigNumber(refundHouseBalance.bettingPNL[tokenTicker] || '0').plus(amountWei).toString();
+        // Use tokenIdentifier (not tokenTicker) for house balance operations
+        const tokenBalance = await getHouseBalance(guildId, tokenIdentifier);
+        if (tokenBalance) {
+          if (source === 'auction') {
+            const currentSpending = new BigNumber(tokenBalance.auctionSpending?.[tokenIdentifier] || '0');
+            tokenBalance.auctionSpending[tokenIdentifier] = currentSpending.minus(amountWei).toString();
+            tokenBalance.auctionPNL[tokenIdentifier] = new BigNumber(tokenBalance.auctionPNL[tokenIdentifier] || '0').plus(amountWei).toString();
+          } else if (source === 'lottery') {
+            const currentSpending = new BigNumber(tokenBalance.lotterySpending?.[tokenIdentifier] || '0');
+            tokenBalance.lotterySpending[tokenIdentifier] = currentSpending.minus(amountWei).toString();
+            tokenBalance.lotteryPNL[tokenIdentifier] = new BigNumber(tokenBalance.lotteryPNL[tokenIdentifier] || '0').plus(amountWei).toString();
+          } else {
+            const currentSpending = new BigNumber(tokenBalance.bettingSpending?.[tokenIdentifier] || '0');
+            tokenBalance.bettingSpending[tokenIdentifier] = currentSpending.minus(amountWei).toString();
+            tokenBalance.bettingPNL[tokenIdentifier] = new BigNumber(tokenBalance.bettingPNL[tokenIdentifier] || '0').plus(amountWei).toString();
+          }
+          await dbServerData.updateHouseBalance(guildId, tokenIdentifier, tokenBalance);
         }
-        saveServerData();
         
         await interaction.editReply({ 
           content: `❌ Transfer failed: ${addResult.error || 'Unknown error'}`, 
@@ -4631,35 +6255,56 @@ client.on('interactionCreate', async (interaction) => {
       const source = interaction.options.getString('source') || 'betting';
       const projectName = interaction.options.getString('project-name');
       const tokenTicker = interaction.options.getString('token');
-      const amount = interaction.options.getNumber('amount');
+      const amount = interaction.options.getString('amount') || interaction.options.getNumber('amount');
       const memo = interaction.options.getString('memo') || 'House withdrawal';
       const guildId = interaction.guildId;
 
-      if (amount <= 0) {
-        await interaction.editReply({ content: 'Amount must be greater than 0.', flags: [MessageFlags.Ephemeral] });
+      // Get Community Fund project (source wallet)
+      const communityFundProjectName = getCommunityFundProjectName(); // Always "Community Fund"
+      const projects = await getProjects(guildId);
+      const communityFundProject = projects[communityFundProjectName];
+      
+      if (!communityFundProject) {
+        await interaction.editReply({ content: '❌ Community Fund project not found. Please set up a Community Fund first.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (!communityFundProject.walletAddress || !communityFundProject.walletPem) {
+        await interaction.editReply({ content: '❌ Community Fund wallet is not configured properly.', flags: [MessageFlags.Ephemeral] });
         return;
       }
 
-      // Get project
-      const projects = getProjects(guildId);
-      const project = projects[projectName];
+      // Get destination project (target wallet)
+      const destinationProject = projects[projectName];
       
-      if (!project) {
+      if (!destinationProject) {
         await interaction.editReply({ content: `❌ Project "${projectName}" not found.`, flags: [MessageFlags.Ephemeral] });
         return;
       }
 
-      // Check if project is set as community fund (should not be)
-      const communityFundProject = serverData[guildId]?.communityFundProject;
-      if (projectName === communityFundProject) {
+      // Check if trying to withdraw to Community Fund (should not be)
+      if (projectName === communityFundProjectName) {
         await interaction.editReply({ content: '❌ Cannot withdraw to Community Fund project. Please select a different project.', flags: [MessageFlags.Ephemeral] });
         return;
       }
+      
+      if (!destinationProject.walletAddress) {
+        await interaction.editReply({ content: `❌ Project "${projectName}" has no wallet address configured.`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
 
-      // Check if project supports this token
-      const supportedTokens = Array.isArray(project.supportedTokens) 
-        ? project.supportedTokens 
-        : (project.supportedTokens || '').split(',').map(t => t.trim());
+      // Check Community Fund balances (1 transfer for house-withdraw)
+      const balanceCheck = await checkCommunityFundBalances(guildId, 1);
+      if (!balanceCheck.sufficient) {
+        const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/house-withdraw');
+        await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      // Check if destination project supports this token
+      const supportedTokens = Array.isArray(destinationProject.supportedTokens) 
+        ? destinationProject.supportedTokens 
+        : (destinationProject.supportedTokens || '').split(',').map(t => t.trim());
       
       if (!supportedTokens.includes(tokenTicker)) {
         await interaction.editReply({ content: `❌ Project "${projectName}" does not support token "${tokenTicker}".`, flags: [MessageFlags.Ephemeral] });
@@ -4667,69 +6312,222 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       // Check house balance based on source
-      initializeServerData(guildId);
-      const houseBalanceData = serverData[guildId].houseBalance;
+      const houseBalanceData = await getAllHouseBalances(guildId);
       
-      // Get balance based on source
+      // Aggregate balances similar to how house-balance command does it
+      const aggregatedBalances = {
+        bettingEarnings: {},
+        bettingSpending: {},
+        auctionEarnings: {},
+        auctionSpending: {},
+        lotteryEarnings: {},
+        lotterySpending: {}
+      };
+      
+      // Aggregate balances from all token records
+      for (const [tokenIdentifier, tokenData] of Object.entries(houseBalanceData || {})) {
+        // Merge betting earnings
+        if (tokenData.bettingEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.bettingEarnings)) {
+            if (!aggregatedBalances.bettingEarnings[token]) {
+              aggregatedBalances.bettingEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.bettingEarnings[token] || '0');
+            aggregatedBalances.bettingEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge betting spending
+        if (tokenData.bettingSpending) {
+          for (const [token, amount] of Object.entries(tokenData.bettingSpending)) {
+            if (!aggregatedBalances.bettingSpending[token]) {
+              aggregatedBalances.bettingSpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.bettingSpending[token] || '0');
+            aggregatedBalances.bettingSpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge auction earnings
+        if (tokenData.auctionEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.auctionEarnings)) {
+            if (!aggregatedBalances.auctionEarnings[token]) {
+              aggregatedBalances.auctionEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.auctionEarnings[token] || '0');
+            aggregatedBalances.auctionEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge auction spending
+        if (tokenData.auctionSpending) {
+          for (const [token, amount] of Object.entries(tokenData.auctionSpending)) {
+            if (!aggregatedBalances.auctionSpending[token]) {
+              aggregatedBalances.auctionSpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.auctionSpending[token] || '0');
+            aggregatedBalances.auctionSpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge lottery earnings
+        if (tokenData.lotteryEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.lotteryEarnings)) {
+            if (!aggregatedBalances.lotteryEarnings[token]) {
+              aggregatedBalances.lotteryEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
+            aggregatedBalances.lotteryEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge lottery spending
+        if (tokenData.lotterySpending) {
+          for (const [token, amount] of Object.entries(tokenData.lotterySpending)) {
+            if (!aggregatedBalances.lotterySpending[token]) {
+              aggregatedBalances.lotterySpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
+            aggregatedBalances.lotterySpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+      }
+      
+      // Resolve token identifier from ticker/identifier FIRST (needed for balance lookup and decimals)
+      const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
+      if (!tokenIdentifier) {
+        await interaction.editReply({ content: `❌ Could not resolve token identifier for ${tokenTicker}. Please run /update-token-metadata.`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Extract ticker from identifier if needed (for backward compatibility with old data stored by ticker)
+      const tokenTickerOnly = tokenTicker.includes('-') ? tokenTicker.split('-')[0] : tokenTicker;
+      
+      // Get balance based on source - check both identifier and ticker (for backward compatibility)
       let houseBalance;
       let sourceName;
       if (source === 'auction') {
         sourceName = 'Auction House Balance';
-        if (!houseBalanceData.auctionPNL || !houseBalanceData.auctionPNL[tokenTicker]) {
+        const auctionEarningsId = aggregatedBalances.auctionEarnings[tokenIdentifier] || '0';
+        const auctionEarningsTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.auctionEarnings[tokenTickerOnly] || '0') : '0';
+        const auctionEarnings = new BigNumber(auctionEarningsId).plus(new BigNumber(auctionEarningsTicker));
+        
+        const auctionSpendingId = aggregatedBalances.auctionSpending[tokenIdentifier] || '0';
+        const auctionSpendingTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.auctionSpending[tokenTickerOnly] || '0') : '0';
+        const auctionSpending = new BigNumber(auctionSpendingId).plus(new BigNumber(auctionSpendingTicker));
+        
+        houseBalance = auctionEarnings.minus(auctionSpending);
+        
+        if (houseBalance.isLessThanOrEqualTo(0)) {
           await interaction.editReply({ content: '❌ Auction house has no balance for this token yet. No auctions have completed successfully.', flags: [MessageFlags.Ephemeral] });
           return;
         }
-        houseBalance = new BigNumber(houseBalanceData.auctionPNL[tokenTicker] || '0');
+      } else if (source === 'lottery') {
+        sourceName = 'Lottery House Balance';
+        // Check both identifier and ticker (for backward compatibility with old data stored by ticker)
+        const lotteryEarningsId = aggregatedBalances.lotteryEarnings[tokenIdentifier] || '0';
+        const lotteryEarningsTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.lotteryEarnings[tokenTickerOnly] || '0') : '0';
+        const lotteryEarnings = new BigNumber(lotteryEarningsId).plus(new BigNumber(lotteryEarningsTicker));
+        
+        const lotterySpendingId = aggregatedBalances.lotterySpending[tokenIdentifier] || '0';
+        const lotterySpendingTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.lotterySpending[tokenTickerOnly] || '0') : '0';
+        const lotterySpending = new BigNumber(lotterySpendingId).plus(new BigNumber(lotterySpendingTicker));
+        
+        houseBalance = lotteryEarnings.minus(lotterySpending);
+        
+        if (houseBalance.isLessThanOrEqualTo(0)) {
+          await interaction.editReply({ content: '❌ Lottery house has no balance for this token yet. No lotteries have collected commission.', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
       } else {
         sourceName = 'Betting House Balance';
-        if (!houseBalanceData.bettingPNL || !houseBalanceData.bettingPNL[tokenTicker]) {
+        const bettingEarningsId = aggregatedBalances.bettingEarnings[tokenIdentifier] || '0';
+        const bettingEarningsTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.bettingEarnings[tokenTickerOnly] || '0') : '0';
+        const bettingEarnings = new BigNumber(bettingEarningsId).plus(new BigNumber(bettingEarningsTicker));
+        
+        const bettingSpendingId = aggregatedBalances.bettingSpending[tokenIdentifier] || '0';
+        const bettingSpendingTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.bettingSpending[tokenTickerOnly] || '0') : '0';
+        const bettingSpending = new BigNumber(bettingSpendingId).plus(new BigNumber(bettingSpendingTicker));
+        
+        houseBalance = bettingEarnings.minus(bettingSpending);
+        
+        if (houseBalance.isLessThanOrEqualTo(0)) {
           await interaction.editReply({ content: '❌ Betting house has no balance for this token yet. No matches have had zero winners.', flags: [MessageFlags.Ephemeral] });
           return;
         }
-        houseBalance = new BigNumber(houseBalanceData.bettingPNL[tokenTicker] || '0');
       }
       
-      const storedDecimals = getStoredTokenDecimals(guildId, tokenTicker);
+      const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
       if (storedDecimals === null) {
         await interaction.editReply({ content: `❌ Token metadata missing for ${tokenTicker}. Please run /update-token-metadata.`, flags: [MessageFlags.Ephemeral] });
         return;
       }
 
-      const amountWei = toBlockchainAmount(amount, storedDecimals);
+      // Handle MAX amount option
+      let amountToWithdraw;
+      if (typeof amount === 'string' && amount.toUpperCase() === 'MAX') {
+        // Calculate maximum withdrawable amount (full balance)
+        const maxAmount = houseBalance.dividedBy(new BigNumber(10).pow(storedDecimals));
+        amountToWithdraw = parseFloat(maxAmount.toString());
+      } else if (typeof amount === 'number') {
+        amountToWithdraw = amount;
+      } else if (typeof amount === 'string') {
+        // Try to parse as number
+        const parsedAmount = parseFloat(amount);
+        if (isNaN(parsedAmount) || parsedAmount <= 0) {
+          await interaction.editReply({ content: '❌ Invalid amount. Please enter a positive number or "MAX".', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        amountToWithdraw = parsedAmount;
+      } else {
+        await interaction.editReply({ content: '❌ Invalid amount. Please enter a number or "MAX".', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (amountToWithdraw <= 0) {
+        await interaction.editReply({ content: '❌ Amount must be greater than 0.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      const amountWei = toBlockchainAmount(amountToWithdraw, storedDecimals);
       
       // Check if house has enough balance
       if (houseBalance.isLessThan(amountWei)) {
         const currentBalance = houseBalance.dividedBy(new BigNumber(10).pow(storedDecimals)).toString();
         await interaction.editReply({ 
-          content: `❌ **Insufficient house balance!**\n\nCurrent house balance: **${currentBalance}** ${tokenTicker}\nRequired: **${amount}** ${tokenTicker}`, 
+          content: `❌ **Insufficient house balance!**\n\nCurrent house balance: **${currentBalance}** ${tokenTicker}\nRequired: **${amountToWithdraw}** ${tokenTicker}`, 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
       }
 
-      await interaction.editReply({ content: '💸 Processing withdrawal from house balance...', flags: [MessageFlags.Ephemeral] });
+      await interaction.editReply({ content: '💸 Processing withdrawal from Community Fund to project wallet...', flags: [MessageFlags.Ephemeral] });
 
-      // Transfer on-chain to project wallet
-      const transferResult = await transferESDT(
-        project.walletAddress,
+      // Transfer on-chain from Community Fund wallet to destination project wallet
+      const transferResult = await transferESDTFromCommunityFund(
+        destinationProject.walletAddress,
         tokenTicker,
-        amount,
-        projectName,
+        amountToWithdraw,
+        communityFundProjectName,
         guildId
       );
 
       if (transferResult.success) {
-        // Track house spending with source
-        trackHouseSpending(guildId, amountWei, tokenTicker, memo, source);
+        // Resolve token identifier from ticker/identifier
+        const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
+        
+        // Track house spending with source - using identifier
+        await trackHouseSpending(guildId, amountWei, tokenIdentifier, memo, source);
 
         const successEmbed = new EmbedBuilder()
           .setTitle('💰 House Withdrawal Completed')
-          .setDescription(`Withdrew **${amount} ${tokenTicker}** from ${sourceName} to project "${projectName}"`)
+          .setDescription(`Withdrew **${amountToWithdraw} ${tokenTicker}** from ${sourceName} to project "${projectName}"`)
           .addFields([
-            { name: 'Project', value: projectName, inline: true },
-            { name: 'Amount', value: `${amount} ${tokenTicker}`, inline: true },
-            { name: 'Source', value: source === 'auction' ? '🎨 Auction House' : '⚽ Betting House', inline: true },
-            { name: 'Wallet', value: `\`${project.walletAddress}\``, inline: false },
+            { name: 'Destination Project', value: projectName, inline: true },
+            { name: 'Amount', value: `${amountToWithdraw} ${tokenTicker}`, inline: true },
+            { name: 'Source', value: source === 'auction' ? '🎨 Auction House' : source === 'lottery' ? '🎲 Lottery House' : '⚽ Betting House', inline: true },
+            { name: 'From (Community Fund)', value: `\`${communityFundProject.walletAddress}\``, inline: false },
+            { name: 'To (Project Wallet)', value: `\`${destinationProject.walletAddress}\``, inline: false },
             { name: 'Memo', value: memo, inline: false },
             { name: 'Transaction', value: `[\`${transferResult.txHash}\`](https://explorer.multiversx.com/transactions/${transferResult.txHash})`, inline: false },
             { name: 'Sent By', value: `<@${interaction.user.id}>`, inline: true }
@@ -4838,11 +6636,20 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Initialize football data
-      initializeFootballData(guildId);
-      
       // Get all bets for this guild in the date range
-      const guildBets = footballBetsData[guildId] || {};
-      const guildMatches = footballMatchesData;
+      const allBets = [];
+      const guildMatchesObj = await dbFootball.getMatchesByGuild(guildId);
+      const guildMatches = guildMatchesObj || {};
+      
+      // Get all bets for this guild
+      for (const match of Object.values(guildMatches)) {
+        const matchBets = await dbFootball.getBetsByMatch(guildId, match.matchId);
+        allBets.push(...Object.values(matchBets || {}));
+      }
+      const guildBets = {};
+      allBets.forEach(bet => {
+        guildBets[bet.betId] = bet;
+      });
       
       // Filter bets by date range and competition
       const filteredBets = Object.values(guildBets).filter(bet => {
@@ -4946,7 +6753,7 @@ client.on('interactionCreate', async (interaction) => {
           try {
             // prizeAmount is stored as human-readable string (e.g., "100.5")
             // Convert to wei for calculations
-            const storedDecimals = match.token?.decimals || getStoredTokenDecimals(guildId, tokenTicker);
+            const storedDecimals = match.token?.decimals || await getStoredTokenDecimals(guildId, tokenTicker);
             if (storedDecimals === null) {
               console.log(`[LEADERBOARD-FILTERED] Cannot convert prize for bet ${bet.betId}: missing decimals for ${tokenTicker}`);
               continue;
@@ -4998,7 +6805,7 @@ client.on('interactionCreate', async (interaction) => {
         // Calculate PNL (in human format for display)
         const pnlTokens = [];
         for (const [tokenTicker, stats] of Object.entries(user.tokenStats)) {
-          const storedDecimals = getStoredTokenDecimals(guildId, tokenTicker);
+          const storedDecimals = await getStoredTokenDecimals(guildId, tokenTicker);
           if (storedDecimals !== null) {
             // stats.bets and stats.earnings are already in wei (as numbers)
             const tokenBetsBN = new BigNumber(stats.bets || 0);
@@ -5060,11 +6867,8 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
       // Reset leaderboard for this guild
-      if (footballLeaderboardData[interaction.guildId]) {
-        footballLeaderboardData[interaction.guildId] = {};
-        saveLeaderboardData();
-        console.log(`[FOOTBALL] Leaderboard reset for guild ${interaction.guildId}`);
-      }
+      await dbLeaderboard.deleteAllLeaderboardEntries(interaction.guildId);
+      console.log(`[FOOTBALL] Leaderboard reset for guild ${interaction.guildId}`);
 
       const embed = new EmbedBuilder()
         .setTitle('🔄 Leaderboard Reset')
@@ -5095,11 +6899,10 @@ client.on('interactionCreate', async (interaction) => {
       
       // Get all supported tokens from all projects in this guild
       const allTokens = new Set();
-      if (serverData[guildId] && serverData[guildId].projects) {
-        for (const project of Object.values(serverData[guildId].projects)) {
-          if (project.supportedTokens) {
-            project.supportedTokens.forEach(token => allTokens.add(token));
-          }
+      const projects = await getProjects(guildId);
+      for (const project of Object.values(projects)) {
+        if (project.supportedTokens) {
+          project.supportedTokens.forEach(token => allTokens.add(token));
         }
       }
 
@@ -5173,14 +6976,11 @@ client.on('interactionCreate', async (interaction) => {
       
       console.log(`[CHECK-BALANCE DEBUG] Guild ID: ${guildId}, User ID: ${userId}`);
       
-      // Force reload virtual accounts data
-      virtualAccounts.forceReloadData();
-      
       // Update username for this user
-      virtualAccounts.updateUserUsername(guildId, userId, interaction.user.tag);
+      await virtualAccounts.updateUserUsername(guildId, userId, interaction.user.tag);
       
       // Get user's virtual account balances
-      const balances = virtualAccounts.getAllUserBalances(guildId, userId);
+      const balances = await virtualAccounts.getAllUserBalances(guildId, userId);
       
       console.log(`[CHECK-BALANCE DEBUG] Retrieved balances:`, balances);
       
@@ -5200,6 +7000,58 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      // Get token metadata to map tickers to identifiers
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      
+      // Create a map of ticker -> identifier and identifier -> ticker
+      const tickerToIdentifier = {};
+      const identifierToTicker = {};
+      for (const [identifier, metadata] of Object.entries(tokenMetadata)) {
+        tickerToIdentifier[metadata.ticker] = identifier;
+        identifierToTicker[identifier] = metadata.ticker;
+      }
+      
+      // Merge duplicate balances (ticker + identifier for same token)
+      const mergedBalances = {};
+      const processedIdentifiers = new Set();
+      
+      for (const [tokenKey, balance] of Object.entries(balances)) {
+        // Sanitize balance
+        let balanceValue = balance;
+        if (balance === null || balance === undefined || balance === 'null' || balance === 'undefined' || balance === 'NaN') {
+          balanceValue = '0';
+        } else {
+          const balanceBN = new BigNumber(balance);
+          if (balanceBN.isNaN()) {
+            balanceValue = '0';
+          } else {
+            balanceValue = balance.toString();
+          }
+        }
+        
+        // Determine the canonical identifier for this token
+        let canonicalIdentifier = tokenKey;
+        
+        if (tokenKey.includes('-')) {
+          // Already an identifier
+          canonicalIdentifier = tokenKey;
+        } else {
+          // It's a ticker, try to find the identifier
+          canonicalIdentifier = tickerToIdentifier[tokenKey] || tokenKey;
+        }
+        
+        // If we've already processed this identifier, merge the balances
+        if (mergedBalances[canonicalIdentifier]) {
+          const existingBalance = new BigNumber(mergedBalances[canonicalIdentifier]);
+          const newBalance = existingBalance.plus(new BigNumber(balanceValue));
+          mergedBalances[canonicalIdentifier] = newBalance.toString();
+        } else {
+          mergedBalances[canonicalIdentifier] = balanceValue;
+        }
+        
+        processedIdentifiers.add(canonicalIdentifier);
+      }
+      
       const embed = new EmbedBuilder()
         .setTitle('💰 Virtual Account Balance')
         .setDescription(`Balance for ${interaction.user.tag}`)
@@ -5207,11 +7059,67 @@ client.on('interactionCreate', async (interaction) => {
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
       
-      for (const [token, balance] of Object.entries(balances)) {
+      // Sort merged balances by token identifier for consistent display
+      const sortedBalances = Object.entries(mergedBalances).sort((a, b) => {
+        return a[0].localeCompare(b[0]);
+      });
+      
+      // Fetch token prices and calculate USD values
+      const tokenPrices = {};
+      let totalUsdValue = new BigNumber(0);
+      
+      // Fetch prices for all tokens in parallel
+      const pricePromises = sortedBalances.map(async ([tokenIdentifier, balance]) => {
+        if (new BigNumber(balance).isZero()) {
+          return { tokenIdentifier, price: 0 };
+        }
+        
+        try {
+          const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+          if (priceResponse.ok) {
+            const priceData = await priceResponse.json();
+            return { tokenIdentifier, price: priceData.price || 0 };
+          }
+        } catch (error) {
+          console.error(`[CHECK-BALANCE] Error fetching price for ${tokenIdentifier}:`, error.message);
+        }
+        return { tokenIdentifier, price: 0 };
+      });
+      
+      const priceResults = await Promise.all(pricePromises);
+      priceResults.forEach(({ tokenIdentifier, price }) => {
+        tokenPrices[tokenIdentifier] = price;
+      });
+      
+      // Add balance fields with USD values
+      for (const [tokenIdentifier, balance] of sortedBalances) {
+        // Skip zero balances
+        if (new BigNumber(balance).isZero()) {
+          continue;
+        }
+        
+        const tokenPrice = tokenPrices[tokenIdentifier] || 0;
+        const balanceBN = new BigNumber(balance);
+        const usdValue = balanceBN.multipliedBy(tokenPrice);
+        totalUsdValue = totalUsdValue.plus(usdValue);
+        
+        const usdDisplay = tokenPrice > 0 
+          ? `\n**USD Value:** $${usdValue.toFixed(2)}`
+          : '';
+        
         embed.addFields({
-          name: `${token}`,
-          value: `**${balance}** tokens`,
+          name: `${tokenIdentifier}`,
+          value: `**${balance}** tokens${usdDisplay}`,
           inline: true
+        });
+      }
+      
+      // Add total USD value if we have any prices
+      if (totalUsdValue.isGreaterThan(0)) {
+        embed.addFields({
+          name: '💵 Total Portfolio Value',
+          value: `**$${totalUsdValue.toFixed(2)} USD**`,
+          inline: false
         });
       }
       
@@ -5242,9 +7150,9 @@ client.on('interactionCreate', async (interaction) => {
       const userId = interaction.user.id;
       
       // Get user's transaction history
-      const transactions = virtualAccounts.getUserTransactionHistory(guildId, userId, limit);
+      const transactions = await virtualAccounts.getUserTransactionHistory(guildId, userId, limit);
       
-      if (transactions.length === 0) {
+      if (!transactions || transactions.length === 0) {
         const embed = new EmbedBuilder()
           .setTitle('📊 Transaction History')
           .setDescription('No transactions found for your account.')
@@ -5297,7 +7205,7 @@ client.on('interactionCreate', async (interaction) => {
 
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       
-      const status = blockchainListener.getListenerStatus();
+      const status = await blockchainListener.getListenerStatus();
       
       if (status.success) {
         const embed = new EmbedBuilder()
@@ -5347,7 +7255,7 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guildId;
       
       // Get server-wide virtual accounts summary
-      const summary = virtualAccounts.getServerVirtualAccountsSummary(guildId);
+      const summary = await virtualAccounts.getServerVirtualAccountsSummary(guildId);
       
       const embed = new EmbedBuilder()
         .setTitle('🏦 Server Virtual Accounts Summary')
@@ -5380,6 +7288,107 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (commandName === 'check-community-fund-balance') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      // Check if user is admin
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ content: '❌ **Admin Only!** This command is restricted to server administrators.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const guildId = interaction.guildId;
+      const numberOfTransfers = interaction.options.getInteger('transfers') || 1;
+      
+      // Check Community Fund balances
+      const balanceCheck = await checkCommunityFundBalances(guildId, numberOfTransfers);
+      
+      const embed = new EmbedBuilder()
+        .setTitle(balanceCheck.sufficient ? '✅ Community Fund Balances Sufficient' : '❌ Community Fund Balances Insufficient')
+        .setDescription(`Balance check for **${numberOfTransfers}** transfer(s)`)
+        .setColor(balanceCheck.sufficient ? 0x00FF00 : 0xFF0000)
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      // Format REWARD balances to 2 decimal places
+      const formatReward = (value) => {
+        const num = parseFloat(value || '0');
+        return isNaN(num) ? '0.00' : num.toFixed(2);
+      };
+      
+      // Calculate totals and differences
+      const onChainReward = parseFloat(balanceCheck.rewardBalanceOnChain || '0');
+      const virtualAccountReward = parseFloat(balanceCheck.rewardBalanceVirtualAccount || '0');
+      const houseBalanceReward = parseFloat(balanceCheck.rewardBalanceHouseBalance || '0');
+      const totalInVirtualAccounts = virtualAccountReward + houseBalanceReward;
+      const difference = onChainReward - totalInVirtualAccounts;
+      const usageFeeReward = parseFloat(balanceCheck.requiredReward || '0');
+      const neededToWithdraw = Math.max(0, -difference) + Math.ceil(usageFeeReward * 100) / 100; // Round up usage fee
+      
+      // Add simplified balance information
+      embed.addFields([
+        { name: '💰 EGLD Balance', value: `${balanceCheck.egldBalance} EGLD`, inline: true },
+        { name: '📊 Required EGLD', value: `${balanceCheck.requiredEgld} EGLD`, inline: true },
+        { name: '✅ EGLD Status', value: new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(balanceCheck.requiredEgld)) ? '✅ Sufficient' : '❌ Insufficient', inline: true },
+        { name: '💼 Total in Wallet (On-Chain)', value: `${formatReward(balanceCheck.rewardBalanceOnChain)} REWARD`, inline: false },
+        { name: '📦 Total in Virtual Accounts', value: `${formatReward(totalInVirtualAccounts)} REWARD\n• Virtual Accounts: ${formatReward(virtualAccountReward)}\n• House Balance: ${formatReward(houseBalanceReward)}`, inline: false },
+        { name: '📊 Difference', value: `${formatReward(difference)} REWARD`, inline: true },
+        { name: '💵 1 Transfer Usage Fee', value: `${formatReward(Math.ceil(usageFeeReward * 100) / 100)} REWARD`, inline: true },
+        { name: '⚠️ Needed to Perform Withdraw', value: `${formatReward(neededToWithdraw)} REWARD`, inline: true }
+      ]);
+      
+      // Add informational note about transferring REWARD if insufficient
+      if (!balanceCheck.sufficient && balanceCheck.walletAddress && neededToWithdraw > 0) {
+        embed.addFields({
+          name: 'ℹ️ How to Add REWARD',
+          value: `A REWARD transfer of **${formatReward(neededToWithdraw)} REWARD** to the Community Fund wallet address is required:\n\`${balanceCheck.walletAddress}\`\n\n⚠️ **Important:** Transfer must be made from a wallet that is **NOT** registered with this bot.\n\n💡 Ask admins to supply the required tokens to enable withdrawals.`,
+          inline: false
+        });
+      }
+      
+      // Add wallet address for reference (when sufficient or if not shown above)
+      if (balanceCheck.walletAddress && (balanceCheck.sufficient || neededToWithdraw === 0)) {
+        embed.addFields({
+          name: '📍 Community Fund Wallet Address',
+          value: `\`${balanceCheck.walletAddress}\``,
+          inline: false
+        });
+      }
+      
+      // Add other errors (non-REWARD related, like EGLD issues)
+      const otherErrors = balanceCheck.errors?.filter(e => !e.includes('REWARD')) || [];
+      if (otherErrors.length > 0) {
+        embed.addFields({
+          name: '⚠️ Other Issues',
+          value: otherErrors.map(e => `• ${e}`).join('\n'),
+          inline: false
+        });
+      }
+      
+      // Get QR code URL if available
+      try {
+        const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+        const communityFundProjectName = getCommunityFundProjectName();
+        const qrCodeUrl = communityFundQRData?.[communityFundProjectName];
+        
+        if (qrCodeUrl) {
+          embed.setThumbnail(qrCodeUrl);
+        }
+      } catch (error) {
+        console.error('[BALANCE-CHECK] Error getting QR code:', error.message);
+      }
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (error) {
+      console.error('Error in check-community-fund-balance command:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
   } else if (commandName === 'update-usernames') {
     try {
       if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -5400,7 +7409,7 @@ client.on('interactionCreate', async (interaction) => {
       });
       
       // Update usernames in virtual accounts
-      const result = virtualAccounts.updateAllUsernamesInGuild(guildId, userMap);
+      const result = await virtualAccounts.updateAllUsernamesInGuild(guildId, userMap);
       
       if (result.success) {
         const embed = new EmbedBuilder()
@@ -5439,10 +7448,28 @@ client.on('interactionCreate', async (interaction) => {
       virtualAccounts.forceReloadData();
       
       // Update username for this user
-      virtualAccounts.updateUserUsername(guildId, userId, interaction.user.tag);
+      await virtualAccounts.updateUserUsername(guildId, userId, interaction.user.tag);
       
-      // Check if user has any balance for the selected token
-      const currentBalance = virtualAccounts.getUserBalance(guildId, userId, tokenTicker);
+      // Resolve token identifier from ticker/identifier BEFORE checking balance
+      const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
+      
+      // Validate identifier format
+      const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+      if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid token identifier!**\n\nCould not resolve full token identifier for "${tokenTicker}". Please ensure token metadata is registered using /update-token-metadata.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Check if user has any balance for the selected token (use identifier, not ticker)
+      let currentBalance = await virtualAccounts.getUserBalance(guildId, userId, tokenIdentifier);
+      
+      // If balance is 0 with identifier, try ticker as fallback (for backward compatibility)
+      if (new BigNumber(currentBalance).isZero() && tokenIdentifier !== tokenTicker) {
+        currentBalance = await virtualAccounts.getUserBalance(guildId, userId, tokenTicker);
+      }
       
       if (new BigNumber(currentBalance).isLessThanOrEqualTo(0)) {
         await interaction.editReply({ 
@@ -5476,13 +7503,13 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Get user's wallet address
-      const userWallets = getUserWallets(guildId);
-      const userWallet = userWallets[userId];
+      // Get user's wallet address (await the async function)
+      const userWallets = await getUserWallets(guildId);
+      const userWallet = userWallets?.[userId];
       
       if (!userWallet) {
         await interaction.editReply({ 
-          content: `❌ **No wallet registered!**\n\nPlease register your wallet address using \`/set-wallet\` before withdrawing funds.`, 
+          content: `❌ **No wallet registered!**\n\nPlease register your wallet address using \`/set-wallet\` or click the "Register My Wallet" button in \`/list-wallets\` before withdrawing funds.`, 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
@@ -5497,7 +7524,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Check if community fund is set
-      const fundProject = serverData[guildId]?.communityFundProject;
+      const fundProject = await getCommunityFundProject(guildId);
       if (!fundProject) {
         await interaction.editReply({ 
           content: `❌ **No Community Fund configured!**\n\nPlease ask an admin to set up a Community Fund using \`/set-community-fund\`.`, 
@@ -5506,10 +7533,19 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      const projects = getProjects(guildId);
-      if (!projects[fundProject]) {
+      // Check Community Fund balances (1 transfer for withdraw)
+      const balanceCheck = await checkCommunityFundBalances(guildId, 1);
+      if (!balanceCheck.sufficient) {
+        const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/withdraw');
+        await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      if (!projects[projectName]) {
         await interaction.editReply({ 
-          content: `❌ **Community Fund not found!**\n\nThe Community Fund project "${fundProject}" no longer exists. Please ask an admin to reconfigure it.`, 
+          content: `❌ **Community Fund not found!**\n\nThe Community Fund project no longer exists. Please ask an admin to reconfigure it.`, 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
@@ -5520,14 +7556,26 @@ client.on('interactionCreate', async (interaction) => {
         flags: [MessageFlags.Ephemeral] 
       });
       
+      // Use internal project name "Community Fund" for the transfer function
+      const communityFundProjectName = getCommunityFundProjectName();
+      
       console.log(`User ${interaction.user.tag} (${userId}) is withdrawing ${withdrawAmount} ${tokenTicker} to wallet ${userWallet} using Community Fund (${fundProject})`);
       
-      // Perform the blockchain transfer
-      const transferResult = await transferESDTFromCommunityFund(userWallet, tokenTicker, withdrawAmount, fundProject, guildId);
+      // tokenIdentifier was already resolved above
+      // Perform the blockchain transfer (use internal project name, not display name)
+      const transferResult = await transferESDTFromCommunityFund(userWallet, tokenIdentifier, withdrawAmount, communityFundProjectName, guildId);
       
       if (transferResult.success) {
         // Deduct funds from virtual account
-        const deductResult = virtualAccounts.deductFundsFromAccount(guildId, userId, tokenTicker, withdrawAmount, 'withdrawal', memo);
+        // Ensure withdrawAmount is a string (deductFundsFromAccount expects string or number)
+        const withdrawAmountStr = typeof withdrawAmount === 'object' && withdrawAmount.toString 
+          ? withdrawAmount.toString() 
+          : String(withdrawAmount);
+        
+        console.log(`[WITHDRAW] Deducting ${withdrawAmountStr} ${tokenIdentifier} from virtual account for user ${userId}`);
+        const deductResult = await virtualAccounts.deductFundsFromAccount(guildId, userId, tokenIdentifier, withdrawAmountStr, 'withdrawal', memo);
+        
+        console.log(`[WITHDRAW] Deduction result:`, deductResult);
         
         if (deductResult.success) {
           const explorerUrl = transferResult.txHash
@@ -5536,6 +7584,10 @@ client.on('interactionCreate', async (interaction) => {
           const txHashFieldValue = transferResult.txHash
             ? `[${transferResult.txHash}](${explorerUrl})`
             : 'Not available';
+          
+          // Get Community Fund project logo for withdrawal notification
+          const communityFundProjectName = getCommunityFundProjectName();
+          const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
           
           const successEmbed = new EmbedBuilder()
             .setTitle('💰 Withdrawal Successful!')
@@ -5549,7 +7601,7 @@ client.on('interactionCreate', async (interaction) => {
               { name: 'Status', value: '✅ Success', inline: true }
             ])
             .setColor('#00FF00')
-            .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
+            .setThumbnail(projectLogoUrl)
             .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
             .setTimestamp();
           
@@ -5636,14 +7688,27 @@ client.on('interactionCreate', async (interaction) => {
       virtualAccounts.forceReloadData();
       
       // Update usernames for both users
-      virtualAccounts.updateUserUsername(guildId, fromUserId, interaction.user.tag);
+      await virtualAccounts.updateUserUsername(guildId, fromUserId, interaction.user.tag);
       if (targetUserId) {
-        virtualAccounts.updateUserUsername(guildId, targetUserId, targetUser ? targetUser.tag : userTag);
+        await virtualAccounts.updateUserUsername(guildId, targetUserId, targetUser ? targetUser.tag : userTag);
       }
       
-      // Check if user has sufficient balance
-      const currentBalance = virtualAccounts.getUserBalance(guildId, fromUserId, tokenTicker);
-      console.log(`[TIP-VIRTUAL DEBUG] Guild ID: ${guildId}, User ID: ${fromUserId}, Token: ${tokenTicker}, Balance: ${currentBalance}, Required: ${amountNum}`);
+      // Resolve token identifier from ticker/identifier
+      const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
+      
+      // Validate identifier format
+      const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+      if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid token identifier!**\n\nCould not resolve full token identifier for "${tokenTicker}". Please ensure token metadata is registered using /update-token-metadata.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Check if user has sufficient balance (using identifier - migration handled automatically)
+      const currentBalance = await virtualAccounts.getUserBalance(guildId, fromUserId, tokenIdentifier);
+      console.log(`[TIP-VIRTUAL DEBUG] Guild ID: ${guildId}, User ID: ${fromUserId}, Token: ${tokenIdentifier}, Balance: ${currentBalance}, Required: ${amountNum}`);
       
       if (new BigNumber(currentBalance).isLessThan(amountNum)) {
         await interaction.editReply({ 
@@ -5653,12 +7718,12 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Transfer funds between users
-      const transferResult = virtualAccounts.transferFundsBetweenUsers(
+      // Transfer funds between users (using identifier)
+      const transferResult = await virtualAccounts.transferFundsBetweenUsers(
         guildId, 
         fromUserId, 
         targetUserId, 
-        tokenTicker, 
+        tokenIdentifier, 
         amountNum.toString(), 
         memo
       );
@@ -5683,6 +7748,10 @@ client.on('interactionCreate', async (interaction) => {
         // Send DM to recipient
         try {
           if (targetUser) {
+            // Get Community Fund project logo for tip notification
+            const communityFundProjectName = getCommunityFundProjectName();
+            const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
+            
             const recipientEmbed = new EmbedBuilder()
               .setTitle('💸 You Received a Virtual Tip!')
               .setDescription(`You received **${amountNum} ${tokenTicker}** from ${interaction.user.tag}`)
@@ -5692,7 +7761,7 @@ client.on('interactionCreate', async (interaction) => {
                 { name: '💳 Your New Balance', value: `${transferResult.toUserNewBalance} ${tokenTicker}`, inline: true }
               ])
               .setColor('#00FF00')
-              .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
+              .setThumbnail(projectLogoUrl)
               .setTimestamp()
               .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
             
@@ -5719,18 +7788,601 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
+  // LOTTERY COMMANDS
+  if (commandName === 'create-lottery') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ content: 'Only administrators can create lotteries.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const guildId = interaction.guildId;
+      const winningNumbersCount = interaction.options.getInteger('winning_numbers_count');
+      const totalPoolNumbers = interaction.options.getInteger('total_pool_numbers');
+      const tokenTicker = interaction.options.getString('token');
+      const drawingFrequency = interaction.options.getString('drawing_frequency');
+      const houseCommission = interaction.options.getNumber('house_commission') || 0;
+      const ticketPrice = interaction.options.getNumber('ticket_price');
+      
+      // Validate inputs
+      if (winningNumbersCount < 1 || winningNumbersCount > 10) {
+        await interaction.editReply({ content: 'Winning numbers count must be between 1 and 10.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (totalPoolNumbers < 5 || totalPoolNumbers > 100) {
+        await interaction.editReply({ content: 'Total pool numbers must be between 5 and 100.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (winningNumbersCount > totalPoolNumbers) {
+        await interaction.editReply({ content: 'Winning numbers count cannot exceed total pool numbers.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (houseCommission < 0 || houseCommission > 50) {
+        await interaction.editReply({ content: 'House commission must be between 0 and 50.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (ticketPrice <= 0) {
+        await interaction.editReply({ content: 'Ticket price must be greater than 0.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get token metadata
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      let tokenIdentifier = null;
+      let tokenDecimals = 8;
+      
+      // Check if input is already a full ESDT identifier (format: TICKER-6hexchars)
+      const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+      const isFullIdentifier = esdtIdentifierRegex.test(tokenTicker);
+      
+      if (isFullIdentifier) {
+        // Input is a full identifier, check if we have metadata for it
+        if (tokenMetadata[tokenTicker]) {
+          tokenIdentifier = tokenTicker;
+          tokenDecimals = tokenMetadata[tokenTicker].decimals;
+        } else {
+          // Try to fetch metadata automatically
+          await interaction.editReply({ content: '🔄 Fetching token metadata...', flags: [MessageFlags.Ephemeral] });
+          const success = await updateTokenMetadata(guildId, tokenTicker);
+          if (success) {
+            const updatedMetadata = await dbServerData.getTokenMetadata(guildId);
+            if (updatedMetadata[tokenTicker]) {
+              tokenIdentifier = tokenTicker;
+              tokenDecimals = updatedMetadata[tokenTicker].decimals;
+            } else {
+              await interaction.editReply({ content: `❌ Failed to fetch metadata for token ${tokenTicker}. Please run /update-token-metadata.`, flags: [MessageFlags.Ephemeral] });
+              return;
+            }
+          } else {
+            await interaction.editReply({ content: `❌ Failed to fetch metadata for token ${tokenTicker}. Please run /update-token-metadata.`, flags: [MessageFlags.Ephemeral] });
+            return;
+          }
+        }
+      } else {
+        // Input is a ticker, try to find matching identifier
+        for (const [identifier, metadata] of Object.entries(tokenMetadata)) {
+          if (metadata.ticker === tokenTicker) {
+            tokenIdentifier = identifier;
+            tokenDecimals = metadata.decimals;
+            break;
+          }
+        }
+        
+        // If not found in metadata, try to get identifier from projects or API
+        if (!tokenIdentifier) {
+          await interaction.editReply({ content: '🔄 Looking up token identifier...', flags: [MessageFlags.Ephemeral] });
+          const foundIdentifier = await getTokenIdentifier(tokenTicker);
+          if (foundIdentifier) {
+            // Check if we have metadata for this identifier
+            if (tokenMetadata[foundIdentifier]) {
+              tokenIdentifier = foundIdentifier;
+              tokenDecimals = tokenMetadata[foundIdentifier].decimals;
+            } else {
+              // Fetch metadata automatically
+              await interaction.editReply({ content: '🔄 Fetching token metadata...', flags: [MessageFlags.Ephemeral] });
+              const success = await updateTokenMetadata(guildId, foundIdentifier);
+              if (success) {
+                const updatedMetadata = await dbServerData.getTokenMetadata(guildId);
+                if (updatedMetadata[foundIdentifier]) {
+                  tokenIdentifier = foundIdentifier;
+                  tokenDecimals = updatedMetadata[foundIdentifier].decimals;
+                } else {
+                  await interaction.editReply({ content: `❌ Failed to fetch metadata for token ${tokenTicker}. Please run /update-token-metadata.`, flags: [MessageFlags.Ephemeral] });
+                  return;
+                }
+              } else {
+                await interaction.editReply({ content: `❌ Failed to fetch metadata for token ${tokenTicker}. Please run /update-token-metadata.`, flags: [MessageFlags.Ephemeral] });
+                return;
+              }
+            }
+          } else {
+            await interaction.editReply({ content: `❌ Token ${tokenTicker} not found. Please register token metadata first using /update-token-metadata.`, flags: [MessageFlags.Ephemeral] });
+            return;
+          }
+        }
+      }
+      
+      if (!tokenIdentifier) {
+        await interaction.editReply({ content: `❌ Token ${tokenTicker} not found. Please register token metadata first using /update-token-metadata.`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // CRITICAL: Validate that tokenIdentifier is a full identifier format (not just ticker)
+      // This prevents conflicts when multiple tokens share the same ticker
+      const identifierFormatRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+      if (!identifierFormatRegex.test(tokenIdentifier)) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid token identifier format!**\n\nThe token identifier must be in full format (e.g., "REWARD-cf6eac"), not just the ticker ("REWARD").\n\nThis is required to prevent conflicts when multiple tokens share the same ticker.\n\nPlease use the full token identifier or run /update-token-metadata first.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Get the actual ticker from metadata (in case user provided full identifier)
+      const finalMetadata = await dbServerData.getTokenMetadata(guildId);
+      const actualTicker = finalMetadata[tokenIdentifier]?.ticker || tokenTicker.split('-')[0] || tokenTicker;
+      
+      // Convert ticket price to wei
+      const ticketPriceWei = new BigNumber(ticketPrice).multipliedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+      
+      // Generate unique lottery ID
+      const lotteryId = `lottery_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Calculate times
+      const startTime = Date.now();
+      const frequencyMs = lotteryHelpers.parseFrequency(drawingFrequency);
+      const endTime = startTime + frequencyMs;
+      const nextDrawTime = endTime;
+      
+      // Create lottery in database
+      await dbLottery.createLottery(guildId, lotteryId, {
+        winningNumbersCount,
+        totalPoolNumbers,
+        tokenIdentifier,
+        tokenTicker: actualTicker,
+        drawingFrequency,
+        houseCommissionPercent: houseCommission,
+        ticketPriceWei,
+        prizePoolWei: '0',
+        prizePoolUsd: 0,
+        startTime,
+        endTime,
+        nextDrawTime,
+        status: 'LIVE',
+        hasWinners: false,
+        totalTickets: 0,
+        uniqueParticipants: 0,
+        isRollover: false,
+        rolloverCount: 0
+      });
+      
+      // Fetch token price from MultiversX API
+      let tokenPriceUsd = 0;
+      try {
+        const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+        if (priceResponse.ok) {
+          const priceData = await priceResponse.json();
+          tokenPriceUsd = priceData.price || 0;
+        }
+      } catch (error) {
+        console.error('[LOTTERY] Error fetching token price:', error.message);
+      }
+      
+      // Create embed
+      const lotteryEmbed = new EmbedBuilder()
+        .setTitle('🎰 Lottery')
+        .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${winningNumbersCount} numbers from 1 to ${totalPoolNumbers}`)
+        .addFields([
+          { name: '🎫 Ticket Price', value: `${ticketPrice} ${actualTicker}`, inline: true },
+          { name: '💰 Prize Pool', value: `0 ${actualTicker} (≈ $0.00)`, inline: true },
+          { name: '🏦 House Commission', value: `${houseCommission}%`, inline: true },
+          { name: '⏰ End Time', value: `<t:${Math.floor(endTime / 1000)}:R>`, inline: true },
+          { name: '🎫 Tickets Sold', value: '0', inline: true },
+          { name: '👥 Participants', value: '0', inline: true }
+        ])
+        .setColor(0x00FF00)
+        .setTimestamp(new Date(endTime))
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      // Create buttons
+      const buyTicketButton = new ButtonBuilder()
+        .setCustomId(`lottery-buy-ticket:${lotteryId}`)
+        .setLabel('Buy Ticket')
+        .setStyle(ButtonStyle.Primary);
+      
+      const luckyDipButton = new ButtonBuilder()
+        .setCustomId(`lottery-lucky-dip:${lotteryId}`)
+        .setLabel('Lucky Dip')
+        .setStyle(ButtonStyle.Success);
+      
+      const myActiveTicketsButton = new ButtonBuilder()
+        .setCustomId(`lottery-my-active:${lotteryId}`)
+        .setLabel('My Active Tickets')
+        .setStyle(ButtonStyle.Secondary);
+      
+      const myResultsButton = new ButtonBuilder()
+        .setCustomId(`lottery-my-results:${lotteryId}`)
+        .setLabel('My Results')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true); // Disabled until lottery ends
+      
+      const buttonRow = new ActionRowBuilder()
+        .addComponents(buyTicketButton, luckyDipButton, myActiveTicketsButton, myResultsButton);
+      
+      // Post embed
+      const lotteryMessage = await interaction.channel.send({
+        embeds: [lotteryEmbed],
+        components: [buttonRow]
+      });
+      
+      // Create thread (optional)
+      let thread = null;
+      let threadId = null;
+      try {
+        thread = await lotteryMessage.startThread({
+          name: `Lottery ${lotteryId.substring(0, 8)}`,
+          autoArchiveDuration: 1440
+        });
+        threadId = thread.id;
+      } catch (threadError) {
+        console.error('[LOTTERY] Error creating thread:', threadError.message);
+      }
+      
+      // Update lottery with message/channel/thread IDs
+      await dbLottery.updateLottery(guildId, lotteryId, {
+        channelId: interaction.channel.id,
+        messageId: lotteryMessage.id,
+        threadId: threadId
+      });
+      
+      await interaction.editReply({
+        content: `✅ Lottery created successfully! Lottery ID: \`${lotteryId}\``,
+        flags: [MessageFlags.Ephemeral]
+      });
+      
+    } catch (error) {
+      console.error('[LOTTERY] Error creating lottery:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error creating lottery: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error creating lottery: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'my-active-lottery-tickets') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      let tokenTicker = interaction.options.getString('token');
+      const page = interaction.options.getInteger('page') || 1;
+      
+      // Extract ticker from full identifier if needed (e.g., "USDC-c76f1f" -> "USDC")
+      if (tokenTicker && tokenTicker.includes('-')) {
+        tokenTicker = tokenTicker.split('-')[0];
+      }
+      
+      const limit = 20;
+      const offset = (page - 1) * limit;
+      
+      const tickets = await dbLottery.getTicketsByUser(guildId, userId, tokenTicker, 'LIVE', limit, offset);
+      const totalCount = await dbLottery.getTicketsCountByUser(guildId, userId, tokenTicker, 'LIVE');
+      const totalPages = Math.ceil(totalCount / limit);
+      
+      if (tickets.length === 0) {
+        await interaction.editReply({
+          content: `You have no active lottery tickets${tokenTicker ? ` for ${tokenTicker}` : ''}.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Get token metadata to get decimals for price calculation
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      
+      const embed = new EmbedBuilder()
+        .setTitle('🎫 My Active Lottery Tickets')
+        .setDescription(`Showing page ${page} of ${totalPages} (${totalCount} total tickets)`)
+        .setColor(0x00FF00)
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+        .setTimestamp();
+      
+      tickets.forEach((ticket, index) => {
+        const numbersDisplay = lotteryHelpers.formatNumbersForDisplay(ticket.numbers);
+        
+        // Get token decimals from metadata
+        let tokenDecimals = 8; // Default fallback
+        if (tokenMetadata[ticket.tokenIdentifier]) {
+          tokenDecimals = tokenMetadata[ticket.tokenIdentifier].decimals;
+        }
+        
+        const ticketPriceHuman = new BigNumber(ticket.ticketPriceWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        
+        embed.addFields({
+          name: `Ticket ${offset + index + 1}`,
+          value: `**Lottery:** \`${ticket.lotteryId.substring(0, 16)}...\`\n**Numbers:** ${numbersDisplay}\n**Token:** ${ticket.tokenTicker}\n**Price:** ${ticketPriceHuman} ${ticket.tokenTicker}`,
+          inline: false
+        });
+      });
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (error) {
+      console.error('[LOTTERY] Error getting active tickets:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'my-expired-tickets') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const tokenTicker = interaction.options.getString('token');
+      const page = interaction.options.getInteger('page') || 1;
+      
+      const limit = 20;
+      const offset = (page - 1) * limit;
+      
+      // Get expired tickets (including winners, as they're also expired lotteries)
+      // Note: We need to get all tickets and filter by status since getTicketsByUser only accepts one status
+      const allTickets = await dbLottery.getTicketsByUser(guildId, userId, tokenTicker, null, 1000, 0); // Get more tickets to filter
+      const expiredTickets = allTickets.filter(t => t.status === 'EXPIRED' || t.status === 'WINNER');
+      
+      // Apply pagination manually
+      const totalCount = expiredTickets.length;
+      const tickets = expiredTickets.slice(offset, offset + limit);
+      const totalPages = Math.ceil(totalCount / limit);
+      
+      if (tickets.length === 0) {
+        await interaction.editReply({
+          content: `You have no expired lottery tickets${tokenTicker ? ` for ${tokenTicker}` : ''}.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Get lottery data for each ticket to show winning numbers
+      const ticketsWithResults = [];
+      for (const ticket of tickets) {
+        const lottery = await dbLottery.getLottery(guildId, ticket.lotteryId);
+        if (lottery && lottery.winningNumbers) {
+          const match = lotteryHelpers.checkTicketMatch(ticket.numbers, lottery.winningNumbers);
+          ticketsWithResults.push({
+            ...ticket,
+            lottery,
+            match
+          });
+        } else {
+          ticketsWithResults.push({
+            ...ticket,
+            lottery: null,
+            match: { isWinner: false, matchedCount: 0 }
+          });
+        }
+      }
+      
+      const embed = new EmbedBuilder()
+        .setTitle('📋 My Expired Lottery Tickets')
+        .setDescription(`Showing page ${page} of ${totalPages} (${totalCount} total tickets)`)
+        .setColor(0xFF0000)
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+        .setTimestamp();
+      
+      ticketsWithResults.forEach((ticket, index) => {
+        const numbersDisplay = lotteryHelpers.formatNumbersForDisplay(ticket.numbers);
+        let resultText = '';
+        
+        if (ticket.lottery && ticket.lottery.winningNumbers) {
+          const winningNumbersDisplay = lotteryHelpers.formatNumbersForDisplay(ticket.lottery.winningNumbers);
+          if (ticket.match.isWinner) {
+            resultText = `✅ **WINNER!** Matched: ${ticket.match.matchedCount}/${ticket.lottery.winningNumbersCount}\n**Winning Numbers:** ${winningNumbersDisplay}`;
+          } else {
+            resultText = `❌ No match. Matched: ${ticket.match.matchedCount}/${ticket.lottery.winningNumbersCount}\n**Winning Numbers:** ${winningNumbersDisplay}`;
+          }
+        } else {
+          resultText = 'No draw results available';
+        }
+        
+        embed.addFields({
+          name: `Ticket ${offset + index + 1}${ticket.isWinner ? ' 🏆' : ''}`,
+          value: `**Lottery:** \`${ticket.lotteryId.substring(0, 16)}...\`\n**Your Numbers:** ${numbersDisplay}\n${resultText}`,
+          inline: false
+        });
+      });
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (error) {
+      console.error('[LOTTERY] Error getting expired tickets:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'my-lottery-stats') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      const stats = await dbLottery.getUserLotteryStats(guildId, userId);
+      
+      // Get token decimals for display
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      const decimalsMap = {};
+      for (const [identifier, metadata] of Object.entries(tokenMetadata)) {
+        decimalsMap[metadata.ticker] = metadata.decimals;
+      }
+      
+      // Format amounts
+      const formatAmount = (amountWei, tokenTicker) => {
+        const decimals = decimalsMap[tokenTicker] || 8;
+        return new BigNumber(amountWei).dividedBy(new BigNumber(10).pow(decimals)).toString();
+      };
+      
+      // Get breakdown by token - get all tickets
+      const allTickets = await dbLottery.getTicketsByUser(guildId, userId, null, null, 10000, 0);
+      
+      // Get all winners for this user (across all lotteries)
+      const allWinners = await dbLottery.getWinnersByLottery(guildId, null);
+      const userWinners = allWinners.filter(w => w.userId === userId);
+      
+      // Group by token identifier (not ticker) to ensure proper separation of tokens with same ticker
+      const tokenBreakdown = {};
+      
+      (allTickets || []).forEach(ticket => {
+        // Use tokenIdentifier as the key for grouping
+        const tokenKey = ticket.tokenIdentifier || ticket.tokenTicker; // Fallback to ticker for old data
+        if (!tokenBreakdown[tokenKey]) {
+          tokenBreakdown[tokenKey] = {
+            tokenIdentifier: ticket.tokenIdentifier,
+            tokenTicker: ticket.tokenTicker,
+            tickets: 0,
+            spent: new BigNumber('0'),
+            won: new BigNumber('0'),
+            wins: 0
+          };
+        }
+        tokenBreakdown[tokenKey].tickets++;
+        tokenBreakdown[tokenKey].spent = tokenBreakdown[tokenKey].spent.plus(new BigNumber(ticket.ticketPriceWei || '0'));
+        if (ticket.isWinner) {
+          tokenBreakdown[tokenKey].wins++;
+        }
+      });
+      
+      // Add prize amounts from winners - group by identifier
+      (userWinners || []).forEach(winner => {
+        // Use tokenIdentifier as the key for grouping
+        const tokenKey = winner.tokenIdentifier || winner.tokenTicker; // Fallback to ticker for old data
+        if (!tokenBreakdown[tokenKey]) {
+          tokenBreakdown[tokenKey] = {
+            tokenIdentifier: winner.tokenIdentifier,
+            tokenTicker: winner.tokenTicker,
+            tickets: 0,
+            spent: new BigNumber('0'),
+            won: new BigNumber('0'),
+            wins: 0
+          };
+        }
+        tokenBreakdown[tokenKey].won = tokenBreakdown[tokenKey].won.plus(new BigNumber(winner.prizeAmountWei || '0'));
+      });
+      
+      // Fetch token prices for USD calculations
+      const tokenPrices = {};
+      const uniqueTokenIds = [...new Set(Object.values(tokenBreakdown).map(b => b.tokenIdentifier).filter(Boolean))];
+      
+      // Fetch prices in parallel
+      const pricePromises = uniqueTokenIds.map(async (tokenIdentifier) => {
+        try {
+          const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+          if (priceResponse.ok) {
+            const priceData = await priceResponse.json();
+            return { tokenIdentifier, price: priceData.price || 0 };
+          }
+        } catch (error) {
+          console.error(`[LOTTERY-STATS] Error fetching price for ${tokenIdentifier}:`, error.message);
+        }
+        return { tokenIdentifier, price: 0 };
+      });
+      
+      const priceResults = await Promise.all(pricePromises);
+      priceResults.forEach(({ tokenIdentifier, price }) => {
+        tokenPrices[tokenIdentifier] = price;
+      });
+      
+      // Calculate total USD spent and won
+      let totalSpentUsd = new BigNumber(0);
+      let totalWonUsd = new BigNumber(0);
+      
+      const embed = new EmbedBuilder()
+        .setTitle('📊 My Lottery Statistics')
+        .setDescription(`Statistics across all lottery types`)
+        .addFields([
+          { name: '🎫 Total Tickets', value: stats.totalTickets.toString(), inline: true },
+          { name: '🏆 Wins', value: stats.wins.toString(), inline: true },
+          { name: '📈 Win Rate', value: `${stats.winRate}%`, inline: true }
+        ])
+        .setColor(0x4d55dc)
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+        .setTimestamp();
+      
+      // Add token breakdown - use tokenIdentifier as key, but display ticker
+      for (const [tokenKey, breakdown] of Object.entries(tokenBreakdown)) {
+        // Get ticker from breakdown object (or extract from identifier)
+        const displayTicker = breakdown.tokenTicker || (breakdown.tokenIdentifier ? breakdown.tokenIdentifier.split('-')[0] : tokenKey);
+        // Get decimals for this token identifier
+        const tokenId = breakdown.tokenIdentifier || tokenKey;
+        const tokenMeta = tokenMetadata[tokenId];
+        const decimals = tokenMeta?.decimals || 8;
+        
+        const spentFormatted = new BigNumber(breakdown.spent.toString()).dividedBy(new BigNumber(10).pow(decimals)).toString();
+        const wonFormatted = new BigNumber(breakdown.won.toString()).dividedBy(new BigNumber(10).pow(decimals)).toString();
+        
+        // Calculate USD values
+        const tokenPrice = tokenPrices[tokenId] || 0;
+        const spentUsd = new BigNumber(spentFormatted).multipliedBy(tokenPrice).toFixed(2);
+        const wonUsd = new BigNumber(wonFormatted).multipliedBy(tokenPrice).toFixed(2);
+        
+        // Add to totals
+        totalSpentUsd = totalSpentUsd.plus(new BigNumber(spentUsd));
+        totalWonUsd = totalWonUsd.plus(new BigNumber(wonUsd));
+        
+        // Format USD display (only show if price > 0)
+        const spentUsdDisplay = parseFloat(tokenPrice) > 0 ? ` (≈ $${spentUsd})` : '';
+        const wonUsdDisplay = parseFloat(tokenPrice) > 0 ? ` (≈ $${wonUsd})` : '';
+        
+        embed.addFields({
+          name: `${displayTicker}`,
+          value: `**Tickets:** ${breakdown.tickets}\n**Spent:** ${spentFormatted} ${displayTicker}${spentUsdDisplay}\n**Won:** ${wonFormatted} ${displayTicker}${wonUsdDisplay}\n**Wins:** ${breakdown.wins}`,
+          inline: true
+        });
+      }
+      
+      // Add total USD summary if we have any prices
+      if (totalSpentUsd.isGreaterThan(0) || totalWonUsd.isGreaterThan(0)) {
+        const netUsd = totalWonUsd.minus(totalSpentUsd);
+        const netDisplay = netUsd.isGreaterThanOrEqualTo(0) ? `+$${netUsd.toFixed(2)}` : `-$${Math.abs(netUsd.toNumber()).toFixed(2)}`;
+        embed.addFields({
+          name: '💰 Total USD Summary',
+          value: `**Total Spent:** $${totalSpentUsd.toFixed(2)}\n**Total Won:** $${totalWonUsd.toFixed(2)}\n**Net:** ${netDisplay}`,
+          inline: false
+        });
+      }
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (error) {
+      console.error('[LOTTERY] Error getting lottery stats:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  }
+
   // FORCE CLOSE STUCK GAMES COMMAND
   if (commandName === 'force-close-games') {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       
       const guildId = interaction.guildId;
-      initializeFootballData(guildId);
       
-      // Get matches for this guild from flat structure
-      const guildMatches = Object.entries(footballMatchesData).filter(([matchId, match]) => 
-        match.guildIds.includes(guildId)
-      );
+      // Get matches for this guild from database
+      const guildMatchesObj = await dbFootball.getMatchesByGuild(guildId);
+      const guildMatches = Object.entries(guildMatchesObj || {});
       const stuckMatches = guildMatches.filter(([matchId, match]) => 
         (match.status === 'SCHEDULED' || match.status === 'TIMED') && 
         match.ftScore && 
@@ -5772,7 +8424,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Save the updated data
-      saveFootballMatchesData();
+      // Removed - using database
       
       await interaction.editReply({ 
         content: `✅ **Force Close Complete!**\n\n**Processed:** ${processedCount} games\n**Errors:** ${errorCount} games\n\nAll stuck games have been marked as finished and prizes distributed to virtual accounts.`, 
@@ -5791,6 +8443,19 @@ client.on('interactionCreate', async (interaction) => {
 
 // Combined autocomplete handler for send-esdt command
 client.on('interactionCreate', async (interaction) => {
+  // Log ALL interactions first to see if we're even receiving them
+  if (interaction.isAutocomplete()) {
+    console.log('[AUTOCOMPLETE] ===== AUTocomplete INTERACTION RECEIVED =====');
+    console.log('[AUTOCOMPLETE] Command:', interaction.commandName);
+    console.log('[AUTOCOMPLETE] Guild ID:', interaction.guildId);
+    try {
+      const focusedOption = interaction.options.getFocused(true);
+      console.log('[AUTOCOMPLETE] Focused option:', focusedOption?.name);
+    } catch (err) {
+      console.error('[AUTOCOMPLETE] Error getting focused option:', err.message);
+    }
+  }
+  
   if (!interaction.isAutocomplete()) return;
   
   // Helper function to safely respond to autocomplete
@@ -5810,12 +8475,13 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
-      const communityFundProject = serverData[guildId]?.communityFundProject;
+      const projects = await getProjects(guildId);
       
       // Exclude community fund project from /send-esdt options
+      // Use internal project name "Community Fund" for comparison
+      const communityFundProjectName = getCommunityFundProjectName();
       const availableProjects = Object.keys(projects).filter(projectName => 
-        projectName !== communityFundProject
+        projectName !== communityFundProjectName
       );
       
       const filtered = availableProjects.filter(projectName =>
@@ -5842,7 +8508,7 @@ client.on('interactionCreate', async (interaction) => {
       debugUserInAutocomplete('726473528731500615', guildId, 'send-esdt');
       
       let choices = [];
-      const userWallets = getUserWallets(guildId);
+      const userWallets = await getUserWallets(guildId);
       // Increase limit to 100 users to ensure more users are available for autocomplete
       const userWalletEntries = Object.entries(userWallets).slice(0, 100);
 
@@ -5884,7 +8550,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
+      const projects = await getProjects(guildId);
       
       // Get the selected project from the interaction
       const selectedProject = interaction.options.getString('project-name');
@@ -5922,8 +8588,8 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
-      const communityFundProject = serverData[guildId]?.communityFundProject;
+      const projects = await getProjects(guildId);
+      const communityFundProject = await getCommunityFundProject(guildId);
       
       // Exclude community fund project from /send-nft options
       const availableProjects = Object.keys(projects).filter(projectName => 
@@ -5948,10 +8614,11 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
+      const projects = await getProjects(guildId);
       const selectedProject = interaction.options.getString('project-name');
       
       if (!selectedProject || !projects[selectedProject]) {
+        console.log('[AUTOCOMPLETE] send-nft collection: No project selected or project not found');
         await safeRespond(interaction, []);
         return;
       }
@@ -5960,80 +8627,14 @@ client.on('interactionCreate', async (interaction) => {
       const walletAddress = project.walletAddress;
       
       if (!walletAddress) {
+        console.log('[AUTOCOMPLETE] send-nft collection: No wallet address for project');
         await safeRespond(interaction, []);
         return;
       }
       
-      // Fetch collections from MultiversX API
-      const collectionsUrl = `https://api.multiversx.com/accounts/${walletAddress}/collections?excludeMetaESDT=true`;
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout for autocomplete
-      
-      const response = await fetch(collectionsUrl, {
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const collections = await response.json();
-      
-      if (!Array.isArray(collections)) {
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      // Map collections to choices, using ticker as value
-      const choices = collections.map(collection => ({
-        name: `${collection.name || collection.ticker} (${collection.ticker})`,
-        value: collection.ticker // Use ticker as value for identifier
-      }));
-      
-      // Filter by user input
-      const filtered = choices.filter(choice =>
-        choice.name.toLowerCase().includes(focusedValue.toLowerCase()) ||
-        choice.value.toLowerCase().includes(focusedValue.toLowerCase())
-      );
-      
-      await safeRespond(interaction, filtered.slice(0, 25));
-    } catch (error) {
-      if (error.name !== 'AbortError') {
-        console.error('[AUTOCOMPLETE] Error fetching collections:', error.message);
-      }
-      await safeRespond(interaction, []);
-    }
-    return;
-  }
-
-  // NFT NAME AUTOCOMPLETE FOR SEND-NFT
-  if (interaction.commandName === 'send-nft' && interaction.options.getFocused(true).name === 'nft-name') {
-    try {
-      const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
-      const selectedProject = interaction.options.getString('project-name');
-      const selectedCollection = interaction.options.getString('collection');
-      
-      if (!selectedProject || !projects[selectedProject] || !selectedCollection) {
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const project = projects[selectedProject];
-      const walletAddress = project.walletAddress;
-      
-      if (!walletAddress) {
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      // Fetch NFTs from selected collection
-      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts?search=${encodeURIComponent(selectedCollection)}`;
+      // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
+      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
+      console.log('[AUTOCOMPLETE] send-nft collection: Fetching from', nftsUrl);
       
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout for autocomplete
@@ -6045,32 +8646,171 @@ client.on('interactionCreate', async (interaction) => {
       clearTimeout(timeoutId);
       
       if (!response.ok) {
+        console.error(`[AUTOCOMPLETE] send-nft collection: API error ${response.status} ${response.statusText}`);
         await safeRespond(interaction, []);
         return;
       }
       
-      const nfts = await response.json();
+      const responseData = await response.json();
+      console.log('[AUTOCOMPLETE] send-nft collection: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
       
-      if (!Array.isArray(nfts) || nfts.length === 0) {
+      // Handle paginated response (check for data property) or direct array
+      let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+      
+      if (!Array.isArray(allItems) || allItems.length === 0) {
+        console.log('[AUTOCOMPLETE] send-nft collection: No NFTs/SFTs found');
         await safeRespond(interaction, []);
         return;
       }
+      
+      console.log(`[AUTOCOMPLETE] send-nft collection: Found ${allItems.length} items from API`);
+      
+      // Extract unique collections that have actual NFTs (NonFungibleESDT) with media
+      const collectionsMap = new Map();
+      
+      allItems.forEach(item => {
+        // Only include collections that have NFTs (not SFTs) and have media URLs
+        if (item.type === 'NonFungibleESDT' && 
+            item.collection && 
+            item.media && 
+            item.media.length > 0 && 
+            item.media[0].url) {
+          
+          if (!collectionsMap.has(item.collection)) {
+            // Extract collection name from first NFT in collection or use ticker
+            const collectionName = item.name?.split('#')[0]?.trim() || 
+                                  item.collection.split('-')[0] || 
+                                  item.collection;
+            const ticker = item.ticker || item.collection.split('-')[0] || '';
+            
+            collectionsMap.set(item.collection, {
+              identifier: item.collection,
+              name: collectionName,
+              ticker: ticker
+            });
+          }
+        }
+      });
+      
+      const collections = Array.from(collectionsMap.values());
+      console.log(`[AUTOCOMPLETE] send-nft collection: Extracted ${collections.length} unique NFT collections (excluded SFTs and items without media)`);
+      
+      // Map collections to choices, using identifier as value (full collection identifier)
+      const choices = collections.map(collection => ({
+        name: `${collection.name}${collection.ticker ? ` (${collection.ticker})` : ''}`,
+        value: collection.identifier // Always use full identifier
+      })).filter(choice => choice.value);
+      
+      // Filter by user input
+      const filtered = choices.filter(choice =>
+        choice.name.toLowerCase().includes(focusedValue.toLowerCase()) ||
+        choice.value.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      
+      console.log(`[AUTOCOMPLETE] send-nft collection: Returning ${filtered.length} filtered choices`);
+      await safeRespond(interaction, filtered.slice(0, 25));
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        console.error('[AUTOCOMPLETE] send-nft collection: Error fetching collections:', error.message, error.stack);
+      }
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // NFT NAME AUTOCOMPLETE FOR SEND-NFT
+  if (interaction.commandName === 'send-nft' && interaction.options.getFocused(true).name === 'nft-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const projects = await getProjects(guildId);
+      const selectedProject = interaction.options.getString('project-name');
+      const selectedCollection = interaction.options.getString('collection');
+      
+      if (!selectedProject || !projects[selectedProject] || !selectedCollection) {
+        console.log('[AUTOCOMPLETE] send-nft nft-name: Missing project or collection');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      const project = projects[selectedProject];
+      const walletAddress = project.walletAddress;
+      
+      if (!walletAddress) {
+        console.log('[AUTOCOMPLETE] send-nft nft-name: No wallet address');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
+      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
+      console.log('[AUTOCOMPLETE] send-nft nft-name: Fetching from', nftsUrl);
+      console.log('[AUTOCOMPLETE] send-nft nft-name: Filtering for collection:', selectedCollection);
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout for autocomplete
+      
+      const response = await fetch(nftsUrl, {
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        console.error(`[AUTOCOMPLETE] send-nft nft-name: API error ${response.status} ${response.statusText}`);
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      const responseData = await response.json();
+      console.log('[AUTOCOMPLETE] send-nft nft-name: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
+      
+      // Handle paginated response (check for data property) or direct array
+      let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+      
+      if (!Array.isArray(allItems) || allItems.length === 0) {
+        console.log('[AUTOCOMPLETE] send-nft nft-name: No NFTs found or invalid format');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      console.log(`[AUTOCOMPLETE] send-nft nft-name: Found ${allItems.length} items from API`);
+      
+      // Filter to only include actual NFTs (NonFungibleESDT) from the selected collection
+      // Also ensure they have media URLs
+      const actualNFTs = allItems.filter(item => {
+        // Only include NonFungibleESDT type (exclude SemiFungibleESDT)
+        const isNFT = item.type === 'NonFungibleESDT';
+        
+        // Must have media URL
+        const hasMedia = item.media && item.media.length > 0 && item.media[0].url;
+        
+        // Match collection exactly (case-insensitive)
+        const matchesCollection = item.collection && 
+          (item.collection.toLowerCase() === selectedCollection.toLowerCase() ||
+           item.collection === selectedCollection);
+        
+        return isNFT && hasMedia && matchesCollection;
+      });
+      
+      console.log(`[AUTOCOMPLETE] send-nft nft-name: Filtered to ${actualNFTs.length} NFTs from collection "${selectedCollection}" (excluded ${allItems.length - actualNFTs.length} SFTs/other collections/items without media)`);
       
       // Map NFTs to choices, using name as both display and value
-      const choices = nfts.map(nft => ({
+      const choices = actualNFTs.map(nft => ({
         name: nft.name || nft.identifier || 'Unnamed NFT',
         value: nft.name || nft.identifier // Use name as value
-      }));
+      })).filter(choice => choice.value); // Filter out invalid entries
       
       // Filter by user input
       const filtered = choices.filter(choice =>
         choice.name.toLowerCase().includes(focusedValue.toLowerCase())
       );
       
+      console.log(`[AUTOCOMPLETE] send-nft nft-name: Returning ${filtered.length} filtered choices`);
       await safeRespond(interaction, filtered.slice(0, 25));
     } catch (error) {
       if (error.name !== 'AbortError') {
-        console.error('[AUTOCOMPLETE] Error fetching NFTs:', error.message);
+        console.error('[AUTOCOMPLETE] send-nft nft-name: Error fetching NFTs:', error.message, error.stack);
       }
       await safeRespond(interaction, []);
     }
@@ -6082,12 +8822,13 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
-      const communityFundProject = serverData[guildId]?.communityFundProject;
+      const projects = await getProjects(guildId);
+      const communityFundProjectName = getCommunityFundProjectName(); // Always "Community Fund"
       
       // Exclude community fund project from /create-auction options
+      // Filter by internal project name "Community Fund" to ensure it's always excluded
       const availableProjects = Object.keys(projects).filter(projectName => 
-        projectName !== communityFundProject
+        projectName !== communityFundProjectName
       );
       
       const filtered = availableProjects.filter(projectName =>
@@ -6108,10 +8849,11 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
+      const projects = await getProjects(guildId);
       const selectedProject = interaction.options.getString('project-name');
       
       if (!selectedProject || !projects[selectedProject]) {
+        console.log('[AUTOCOMPLETE] create-auction collection: No project selected or project not found');
         await safeRespond(interaction, []);
         return;
       }
@@ -6120,77 +8862,14 @@ client.on('interactionCreate', async (interaction) => {
       const walletAddress = project.walletAddress;
       
       if (!walletAddress) {
+        console.log('[AUTOCOMPLETE] create-auction collection: No wallet address for project');
         await safeRespond(interaction, []);
         return;
       }
       
-      // Fetch collections from MultiversX API
-      const collectionsUrl = `https://api.multiversx.com/accounts/${walletAddress}/collections?excludeMetaESDT=true`;
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000);
-      
-      const response = await fetch(collectionsUrl, {
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const collections = await response.json();
-      
-      if (!Array.isArray(collections)) {
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const choices = collections.map(collection => ({
-        name: `${collection.name || collection.ticker} (${collection.ticker})`,
-        value: collection.ticker
-      }));
-      
-      const filtered = choices.filter(choice =>
-        choice.name.toLowerCase().includes(focusedValue.toLowerCase()) ||
-        choice.value.toLowerCase().includes(focusedValue.toLowerCase())
-      );
-      
-      await safeRespond(interaction, filtered.slice(0, 25));
-    } catch (error) {
-      if (error.name !== 'AbortError') {
-        console.error('[AUTOCOMPLETE] Error fetching collections:', error.message);
-      }
-      await safeRespond(interaction, []);
-    }
-    return;
-  }
-
-  // NFT NAME AUTOCOMPLETE FOR CREATE-AUCTION
-  if (interaction.commandName === 'create-auction' && interaction.options.getFocused(true).name === 'nft-name') {
-    try {
-      const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
-      const selectedProject = interaction.options.getString('project-name');
-      const selectedCollection = interaction.options.getString('collection');
-      
-      if (!selectedProject || !projects[selectedProject] || !selectedCollection) {
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const project = projects[selectedProject];
-      const walletAddress = project.walletAddress;
-      
-      if (!walletAddress) {
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts?search=${encodeURIComponent(selectedCollection)}`;
+      // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
+      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
+      console.log('[AUTOCOMPLETE] create-auction collection: Fetching from', nftsUrl);
       
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 3000);
@@ -6202,30 +8881,167 @@ client.on('interactionCreate', async (interaction) => {
       clearTimeout(timeoutId);
       
       if (!response.ok) {
+        console.error(`[AUTOCOMPLETE] create-auction collection: API error ${response.status} ${response.statusText}`);
         await safeRespond(interaction, []);
         return;
       }
       
-      const nfts = await response.json();
+      const responseData = await response.json();
+      console.log('[AUTOCOMPLETE] create-auction collection: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
       
-      if (!Array.isArray(nfts) || nfts.length === 0) {
+      // Handle paginated response (check for data property) or direct array
+      let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+      
+      if (!Array.isArray(allItems) || allItems.length === 0) {
+        console.log('[AUTOCOMPLETE] create-auction collection: No NFTs/SFTs found');
         await safeRespond(interaction, []);
         return;
       }
       
-      const choices = nfts.map(nft => ({
+      console.log(`[AUTOCOMPLETE] create-auction collection: Found ${allItems.length} items from API`);
+      
+      // Extract unique collections that have actual NFTs (NonFungibleESDT) with media
+      const collectionsMap = new Map();
+      
+      allItems.forEach(item => {
+        // Only include collections that have NFTs (not SFTs) and have media URLs
+        if (item.type === 'NonFungibleESDT' && 
+            item.collection && 
+            item.media && 
+            item.media.length > 0 && 
+            item.media[0].url) {
+          
+          if (!collectionsMap.has(item.collection)) {
+            // Extract collection name from first NFT in collection or use ticker
+            const collectionName = item.name?.split('#')[0]?.trim() || 
+                                  item.collection.split('-')[0] || 
+                                  item.collection;
+            const ticker = item.ticker || item.collection.split('-')[0] || '';
+            
+            collectionsMap.set(item.collection, {
+              identifier: item.collection,
+              name: collectionName,
+              ticker: ticker
+            });
+          }
+        }
+      });
+      
+      const collections = Array.from(collectionsMap.values());
+      console.log(`[AUTOCOMPLETE] create-auction collection: Extracted ${collections.length} unique NFT collections (excluded SFTs and items without media)`);
+      
+      const choices = collections.map(collection => ({
+        name: `${collection.name}${collection.ticker ? ` (${collection.ticker})` : ''}`,
+        value: collection.identifier // Always use full identifier
+      })).filter(choice => choice.value);
+      
+      const filtered = choices.filter(choice =>
+        choice.name.toLowerCase().includes(focusedValue.toLowerCase()) ||
+        choice.value.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      
+      console.log(`[AUTOCOMPLETE] create-auction collection: Returning ${filtered.length} filtered choices`);
+      await safeRespond(interaction, filtered.slice(0, 25));
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        console.error('[AUTOCOMPLETE] create-auction collection: Error fetching collections:', error.message, error.stack);
+      }
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // NFT NAME AUTOCOMPLETE FOR CREATE-AUCTION
+  if (interaction.commandName === 'create-auction' && interaction.options.getFocused(true).name === 'nft-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const projects = await getProjects(guildId);
+      const selectedProject = interaction.options.getString('project-name');
+      const selectedCollection = interaction.options.getString('collection');
+      
+      if (!selectedProject || !projects[selectedProject] || !selectedCollection) {
+        console.log('[AUTOCOMPLETE] create-auction nft-name: Missing project or collection');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      const project = projects[selectedProject];
+      const walletAddress = project.walletAddress;
+      
+      if (!walletAddress) {
+        console.log('[AUTOCOMPLETE] create-auction nft-name: No wallet address');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
+      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
+      console.log('[AUTOCOMPLETE] create-auction nft-name: Fetching from', nftsUrl);
+      console.log('[AUTOCOMPLETE] create-auction nft-name: Filtering for collection:', selectedCollection);
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      
+      const response = await fetch(nftsUrl, {
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        console.error(`[AUTOCOMPLETE] create-auction nft-name: API error ${response.status} ${response.statusText}`);
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      const responseData = await response.json();
+      console.log('[AUTOCOMPLETE] create-auction nft-name: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
+      
+      // Handle paginated response (check for data property) or direct array
+      let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+      
+      if (!Array.isArray(allItems) || allItems.length === 0) {
+        console.log('[AUTOCOMPLETE] create-auction nft-name: No NFTs found or invalid format');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      console.log(`[AUTOCOMPLETE] create-auction nft-name: Found ${allItems.length} items from API`);
+      
+      // Filter to only include actual NFTs (NonFungibleESDT) from the selected collection
+      // Also ensure they have media URLs (required for auctions)
+      const actualNFTs = allItems.filter(item => {
+        // Only include NonFungibleESDT type (exclude SemiFungibleESDT)
+        const isNFT = item.type === 'NonFungibleESDT';
+        
+        // Must have media URL (required for auction display)
+        const hasMedia = item.media && item.media.length > 0 && item.media[0].url;
+        
+        // Match collection exactly (case-insensitive)
+        const matchesCollection = item.collection && 
+          (item.collection.toLowerCase() === selectedCollection.toLowerCase() ||
+           item.collection === selectedCollection);
+        
+        return isNFT && hasMedia && matchesCollection;
+      });
+      
+      console.log(`[AUTOCOMPLETE] create-auction nft-name: Filtered to ${actualNFTs.length} NFTs from collection "${selectedCollection}" (excluded ${allItems.length - actualNFTs.length} SFTs/other collections/items without media)`);
+      
+      const choices = actualNFTs.map(nft => ({
         name: nft.name || nft.identifier || 'Unnamed NFT',
         value: nft.name || nft.identifier
-      }));
+      })).filter(choice => choice.value); // Filter out invalid entries
       
       const filtered = choices.filter(choice =>
         choice.name.toLowerCase().includes(focusedValue.toLowerCase())
       );
       
+      console.log(`[AUTOCOMPLETE] create-auction nft-name: Returning ${filtered.length} filtered choices`);
       await safeRespond(interaction, filtered.slice(0, 25));
     } catch (error) {
       if (error.name !== 'AbortError') {
-        console.error('[AUTOCOMPLETE] Error fetching NFTs:', error.message);
+        console.error('[AUTOCOMPLETE] create-auction nft-name: Error fetching NFTs:', error.message, error.stack);
       }
       await safeRespond(interaction, []);
     }
@@ -6233,44 +9049,86 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   // TOKEN AUTOCOMPLETE FOR CREATE-AUCTION
-  if (interaction.commandName === 'create-auction' && interaction.options.getFocused(true).name === 'token-ticker') {
-    try {
-      const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
-      const selectedProject = interaction.options.getString('project-name');
-      
-      if (!selectedProject || !projects[selectedProject]) {
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const project = projects[selectedProject];
-      let supportedTokens = [];
-      
-      // Handle both string (comma-separated) and array formats
-      if (project.supportedTokens) {
-        if (Array.isArray(project.supportedTokens)) {
-          supportedTokens = project.supportedTokens;
-        } else if (typeof project.supportedTokens === 'string') {
-          supportedTokens = project.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+  try {
+    const focusedOption = interaction.options.getFocused(true);
+    if (interaction.commandName === 'create-auction' && focusedOption && focusedOption.name === 'token-ticker') {
+      console.log('[AUTOCOMPLETE] create-auction token-ticker handler reached!');
+      try {
+        const focusedValue = interaction.options.getFocused();
+        const guildId = interaction.guildId;
+        
+        console.log('[AUTOCOMPLETE] create-auction token-ticker autocomplete triggered');
+        console.log('[AUTOCOMPLETE] Guild ID:', guildId);
+        console.log('[AUTOCOMPLETE] Focused value:', focusedValue);
+        
+        const projects = await getProjects(guildId);
+        console.log('[AUTOCOMPLETE] Available projects:', Object.keys(projects));
+        
+        const selectedProject = interaction.options.getString('project-name');
+        console.log('[AUTOCOMPLETE] Selected project:', selectedProject);
+        
+        if (!selectedProject || !projects[selectedProject]) {
+          console.log('[AUTOCOMPLETE] No project selected or project not found');
+          console.log('[AUTOCOMPLETE] Selected project value:', selectedProject);
+          console.log('[AUTOCOMPLETE] Available project names:', Object.keys(projects));
+          await safeRespond(interaction, []);
+          return;
         }
+        
+        const project = projects[selectedProject];
+        console.log('[AUTOCOMPLETE] Project data:', {
+          name: selectedProject,
+          hasSupportedTokens: !!project.supportedTokens,
+          supportedTokensType: typeof project.supportedTokens,
+          supportedTokensValue: project.supportedTokens
+        });
+        
+        let supportedTokens = [];
+        
+        // Handle both string (comma-separated) and array formats
+        if (project.supportedTokens) {
+          if (Array.isArray(project.supportedTokens)) {
+            supportedTokens = project.supportedTokens;
+          } else if (typeof project.supportedTokens === 'string') {
+            supportedTokens = project.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+          }
+        }
+        
+        console.log('[AUTOCOMPLETE] Supported tokens after processing:', supportedTokens);
+        
+        if (supportedTokens.length === 0) {
+          console.log('[AUTOCOMPLETE] No supported tokens found for project:', selectedProject);
+          await safeRespond(interaction, []);
+          return;
+        }
+        
+        const choices = supportedTokens
+          .filter(token => token.toLowerCase().includes(focusedValue.toLowerCase()))
+          .map(token => ({
+            name: token,
+            value: token
+          }))
+          .slice(0, 25);
+        
+        console.log('[AUTOCOMPLETE] Filtered choices:', choices);
+        console.log('[AUTOCOMPLETE] Sending', choices.length, 'token choices');
+        
+        await safeRespond(interaction, choices);
+        console.log('[AUTOCOMPLETE] Token autocomplete response sent successfully');
+      } catch (error) {
+        console.error('[AUTOCOMPLETE] Error in create-auction token autocomplete:', error.message);
+        console.error('[AUTOCOMPLETE] Full error:', error);
+        console.error('[AUTOCOMPLETE] Stack trace:', error.stack);
+        await safeRespond(interaction, []);
       }
-      
-      const choices = supportedTokens
-        .filter(token => token.toLowerCase().includes(focusedValue.toLowerCase()))
-        .map(token => ({
-          name: token,
-          value: token
-        }))
-        .slice(0, 25);
-      
-      await safeRespond(interaction, choices);
-    } catch (error) {
-      console.error('[AUTOCOMPLETE] Error in create-auction token autocomplete:', error);
-      await safeRespond(interaction, []);
+      return;
     }
-    return;
+  } catch (error) {
+    // Catch any error from getFocused(true) itself
+    if (interaction.commandName === 'create-auction') {
+      console.error('[AUTOCOMPLETE] Error getting focused option for create-auction:', error.message);
+      console.error('[AUTOCOMPLETE] Full error:', error);
+    }
   }
 
   // USER AUTOCOMPLETE FOR SEND-NFT
@@ -6281,7 +9139,7 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guildId;
       
       let choices = [];
-      const userWallets = getUserWallets(guildId);
+      const userWallets = await getUserWallets(guildId);
       const userWalletEntries = Object.entries(userWallets).slice(0, 100);
 
       if (userWalletEntries.length > 0) {
@@ -6322,7 +9180,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
+      const projects = await getProjects(guildId);
       const availableProjects = Object.keys(projects);
       
       const filtered = availableProjects.filter(projectName =>
@@ -6375,16 +9233,19 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
+      const projects = await getProjects(guildId);
       const availableProjects = Object.keys(projects);
       
+      const options = [];
+      
+      // Add regular projects
       const filtered = availableProjects.filter(projectName =>
         projectName.toLowerCase().includes(focusedValue.toLowerCase())
       );
       
-      await safeRespond(interaction,
-        filtered.slice(0, 25).map(projectName => ({ name: projectName, value: projectName }))
-      );
+      options.push(...filtered.slice(0, 24).map(projectName => ({ name: projectName, value: projectName })));
+      
+      await safeRespond(interaction, options);
     } catch (error) {
       await safeRespond(interaction, []);
     }
@@ -6396,7 +9257,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
+      const projects = await getProjects(guildId);
       const availableProjects = Object.keys(projects);
       const filtered = availableProjects.filter(projectName =>
         projectName.toLowerCase().includes(focusedValue.toLowerCase())
@@ -6415,13 +9276,14 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = getProjects(guildId);
-      const communityFundProject = serverData[guildId]?.communityFundProject;
+      const projects = await getProjects(guildId);
+      const communityFundProject = await getCommunityFundProject(guildId);
       
-      // Filter out community fund project and get projects that have wallet configured
+      // Filter out Community Fund project (always named "Community Fund") and get projects that have wallet configured
+      const communityFundProjectName = getCommunityFundProjectName(); // Always "Community Fund"
       const availableProjects = Object.entries(projects)
         .filter(([name, project]) => 
-          name !== communityFundProject && 
+          name !== communityFundProjectName && // Exclude Community Fund by actual project name
           project.walletAddress && 
           project.walletPem
         )
@@ -6450,41 +9312,135 @@ client.on('interactionCreate', async (interaction) => {
       const source = interaction.options.getString('source') || 'betting';
       const projectName = interaction.options.getString('project-name');
       
-      initializeServerData(guildId);
-      const houseBalanceData = serverData[guildId].houseBalance;
-      const projects = getProjects(guildId);
+      const houseBalanceData = await getAllHouseBalances(guildId);
+      const projects = await getProjects(guildId);
       const project = projectName ? projects[projectName] : null;
       
       // Get tokens that house has balance for AND project supports
+      // houseBalanceData structure: {token_identifier: {bettingEarnings: {token: amount}, bettingSpending: {token: amount}, ...}}
+      // Aggregate balances similar to how house-balance command does it
+      const aggregatedBalances = {
+        bettingEarnings: {},
+        bettingSpending: {},
+        auctionEarnings: {},
+        auctionSpending: {},
+        lotteryEarnings: {},
+        lotterySpending: {}
+      };
+      
+      // Aggregate balances from all token records (similar to house-balance command)
+      for (const [tokenIdentifier, tokenData] of Object.entries(houseBalanceData || {})) {
+        // Merge betting earnings
+        if (tokenData.bettingEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.bettingEarnings)) {
+            if (!aggregatedBalances.bettingEarnings[token]) {
+              aggregatedBalances.bettingEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.bettingEarnings[token] || '0');
+            aggregatedBalances.bettingEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge betting spending
+        if (tokenData.bettingSpending) {
+          for (const [token, amount] of Object.entries(tokenData.bettingSpending)) {
+            if (!aggregatedBalances.bettingSpending[token]) {
+              aggregatedBalances.bettingSpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.bettingSpending[token] || '0');
+            aggregatedBalances.bettingSpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge auction earnings
+        if (tokenData.auctionEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.auctionEarnings)) {
+            if (!aggregatedBalances.auctionEarnings[token]) {
+              aggregatedBalances.auctionEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.auctionEarnings[token] || '0');
+            aggregatedBalances.auctionEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge auction spending
+        if (tokenData.auctionSpending) {
+          for (const [token, amount] of Object.entries(tokenData.auctionSpending)) {
+            if (!aggregatedBalances.auctionSpending[token]) {
+              aggregatedBalances.auctionSpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.auctionSpending[token] || '0');
+            aggregatedBalances.auctionSpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge lottery earnings
+        if (tokenData.lotteryEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.lotteryEarnings)) {
+            if (!aggregatedBalances.lotteryEarnings[token]) {
+              aggregatedBalances.lotteryEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
+            aggregatedBalances.lotteryEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge lottery spending
+        if (tokenData.lotterySpending) {
+          for (const [token, amount] of Object.entries(tokenData.lotterySpending)) {
+            if (!aggregatedBalances.lotterySpending[token]) {
+              aggregatedBalances.lotterySpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
+            aggregatedBalances.lotterySpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+      }
+      
+      // Get all unique tokens from aggregated balances
+      const allTokens = new Set([
+        ...Object.keys(aggregatedBalances.bettingEarnings),
+        ...Object.keys(aggregatedBalances.bettingSpending),
+        ...Object.keys(aggregatedBalances.auctionEarnings),
+        ...Object.keys(aggregatedBalances.auctionSpending),
+        ...Object.keys(aggregatedBalances.lotteryEarnings),
+        ...Object.keys(aggregatedBalances.lotterySpending)
+      ]);
+      
+      // Filter tokens that have balance > 0 for the selected source
       let availableTokens = [];
-      if (source === 'auction') {
-        availableTokens = Object.keys(houseBalanceData.auctionPNL || {}).filter(token => {
-          const balance = new BigNumber(houseBalanceData.auctionPNL[token] || '0');
-          if (!balance.isGreaterThan(0)) return false;
-          
-          // If project is selected, check if it supports this token
-          if (project) {
-            const supportedTokens = Array.isArray(project.supportedTokens) 
-              ? project.supportedTokens 
-              : (project.supportedTokens || '').split(',').map(t => t.trim());
-            return supportedTokens.includes(token);
-          }
-          return true;
-        });
-      } else {
-        availableTokens = Object.keys(houseBalanceData.bettingPNL || {}).filter(token => {
-          const balance = new BigNumber(houseBalanceData.bettingPNL[token] || '0');
-          if (!balance.isGreaterThan(0)) return false;
-          
-          // If project is selected, check if it supports this token
-          if (project) {
-            const supportedTokens = Array.isArray(project.supportedTokens) 
-              ? project.supportedTokens 
-              : (project.supportedTokens || '').split(',').map(t => t.trim());
-            return supportedTokens.includes(token);
-          }
-          return true;
-        });
+      for (const token of allTokens) {
+        let balance = new BigNumber(0);
+        
+        if (source === 'auction') {
+          // Calculate auction PNL: earnings - spending
+          const auctionEarnings = new BigNumber(aggregatedBalances.auctionEarnings[token] || '0');
+          const auctionSpending = new BigNumber(aggregatedBalances.auctionSpending[token] || '0');
+          balance = auctionEarnings.minus(auctionSpending);
+        } else if (source === 'lottery') {
+          // Calculate lottery PNL: earnings - spending
+          const lotteryEarnings = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
+          const lotterySpending = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
+          balance = lotteryEarnings.minus(lotterySpending);
+        } else {
+          // Calculate betting PNL: earnings - spending
+          const bettingEarnings = new BigNumber(aggregatedBalances.bettingEarnings[token] || '0');
+          const bettingSpending = new BigNumber(aggregatedBalances.bettingSpending[token] || '0');
+          balance = bettingEarnings.minus(bettingSpending);
+        }
+        
+        // Only include tokens with balance > 0
+        if (!balance.isGreaterThan(0)) continue;
+        
+        // If project is selected, check if it supports this token
+        if (project) {
+          const supportedTokens = Array.isArray(project.supportedTokens) 
+            ? project.supportedTokens 
+            : (project.supportedTokens || '').split(',').map(t => t.trim());
+          if (!supportedTokens.includes(token)) continue;
+        }
+        
+        availableTokens.push(token);
       }
       
       const filtered = availableTokens.filter(token =>
@@ -6501,29 +9457,6 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // TOKEN AUTOCOMPLETE FOR SET-TIP-LIMITS
-  if (interaction.commandName === 'set-tip-limits' && interaction.options.getFocused(true).name === 'token-ticker') {
-    try {
-      const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
-      const fundProject = serverData[guildId]?.communityFundProject;
-      let supportedTokens = [];
-      const projects = getProjects(guildId);
-      if (fundProject && projects[fundProject]) {
-        supportedTokens = projects[fundProject].supportedTokens || [];
-      }
-      const filtered = supportedTokens.filter(token =>
-        token.toLowerCase().includes(focusedValue.toLowerCase())
-      );
-      await safeRespond(interaction,
-        filtered.slice(0, 25).map(token => ({ name: token, value: token }))
-      );
-    } catch (error) {
-      await safeRespond(interaction, []);
-    }
-    return;
-  }
-
   // USER AUTOCOMPLETE FOR TIP
   if (interaction.commandName === 'tip' && interaction.options.getFocused(true).name === 'user-tag') {
     try {
@@ -6535,7 +9468,7 @@ client.on('interactionCreate', async (interaction) => {
       debugUserInAutocomplete('726473528731500615', guildId, 'tip');
       
       let choices = [];
-      const userWallets = getUserWallets(guildId);
+      const userWallets = await getUserWallets(guildId);
       // Increase limit to 100 users to ensure more users are available for autocomplete
       const userWalletEntries = Object.entries(userWallets).slice(0, 100);
       if (userWalletEntries.length > 0) {
@@ -6582,11 +9515,12 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const fundProject = serverData[guildId]?.communityFundProject;
+      const fundProject = await getCommunityFundProject(guildId);
       let supportedTokens = [];
-      const projects = getProjects(guildId);
-      if (fundProject && projects[fundProject]) {
-        supportedTokens = projects[fundProject].supportedTokens || [];
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      if (fundProject && projects[projectName]) {
+        supportedTokens = projects[projectName].supportedTokens || [];
       }
       const filtered = supportedTokens.filter(token =>
         token.toLowerCase().includes(focusedValue.toLowerCase())
@@ -6608,24 +9542,125 @@ client.on('interactionCreate', async (interaction) => {
       const source = interaction.options.getString('source') || 'betting';
       
       // Get tokens that house has balance for based on source
-      initializeServerData(guildId);
-      const houseBalanceData = serverData[guildId].houseBalance;
+      const houseBalanceData = await getAllHouseBalances(guildId);
       
-      // Get balance source based on selection
-      const balanceSource = source === 'auction' ? houseBalanceData.auctionPNL : houseBalanceData.bettingPNL;
+      // Aggregate balances from all token records
+      const aggregatedBalances = {
+        bettingEarnings: {},
+        bettingSpending: {},
+        auctionEarnings: {},
+        auctionSpending: {},
+        lotteryEarnings: {},
+        lotterySpending: {}
+      };
       
-      if (!balanceSource) {
-        await safeRespond(interaction, []);
-        return;
+      for (const [tokenIdentifier, tokenData] of Object.entries(houseBalanceData || {})) {
+        // Merge betting earnings
+        if (tokenData.bettingEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.bettingEarnings)) {
+            if (!aggregatedBalances.bettingEarnings[token]) {
+              aggregatedBalances.bettingEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.bettingEarnings[token] || '0');
+            aggregatedBalances.bettingEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge betting spending
+        if (tokenData.bettingSpending) {
+          for (const [token, amount] of Object.entries(tokenData.bettingSpending)) {
+            if (!aggregatedBalances.bettingSpending[token]) {
+              aggregatedBalances.bettingSpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.bettingSpending[token] || '0');
+            aggregatedBalances.bettingSpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge auction earnings
+        if (tokenData.auctionEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.auctionEarnings)) {
+            if (!aggregatedBalances.auctionEarnings[token]) {
+              aggregatedBalances.auctionEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.auctionEarnings[token] || '0');
+            aggregatedBalances.auctionEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge auction spending
+        if (tokenData.auctionSpending) {
+          for (const [token, amount] of Object.entries(tokenData.auctionSpending)) {
+            if (!aggregatedBalances.auctionSpending[token]) {
+              aggregatedBalances.auctionSpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.auctionSpending[token] || '0');
+            aggregatedBalances.auctionSpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge lottery earnings
+        if (tokenData.lotteryEarnings) {
+          for (const [token, amount] of Object.entries(tokenData.lotteryEarnings)) {
+            if (!aggregatedBalances.lotteryEarnings[token]) {
+              aggregatedBalances.lotteryEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
+            aggregatedBalances.lotteryEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge lottery spending
+        if (tokenData.lotterySpending) {
+          for (const [token, amount] of Object.entries(tokenData.lotterySpending)) {
+            if (!aggregatedBalances.lotterySpending[token]) {
+              aggregatedBalances.lotterySpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
+            aggregatedBalances.lotterySpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
       }
       
-      // Only show tokens that have positive balance for the selected source
-      let supportedTokens = Object.keys(balanceSource).filter(token => {
-        const balance = new BigNumber(balanceSource[token] || '0');
-        return balance.isGreaterThan(0);
-      });
+      // Get all unique tokens from aggregated balances
+      const allTokens = new Set([
+        ...Object.keys(aggregatedBalances.bettingEarnings),
+        ...Object.keys(aggregatedBalances.bettingSpending),
+        ...Object.keys(aggregatedBalances.auctionEarnings),
+        ...Object.keys(aggregatedBalances.auctionSpending),
+        ...Object.keys(aggregatedBalances.lotteryEarnings),
+        ...Object.keys(aggregatedBalances.lotterySpending)
+      ]);
       
-      const filtered = supportedTokens.filter(token =>
+      // Filter tokens that have balance > 0 for the selected source
+      let availableTokens = [];
+      for (const token of allTokens) {
+        let balance = new BigNumber(0);
+        
+        if (source === 'auction') {
+          // Calculate auction PNL: earnings - spending
+          const auctionEarnings = new BigNumber(aggregatedBalances.auctionEarnings[token] || '0');
+          const auctionSpending = new BigNumber(aggregatedBalances.auctionSpending[token] || '0');
+          balance = auctionEarnings.minus(auctionSpending);
+        } else if (source === 'lottery') {
+          // Calculate lottery PNL: earnings - spending
+          const lotteryEarnings = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
+          const lotterySpending = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
+          balance = lotteryEarnings.minus(lotterySpending);
+        } else {
+          // Calculate betting PNL: earnings - spending
+          const bettingEarnings = new BigNumber(aggregatedBalances.bettingEarnings[token] || '0');
+          const bettingSpending = new BigNumber(aggregatedBalances.bettingSpending[token] || '0');
+          balance = bettingEarnings.minus(bettingSpending);
+        }
+        
+        // Only include tokens with balance > 0
+        if (!balance.isGreaterThan(0)) continue;
+        
+        availableTokens.push(token);
+      }
+      
+      const filtered = availableTokens.filter(token =>
         token.toLowerCase().includes(focusedValue.toLowerCase())
       );
       
@@ -6644,11 +9679,12 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const fundProject = serverData[guildId]?.communityFundProject;
+      const fundProject = await getCommunityFundProject(guildId);
       let supportedTokens = [];
-      const projects = getProjects(guildId);
-      if (fundProject && projects[fundProject]) {
-        supportedTokens = projects[fundProject].supportedTokens || [];
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      if (fundProject && projects[projectName]) {
+        supportedTokens = projects[projectName].supportedTokens || [];
       }
       const filtered = supportedTokens.filter(token =>
         token.toLowerCase().includes(focusedValue.toLowerCase())
@@ -6665,6 +9701,47 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // TOKEN AUTOCOMPLETE FOR LOTTERY COMMANDS
+  if ((interaction.commandName === 'create-lottery' || 
+       interaction.commandName === 'my-active-lottery-tickets' || 
+       interaction.commandName === 'my-expired-tickets') && 
+      interaction.options.getFocused(true).name === 'token') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      
+      // Get supported tokens from Community Fund project
+      const fundProject = await getCommunityFundProject(guildId);
+      let supportedTokens = [];
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      if (fundProject && projects[projectName]) {
+        supportedTokens = projects[projectName].supportedTokens || [];
+      }
+      
+      // If no tokens found, try to get tokens from any available project
+      if (supportedTokens.length === 0) {
+        for (const [projectName, project] of Object.entries(projects)) {
+          if (project.supportedTokens && project.supportedTokens.length > 0) {
+            supportedTokens = project.supportedTokens;
+            break;
+          }
+        }
+      }
+      
+      const filtered = supportedTokens
+        .filter(token => token.toLowerCase().includes(focusedValue.toLowerCase()))
+        .map(token => ({ name: token, value: token }))
+        .slice(0, 25);
+      
+      await safeRespond(interaction, filtered);
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in lottery token autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
   // USER AUTOCOMPLETE FOR TIP-VIRTUAL
   if (interaction.commandName === 'tip-virtual' && interaction.options.getFocused(true).name === 'user-tag') {
     try {
@@ -6673,7 +9750,7 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guildId;
       
       let choices = [];
-      const userWallets = getUserWallets(guildId);
+      const userWallets = await getUserWallets(guildId);
       const userWalletEntries = Object.entries(userWallets).slice(0, 100);
 
       if (userWalletEntries.length > 0) {
@@ -6713,11 +9790,12 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const fundProject = serverData[guildId]?.communityFundProject;
+      const fundProject = await getCommunityFundProject(guildId);
       let supportedTokens = [];
-      const projects = getProjects(guildId);
-      if (fundProject && projects[fundProject]) {
-        supportedTokens = projects[fundProject].supportedTokens || [];
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      if (fundProject && projects[projectName]) {
+        supportedTokens = projects[projectName].supportedTokens || [];
       }
       const filtered = supportedTokens.filter(token =>
         token.toLowerCase().includes(focusedValue.toLowerCase())
@@ -6744,24 +9822,38 @@ client.on('interactionCreate', async (interaction) => {
       // Force reload virtual accounts data
       virtualAccounts.forceReloadData();
       
-      // Get user's actual token holdings
-      const userBalances = virtualAccounts.getAllUserBalances(guildId, userId);
-      const userTokens = Object.keys(userBalances).filter(token => 
-        new BigNumber(userBalances[token]).isGreaterThan(0)
-      );
+      // Get user's actual token holdings (await the async function)
+      const userBalances = await virtualAccounts.getAllUserBalances(guildId, userId);
+      
+      // Filter tokens with balance > 0
+      const userTokens = Object.keys(userBalances || {}).filter(token => {
+        const balance = userBalances[token];
+        if (!balance) return false;
+        try {
+          return new BigNumber(balance).isGreaterThan(0);
+        } catch (error) {
+          console.error(`[AUTOCOMPLETE] Error parsing balance for token ${token}:`, error);
+          return false;
+        }
+      });
       
       const filtered = userTokens.filter(token =>
         token.toLowerCase().includes(focusedValue.toLowerCase())
       );
       
-      await safeRespond(interaction,
-        filtered.slice(0, 25).map(token => ({ 
-          name: `${token.includes('-') ? token.split('-')[0] : token} (${token}) - Balance: ${userBalances[token]}`, 
+      // Format token names for display
+      const options = filtered.slice(0, 25).map(token => {
+        const balance = userBalances[token];
+        const displayName = token.includes('-') ? token.split('-')[0] : token;
+        return { 
+          name: `${displayName} (${token}) - Balance: ${balance}`, 
           value: token 
-        }))
-      );
+        };
+      });
+      
+      await safeRespond(interaction, options);
     } catch (error) {
-      console.error('Error in withdraw token autocomplete:', error);
+      console.error('[AUTOCOMPLETE] Error in withdraw token autocomplete:', error);
       await safeRespond(interaction, []);
     }
     return;
@@ -6773,13 +9865,9 @@ client.on('interactionCreate', async (interaction) => {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
       
-      // Initialize football data for this guild
-      initializeFootballData(guildId);
-      
-      // Get matches for this guild from flat structure
-      const guildMatches = Object.values(footballMatchesData).filter(match => 
-        match.guildIds.includes(guildId)
-      );
+      // Get matches for this guild from database
+      const guildMatchesObj = await dbFootball.getMatchesByGuild(guildId);
+      const guildMatches = Object.values(guildMatchesObj || {});
       const currentMatches = guildMatches.filter(match => match.status === 'SCHEDULED' || match.status === 'TIMED');
       
       const matchChoices = currentMatches.map(match => ({
@@ -6805,7 +9893,7 @@ client.on('interactionCreate', async (interaction) => {
       const guild = interaction.guild;
       const guildId = interaction.guildId;
       let choices = [];
-      const userWallets = getUserWallets(guildId);
+      const userWallets = await getUserWallets(guildId);
       // Increase limit to 100 users to ensure more users are available for autocomplete
       const userWalletEntries = Object.entries(userWallets).slice(0, 100);
 
@@ -6856,7 +9944,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const challenges = getRPSChallenges(guildId);
+      const challenges = await getRPSChallenges(guildId);
       const waitingChallenges = Object.entries(challenges)
         .filter(([id, challenge]) => challenge.status === 'waiting')
         .map(([id, challenge]) => ({
@@ -6880,7 +9968,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const challenges = getRPSChallenges(guildId);
+      const challenges = await getRPSChallenges(guildId);
       const activeChallenges = Object.entries(challenges)
         .filter(([id, challenge]) => challenge.status === 'active')
         .map(([id, challenge]) => ({
@@ -6960,15 +10048,16 @@ client.on('interactionCreate', async (interaction) => {
         console.log('[AUTOCOMPLETE] Focused value:', focusedValue);
         
         // Get community fund project and its supported tokens
-        const fundProject = serverData[guildId]?.communityFundProject;
-        const projects = getProjects(guildId);
+        const fundProject = await getCommunityFundProject(guildId);
+        const projects = await getProjects(guildId);
+        const projectName = getCommunityFundProjectName();
         
         console.log('[AUTOCOMPLETE] Fund project:', fundProject);
         console.log('[AUTOCOMPLETE] Available projects:', Object.keys(projects));
         
         let supportedTokens = [];
-        if (fundProject && projects[fundProject]) {
-          supportedTokens = projects[fundProject].supportedTokens || [];
+        if (fundProject && projects[projectName]) {
+          supportedTokens = projects[projectName].supportedTokens || [];
           console.log('[AUTOCOMPLETE] Supported tokens from project:', supportedTokens);
         } else {
           console.log('[AUTOCOMPLETE] No community fund project found or project not accessible');
@@ -7015,7 +10104,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Button interaction handler for football betting
+// Button interaction handler for football betting and wallet registration
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
 
@@ -7024,12 +10113,43 @@ client.on('interactionCreate', async (interaction) => {
 
   console.log(`[BUTTON] Button clicked: ${customId} in guild ${guildId}`);
 
+  // Handle wallet registration button
+  if (customId === 'register-wallet') {
+    try {
+      // Create modal for wallet registration
+      const modal = new ModalBuilder()
+        .setCustomId('wallet-registration-modal')
+        .setTitle('Register Your Wallet');
+
+      const walletInput = new TextInputBuilder()
+        .setCustomId('wallet-address-input')
+        .setLabel('MultiversX Wallet Address')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('erd1...')
+        .setRequired(true)
+        .setMaxLength(62)
+        .setMinLength(62);
+
+      const firstActionRow = new ActionRowBuilder().addComponents(walletInput);
+      modal.addComponents(firstActionRow);
+
+      await interaction.showModal(modal);
+    } catch (error) {
+      console.error('Error showing wallet registration modal:', error);
+      await interaction.reply({ 
+        content: `❌ Error opening registration form: ${error.message}`, 
+        flags: [MessageFlags.Ephemeral] 
+      });
+    }
+    return;
+  }
+
   if (customId.startsWith('bet:')) {
     try {
       const matchId = customId.split(':')[1];
-      const match = footballMatchesData[matchId];
+      const match = await dbFootball.getMatch(matchId);
       
-      if (!match || !match.guildIds.includes(guildId)) {
+      if (!match || !match.guildIds || !match.guildIds.includes(guildId)) {
         await interaction.reply({ content: '❌ Match not found or no longer available for betting.', flags: [MessageFlags.Ephemeral] });
         return;
       }
@@ -7093,13 +10213,12 @@ client.on('interactionCreate', async (interaction) => {
       console.log('[RPS MODAL] Challenge ID:', challengeId);
       
       console.log('[RPS MODAL] Guild ID:', guildId);
-      const challenges = getRPSChallenges(guildId);
+      const challenges = await getRPSChallenges(guildId);
       console.log('[RPS MODAL] Available challenges:', Object.keys(challenges));
       console.log('[RPS MODAL] Challenges object type:', typeof challenges);
       console.log('[RPS MODAL] Challenges is array:', Array.isArray(challenges));
       console.log('[RPS MODAL] Challenges is object:', challenges && typeof challenges === 'object');
-      console.log('[RPS MODAL] Global rpsGamesData keys:', Object.keys(rpsGamesData));
-      console.log('[RPS MODAL] Global rpsGamesData for this guild:', rpsGamesData[guildId]);
+      // Data is loaded from database on-demand
       
       const challenge = challenges[challengeId];
       console.log('[RPS MODAL] Challenge found:', !!challenge);
@@ -7169,7 +10288,7 @@ client.on('interactionCreate', async (interaction) => {
   } else if (customId.startsWith('rps-move:')) {
     try {
       const [, challengeId, move] = customId.split(':');
-      const challenges = getRPSChallenges(guildId);
+      const challenges = await getRPSChallenges(guildId);
       const challenge = challenges[challengeId];
       
       if (!challenge || challenge.status !== 'active') {
@@ -7208,7 +10327,9 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       currentRound[playerChoiceKey] = move;
-      saveServerData();
+      
+      // Update game in database with the new move
+      await dbRpsGames.updateGame(guildId, challengeId, { rounds: challenge.rounds });
       
       // Send game state embed to user after their move
       const moveEmbed = new EmbedBuilder()
@@ -7244,7 +10365,12 @@ client.on('interactionCreate', async (interaction) => {
             winner: null,
             result: null
           };
-          saveServerData();
+          
+          // Update game in database with draw result and new round
+          await dbRpsGames.updateGame(guildId, challengeId, { 
+            rounds: challenge.rounds,
+            currentRound: challenge.currentRound
+          });
           
           const roundEmbed = new EmbedBuilder()
             .setTitle('🎮 RPS Round Draw!')
@@ -7297,12 +10423,23 @@ client.on('interactionCreate', async (interaction) => {
           challenge.loserId = loserId;
           challenge.loserTag = loserTag;
           challenge.completedAt = Date.now();
-          saveServerData();
+          
+          // Update game in database with completion status and winner info
+          await dbRpsGames.updateGame(guildId, challengeId, {
+            status: 'completed',
+            rounds: challenge.rounds,
+            winner: challenge.winner,
+            winnerId: challenge.winnerId,
+            winnerTag: challenge.winnerTag,
+            loserId: challenge.loserId,
+            loserTag: challenge.loserTag,
+            completedAt: challenge.completedAt
+          });
           
           // Get balances BEFORE adding prize to ensure we have correct loser balance
           virtualAccounts.forceReloadData();
-          const loserBalance = virtualAccounts.getUserBalance(guildId, loserId, challenge.token);
-          const winnerBalanceBeforePrize = virtualAccounts.getUserBalance(guildId, winnerId, challenge.token);
+          const loserBalance = await virtualAccounts.getUserBalance(guildId, loserId, challenge.token);
+          const winnerBalanceBeforePrize = await virtualAccounts.getUserBalance(guildId, winnerId, challenge.token);
           
           console.log(`[RPS DEBUG] Before prize (second handler) - Winner: ${winnerId}, Loser: ${loserId}, Token: ${challenge.token}`);
           console.log(`[RPS DEBUG] Winner balance before prize: ${winnerBalanceBeforePrize}, Loser balance: ${loserBalance}`);
@@ -7313,7 +10450,7 @@ client.on('interactionCreate', async (interaction) => {
           
           if (challenge.humanAmount && challenge.token) {
             try {
-              prizeResult = virtualAccounts.addFundsToAccount(
+              prizeResult = await virtualAccounts.addFundsToAccount(
                 guildId,
                 winnerId,
                 challenge.token,
@@ -7328,7 +10465,7 @@ client.on('interactionCreate', async (interaction) => {
           }
           
           // Get winner's final balance after prize
-          const winnerBalance = virtualAccounts.getUserBalance(guildId, winnerId, challenge.token);
+          const winnerBalance = await virtualAccounts.getUserBalance(guildId, winnerId, challenge.token);
           
           console.log(`[RPS DEBUG] After prize (second handler) - Winner final balance: ${winnerBalance}, Loser balance: ${loserBalance}`);
           
@@ -7355,6 +10492,10 @@ client.on('interactionCreate', async (interaction) => {
           try {
             const winnerUser = await client.users.fetch(winnerId);
             if (winnerUser) {
+              // Get Community Fund project logo for RPS winner notification
+              const communityFundProjectName = getCommunityFundProjectName();
+              const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
+              
               const winnerDMEmbed = new EmbedBuilder()
                 .setTitle('🎉 You Won Rock, Paper, Scissors!')
                 .setDescription(`Congratulations! You won the RPS game and received **${totalPrizeHuman} ${challenge.token}** in your virtual account.`)
@@ -7364,7 +10505,7 @@ client.on('interactionCreate', async (interaction) => {
                   { name: 'Your New Balance', value: `${winnerBalance} ${challenge.token}`, inline: true }
                 ])
                 .setColor('#00FF00')
-                .setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif')
+                .setThumbnail(projectLogoUrl)
                 .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
                 .setTimestamp();
               
@@ -7379,6 +10520,261 @@ client.on('interactionCreate', async (interaction) => {
       console.error('[RPS] Error handling RPS move button:', error.message);
       await interaction.reply({ content: '❌ An error occurred while processing your move. Please try again.', flags: [MessageFlags.Ephemeral] });
     }
+  } else if (customId.startsWith('lottery-buy-ticket:')) {
+    // Buy Ticket button - opens modal
+    try {
+      const lotteryId = customId.split(':')[1];
+      const lottery = await dbLottery.getLottery(guildId, lotteryId);
+      
+      if (!lottery) {
+        await interaction.reply({ content: '❌ Lottery not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (lottery.status !== 'LIVE') {
+        await interaction.reply({ content: '❌ This lottery is no longer accepting tickets.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (Date.now() >= lottery.endTime) {
+        await interaction.reply({ content: '❌ This lottery has ended.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Create modal for number input
+      const modal = new ModalBuilder()
+        .setCustomId(`lottery-ticket-modal:${lotteryId}`)
+        .setTitle(`Buy Ticket - Pick ${lottery.winningNumbersCount} Numbers`);
+      
+      // Create input fields for each number
+      const inputs = [];
+      for (let i = 1; i <= lottery.winningNumbersCount; i++) {
+        const numberInput = new TextInputBuilder()
+          .setCustomId(`number_${i}`)
+          .setLabel(`Number ${i} (1-${lottery.totalPoolNumbers})`)
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder(`Enter number between 1 and ${lottery.totalPoolNumbers}`)
+          .setRequired(true)
+          .setMaxLength(3)
+          .setMinLength(1);
+        
+        inputs.push(new ActionRowBuilder().addComponents(numberInput));
+      }
+      
+      modal.addComponents(...inputs);
+      await interaction.showModal(modal);
+      
+    } catch (error) {
+      console.error('[LOTTERY] Error showing buy ticket modal:', error.message);
+      await interaction.reply({ content: '❌ An error occurred. Please try again.', flags: [MessageFlags.Ephemeral] });
+    }
+  } else if (customId.startsWith('lottery-lucky-dip:')) {
+    // Lucky Dip button - generates random numbers and purchases ticket
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const lotteryId = customId.split(':')[1];
+      const lottery = await dbLottery.getLottery(guildId, lotteryId);
+      
+      if (!lottery) {
+        await interaction.editReply({ content: '❌ Lottery not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (lottery.status !== 'LIVE') {
+        await interaction.editReply({ content: '❌ This lottery is no longer accepting tickets.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (Date.now() >= lottery.endTime) {
+        await interaction.editReply({ content: '❌ This lottery has ended.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Generate random numbers
+      const randomNumbers = lotteryHelpers.generateRandomNumbers(lottery.winningNumbersCount, lottery.totalPoolNumbers);
+      
+      // Process ticket purchase
+      await processTicketPurchase(guildId, lotteryId, interaction.user.id, interaction.user.tag, randomNumbers, lottery);
+      
+      const numbersDisplay = lotteryHelpers.formatNumbersForDisplay(randomNumbers);
+      await interaction.editReply({
+        content: `✅ **Lucky Dip Ticket Purchased!**\n\n**Your Numbers:** ${numbersDisplay}\n**Lottery:** \`${lotteryId.substring(0, 16)}...\``,
+        flags: [MessageFlags.Ephemeral]
+      });
+      
+    } catch (error) {
+      console.error('[LOTTERY] Error processing lucky dip:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('lottery-my-active:')) {
+    // My Active Tickets button
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const lotteryId = customId.split(':')[1];
+      const userId = interaction.user.id;
+      
+      // Get all tickets for this specific lottery and filter by user (no limit)
+      const allTickets = await dbLottery.getTicketsByLottery(guildId, lotteryId);
+      const lotteryTickets = Object.values(allTickets)
+        .filter(t => t.userId === userId && t.status === 'LIVE')
+        .sort((a, b) => b.createdAt - a.createdAt); // Sort by newest first
+      
+      if (lotteryTickets.length === 0) {
+        await interaction.editReply({
+          content: `You have no active tickets for this lottery.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Discord embed limit is 25 fields, so limit to 24 tickets
+      const maxTicketsToShow = 24;
+      const ticketsToShow = lotteryTickets.slice(0, maxTicketsToShow);
+      const totalTickets = lotteryTickets.length;
+      
+      const embed = new EmbedBuilder()
+        .setTitle('🎫 My Active Tickets')
+        .setDescription(totalTickets > maxTicketsToShow 
+          ? `You have ${totalTickets} active ticket(s) for this lottery\n\nShowing ${maxTicketsToShow} of ${totalTickets} tickets`
+          : `You have ${totalTickets} active ticket(s) for this lottery`)
+        .setColor(0x00FF00)
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+        .setTimestamp();
+      
+      ticketsToShow.forEach((ticket, index) => {
+        const numbersDisplay = lotteryHelpers.formatNumbersForDisplay(ticket.numbers);
+        embed.addFields({
+          name: `Ticket ${index + 1}`,
+          value: `**Numbers:** ${numbersDisplay}`,
+          inline: true
+        });
+      });
+      
+      if (totalTickets > maxTicketsToShow) {
+        embed.addFields({
+          name: 'ℹ️ Note',
+          value: `You have ${totalTickets} total tickets. Only the first ${maxTicketsToShow} are shown.`,
+          inline: false
+        });
+      }
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (error) {
+      console.error('[LOTTERY] Error getting active tickets:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('lottery-my-results:')) {
+    // My Results button - shows expired tickets with matches
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const lotteryId = customId.split(':')[1];
+      const userId = interaction.user.id;
+      
+      const lottery = await dbLottery.getLottery(guildId, lotteryId);
+      if (!lottery || !lottery.winningNumbers) {
+        await interaction.editReply({
+          content: `No results available for this lottery yet.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Get all tickets for this specific lottery and user (no limit)
+      // Include both EXPIRED and WINNER tickets
+      const allTickets = await dbLottery.getTicketsByLottery(guildId, lotteryId);
+      const lotteryTickets = Object.values(allTickets)
+        .filter(t => t.userId === userId && (t.status === 'EXPIRED' || t.status === 'WINNER'))
+        .sort((a, b) => b.createdAt - a.createdAt); // Sort by newest first
+      
+      if (lotteryTickets.length === 0) {
+        await interaction.editReply({
+          content: `You have no tickets for this lottery.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      const embed = new EmbedBuilder()
+        .setTitle('📋 My Results')
+        .setDescription(`Results for lottery \`${lotteryId.substring(0, 16)}...\``)
+        .setColor(0xFF0000)
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+        .setTimestamp();
+      
+      const winningNumbersDisplay = lotteryHelpers.formatNumbersForDisplay(lottery.winningNumbers);
+      embed.addFields({
+        name: '🎯 Winning Numbers',
+        value: winningNumbersDisplay,
+        inline: false
+      });
+      
+      // Discord embed limit is 25 fields, so limit to 24 (1 for winning numbers + 23 tickets)
+      const maxTicketsToShow = 23;
+      const ticketsToShow = lotteryTickets.slice(0, maxTicketsToShow);
+      const totalTickets = lotteryTickets.length;
+      
+      if (totalTickets > maxTicketsToShow) {
+        embed.setDescription(`Results for lottery \`${lotteryId.substring(0, 16)}...\`\n\nShowing ${maxTicketsToShow} of ${totalTickets} tickets`);
+      }
+      
+      ticketsToShow.forEach((ticket, index) => {
+        const numbersDisplay = lotteryHelpers.formatNumbersForDisplay(ticket.numbers);
+        
+        // Use stored matchedNumbers from database, but recalculate if needed for accuracy
+        let match = { matchedCount: ticket.matchedNumbers || 0, isWinner: ticket.isWinner || false };
+        
+        // Recalculate match to ensure accuracy (especially for tickets with wrong stored values)
+        const recalculatedMatch = lotteryHelpers.checkTicketMatch(ticket.numbers, lottery.winningNumbers);
+        
+        // Use recalculated values if they differ (for fixing old data)
+        if (recalculatedMatch.matchedCount !== match.matchedCount) {
+          match = recalculatedMatch;
+        }
+        
+        let resultText = '';
+        if (match.isWinner || ticket.status === 'WINNER') {
+          resultText = `✅ **WINNER!** Matched: ${match.matchedCount}/${lottery.winningNumbersCount}`;
+        } else {
+          resultText = `❌ No match. Matched: ${match.matchedCount}/${lottery.winningNumbersCount}`;
+        }
+        
+        embed.addFields({
+          name: `Ticket ${index + 1}${(match.isWinner || ticket.status === 'WINNER') ? ' 🏆' : ''}`,
+          value: `**Your Numbers:** ${numbersDisplay}\n${resultText}`,
+          inline: false
+        });
+      });
+      
+      if (totalTickets > maxTicketsToShow) {
+        embed.addFields({
+          name: 'ℹ️ Note',
+          value: `You have ${totalTickets} total tickets for this lottery. Only the first ${maxTicketsToShow} are shown.`,
+          inline: false
+        });
+      }
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (error) {
+      console.error('[LOTTERY] Error getting results:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
   } else if (customId.startsWith('bid:')) {
         // Place Bid button - opens modal
         try {
@@ -7386,13 +10782,9 @@ client.on('interactionCreate', async (interaction) => {
           const auctionId = customId.split(':')[1];
           console.log(`[AUCTIONS] Auction ID: ${auctionId}`);
           console.log(`[AUCTIONS] Guild ID: ${guildId}`);
-          console.log(`[AUCTIONS] Full auctionsData before getAuctions:`, Object.keys(auctionsData));
-          console.log(`[AUCTIONS] auctionsData[${guildId}] before getAuctions:`, auctionsData[guildId] ? Object.keys(auctionsData[guildId]) : 'undefined');
+          // Data is loaded from database on-demand
           
-          // Reload data from file to ensure we have the latest
-          loadAuctionsData();
-          
-          const auctions = getAuctions(guildId);
+          const auctions = await getAuctions(guildId);
           console.log(`[AUCTIONS] Available auctions:`, Object.keys(auctions));
           console.log(`[AUCTIONS] Full auctions object:`, auctions);
           const auction = auctions[auctionId];
@@ -7456,13 +10848,9 @@ client.on('interactionCreate', async (interaction) => {
       const auctionId = customId.split(':')[1];
       console.log(`[AUCTIONS] Auction ID: ${auctionId}`);
       console.log(`[AUCTIONS] Guild ID: ${guildId}`);
-      console.log(`[AUCTIONS] Full auctionsData before getAuctions:`, Object.keys(auctionsData));
-      console.log(`[AUCTIONS] auctionsData[${guildId}] before getAuctions:`, auctionsData[guildId] ? Object.keys(auctionsData[guildId]) : 'undefined');
+      // Data is loaded from database on-demand
       
-      // Reload data from file to ensure we have the latest
-      loadAuctionsData();
-      
-      const auctions = getAuctions(guildId);
+      const auctions = await getAuctions(guildId);
       console.log(`[AUCTIONS] Available auctions:`, Object.keys(auctions));
       console.log(`[AUCTIONS] Full auctions object:`, auctions);
       const auction = auctions[auctionId];
@@ -7485,15 +10873,26 @@ client.on('interactionCreate', async (interaction) => {
       // Calculate quick bid amount (current bid + minimum increase)
       const quickBidAmount = new BigNumber(auction.currentBid).plus(auction.minBidIncrease).toString();
 
-      // Check user balance
-      const userBalance = virtualAccounts.getUserBalance(guildId, interaction.user.id, auction.tokenTicker);
+      // Resolve token identifier (use stored identifier if available, otherwise resolve from ticker)
+      const tokenIdentifier = auction.tokenIdentifier || await resolveTokenIdentifier(guildId, auction.tokenTicker);
+      if (!tokenIdentifier) {
+        await interaction.editReply({ 
+          content: `❌ **Error:** Could not resolve token identifier for auction. Please contact an administrator.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+
+      // Check user balance (using identifier)
+      const userBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, tokenIdentifier);
       const balanceBN = new BigNumber(userBalance);
       const bidAmountBN = new BigNumber(quickBidAmount);
 
       if (balanceBN.isLessThan(bidAmountBN)) {
         // Get community fund QR code URL
-        const communityFundProject = serverData[guildId]?.communityFundProject;
-        const qrCodeUrl = serverData[guildId]?.communityFundQR?.[communityFundProject] || null;
+        const communityFundProject = await getCommunityFundProject(guildId);
+        const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+        const qrCodeUrl = communityFundQRData?.[communityFundProject] || null;
         
         let errorMessage = `❌ **Insufficient balance!**\n\n`;
         errorMessage += `You need **${quickBidAmount} ${auction.tokenTicker}** but you only have **${userBalance} ${auction.tokenTicker}**.\n\n`;
@@ -7515,6 +10914,9 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       // Record bid (no deduction yet)
+      if (!auction.bids) {
+        auction.bids = [];
+      }
       auction.bids.push({
         userId: interaction.user.id,
         userTag: interaction.user.tag,
@@ -7522,11 +10924,35 @@ client.on('interactionCreate', async (interaction) => {
         timestamp: Date.now()
       });
 
-      // Update auction with new highest bidder
+      // Update auction with new highest bidder and save to database
       auction.currentBid = quickBidAmount;
       auction.highestBidderId = interaction.user.id;
       auction.highestBidderTag = interaction.user.tag;
-      saveAuctionsData();
+      
+      // Save auction updates to database
+      await dbAuctions.updateAuction(guildId, auctionId, {
+        currentBid: quickBidAmount,
+        highestBidderId: interaction.user.id,
+        highestBidderTag: interaction.user.tag
+      });
+
+      // Save bid to auction_bids table for historical record
+      try {
+        const storedDecimals = await getStoredTokenDecimals(guildId, auction.tokenTicker);
+        if (storedDecimals !== null) {
+          const bidAmountWei = toBlockchainAmount(quickBidAmount, storedDecimals);
+          await dbAuctions.createBid(guildId, auctionId, {
+            bidderId: interaction.user.id,
+            bidderTag: interaction.user.tag,
+            bidAmountWei: bidAmountWei,
+            txHash: null // Virtual account bid, no blockchain transaction
+          });
+          console.log(`[AUCTIONS] Bid saved to database: ${quickBidAmount} ${auction.tokenTicker} by ${interaction.user.tag}`);
+        }
+      } catch (bidError) {
+        console.error('[AUCTIONS] Error saving bid to database:', bidError.message);
+        // Don't fail the bid if database save fails
+      }
 
       // Update embed
       await updateAuctionEmbed(guildId, auctionId);
@@ -7562,14 +10988,176 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Modal submission handler for football betting
+// Modal submission handler for football betting and wallet registration
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isModalSubmit()) return;
 
   const { customId } = interaction;
   const guildId = interaction.guildId;
 
-      if (customId.startsWith('betting-modal:')) {
+  // Handle wallet registration modal
+  if (customId === 'wallet-registration-modal') {
+    try {
+      const walletAddress = interaction.fields.getTextInputValue('wallet-address-input').trim();
+      
+      // Validate wallet address format
+      if (!walletAddress.startsWith('erd1') || walletAddress.length !== 62) {
+        await interaction.reply({ 
+          content: '❌ **Invalid wallet address!**\n\nMust be a valid MultiversX address:\n• Starts with `erd1`\n• Exactly 62 characters\n\nPlease try again.', 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      try {
+        // Register wallet in database
+        await dbServerData.setUserWallet(guildId, interaction.user.id, walletAddress);
+        
+        // Initialize virtual account (this will create it if it doesn't exist)
+        const dbVirtualAccounts = require('./db/virtual-accounts');
+        await dbVirtualAccounts.getUserAccount(guildId, interaction.user.id, interaction.user.username);
+        
+        console.log(`[WALLET-REGISTRATION] Wallet registered via button for user ${interaction.user.tag} (${interaction.user.id}) in guild ${guildId}: ${walletAddress}`);
+        
+        // Get Community Fund wallet address and QR code
+        let communityFundAddress = null;
+        let qrCodeUrl = null;
+        try {
+          const projects = await getProjects(guildId);
+          const communityFundProjectName = getCommunityFundProjectName();
+          const communityFundProject = projects[communityFundProjectName];
+          
+          if (communityFundProject && communityFundProject.walletAddress) {
+            communityFundAddress = communityFundProject.walletAddress;
+            
+            // Get QR code if available
+            const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+            qrCodeUrl = communityFundQRData?.[communityFundProjectName] || null;
+          }
+        } catch (error) {
+          console.error(`[WALLET-REGISTRATION] Error getting Community Fund info:`, error.message);
+          // Continue without Community Fund info if there's an error
+        }
+        
+        const embed = new EmbedBuilder()
+          .setTitle('✅ Wallet Registered Successfully!')
+          .setDescription('Your wallet address has been registered and your virtual account has been set up.')
+          .addFields([
+            { name: 'Wallet Address', value: `\`${walletAddress}\``, inline: false }
+          ])
+          .setColor('#00FF00')
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        // Add Community Fund address field if available
+        if (communityFundAddress) {
+          embed.addFields([
+            { name: '💰 Community Fund Deposit Address', value: `\`${communityFundAddress}\``, inline: false }
+          ]);
+        }
+        
+        // Add QR code as thumbnail if available
+        if (qrCodeUrl) {
+          embed.setThumbnail(qrCodeUrl);
+        }
+        
+        // Add Next Steps field
+        const nextStepsValue = communityFundAddress 
+          ? `1. Send tokens to the Community Fund address above\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance\` to view your balance`
+          : `1. Send tokens to the Community Fund address\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance\` to view your balance`;
+        
+        embed.addFields([
+          { name: 'Next Steps', value: nextStepsValue, inline: false }
+        ]);
+        
+        await interaction.editReply({ embeds: [embed] });
+      } catch (writeError) {
+        console.error(`[WALLET-REGISTRATION] Failed to save user wallet for guild ${guildId}:`, writeError.message);
+        await interaction.editReply({ 
+          content: `❌ **Error registering wallet:**\n\n${writeError.message}\n\nPlease try again or use \`/set-wallet\` command.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+      }
+    } catch (error) {
+      console.error(`[WALLET-REGISTRATION] Error processing wallet registration for ${interaction.user.tag} in guild ${guildId}:`, error.message);
+      
+      if (interaction.deferred) {
+        await interaction.editReply({ 
+          content: `❌ **Error registering wallet:**\n\n${error.message}\n\nPlease try again or use \`/set-wallet\` command.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+      } else {
+        await interaction.reply({ 
+          content: `❌ **Error registering wallet:**\n\n${error.message}\n\nPlease try again or use \`/set-wallet\` command.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+      }
+    }
+    return;
+  }
+
+  if (customId.startsWith('lottery-ticket-modal:')) {
+    // Lottery ticket purchase modal
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const lotteryId = customId.split(':')[1];
+      const lottery = await dbLottery.getLottery(guildId, lotteryId);
+      
+      if (!lottery) {
+        await interaction.editReply({ content: '❌ Lottery not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (lottery.status !== 'LIVE') {
+        await interaction.editReply({ content: '❌ This lottery is no longer accepting tickets.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (Date.now() >= lottery.endTime) {
+        await interaction.editReply({ content: '❌ This lottery has ended.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Extract numbers from modal inputs
+      const numbers = [];
+      for (let i = 1; i <= lottery.winningNumbersCount; i++) {
+        const numberValue = interaction.fields.getTextInputValue(`number_${i}`);
+        const num = parseInt(numberValue, 10);
+        if (isNaN(num)) {
+          await interaction.editReply({ content: `❌ Invalid number in field ${i}. Please enter a valid number.`, flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        numbers.push(num);
+      }
+      
+      // Validate numbers
+      const validation = lotteryHelpers.validateTicketNumbers(numbers, lottery.winningNumbersCount, lottery.totalPoolNumbers);
+      if (!validation.valid) {
+        await interaction.editReply({ content: `❌ ${validation.error}`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Process ticket purchase
+      await processTicketPurchase(guildId, lotteryId, interaction.user.id, interaction.user.tag, numbers, lottery);
+      
+      const numbersDisplay = lotteryHelpers.formatNumbersForDisplay(numbers);
+      await interaction.editReply({
+        content: `✅ **Ticket Purchased!**\n\n**Your Numbers:** ${numbersDisplay}\n**Lottery:** \`${lotteryId.substring(0, 16)}...\``,
+        flags: [MessageFlags.Ephemeral]
+      });
+      
+    } catch (error) {
+      console.error('[LOTTERY] Error processing ticket purchase:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('betting-modal:')) {
         try {
           const matchId = customId.split(':')[1];
           const outcome = interaction.fields.getTextInputValue('outcome').toUpperCase();
@@ -7581,8 +11169,8 @@ client.on('interactionCreate', async (interaction) => {
           }
 
           // Check if match still exists and is accepting bets
-          const match = footballMatchesData[matchId];
-          if (!match || !match.guildIds.includes(guildId)) {
+          const match = await dbFootball.getMatch(matchId);
+          if (!match || !match.guildIds || !match.guildIds.includes(guildId)) {
             await interaction.reply({ content: '❌ Match not found or no longer available for betting.', flags: [MessageFlags.Ephemeral] });
             return;
           }
@@ -7598,14 +11186,24 @@ client.on('interactionCreate', async (interaction) => {
             return;
           }
 
-          // Check if user has sufficient virtual balance
+          // Get guild-specific token configuration
+          const token = getMatchTokenForGuild(match, guildId);
+          if (!token) {
+            await interaction.reply({ 
+              content: '❌ **Error:** No token configuration found for this match in this guild.', 
+              flags: [MessageFlags.Ephemeral] 
+            });
+            return;
+          }
+
+          // Check if user has sufficient virtual balance (using identifier)
           const requiredAmountWei = getMatchStakeForGuild(match, guildId);
-          const requiredAmount = new BigNumber(requiredAmountWei).dividedBy(new BigNumber(10).pow(match.token.decimals)).toString();
-          const currentBalance = virtualAccounts.getUserBalance(guildId, interaction.user.id, match.token.ticker);
+          const requiredAmount = new BigNumber(requiredAmountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+          const currentBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, token.identifier);
           
           if (new BigNumber(currentBalance).isLessThan(requiredAmount)) {
             await interaction.reply({ 
-              content: `❌ **Insufficient virtual balance!**\n\nYou have: **${currentBalance}** ${match.token.ticker}\nRequired: **${requiredAmount}** ${match.token.ticker}\n\nTop up your account by making a transfer to any Community Fund wallet!`, 
+              content: `❌ **Insufficient virtual balance!**\n\nYou have: **${currentBalance}** ${token.ticker}\nRequired: **${requiredAmount}** ${token.ticker}\n\nTop up your account by making a transfer to any Community Fund wallet!`, 
               flags: [MessageFlags.Ephemeral] 
             });
             return;
@@ -7614,11 +11212,11 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
           await interaction.editReply({ content: '💸 Processing your virtual bet...', flags: [MessageFlags.Ephemeral] });
           
-          // Deduct funds from virtual account
-          const deductionResult = virtualAccounts.deductFundsFromAccount(
+          // Deduct funds from virtual account (using identifier)
+          const deductionResult = await virtualAccounts.deductFundsFromAccount(
             guildId, 
             interaction.user.id, 
-            match.token.ticker, 
+            token.identifier, 
             requiredAmount, 
             `Football bet: ${match.home} vs ${match.away} (${outcome})`
           );
@@ -7639,7 +11237,7 @@ client.on('interactionCreate', async (interaction) => {
             matchId: matchId,
             userId: interaction.user.id,
             outcome: outcome,
-            token: match.token,
+            token: token,
             amountWei: betAmountWei,
             txHash: null, // No blockchain transaction needed
             createdAtISO: new Date().toISOString(),
@@ -7647,13 +11245,22 @@ client.on('interactionCreate', async (interaction) => {
             virtualBet: true // Mark as virtual bet
           };
 
-          // Save bet
-          initializeFootballData(guildId);
-          footballBetsData[guildId][betId] = betData;
-          saveFootballBetsData();
+          // Save bet to database
+          await dbFootball.createBet({
+            betId: betId,
+            guildId: guildId,
+            matchId: matchId,
+            userId: interaction.user.id,
+            outcome: outcome,
+            tokenData: token,
+            amountWei: betAmountWei,
+            txHash: 'VIRTUAL_BET',
+            createdAtISO: new Date().toISOString(),
+            status: 'ACCEPTED'
+          });
 
           // Track bet amount for PNL calculation
-          trackBetAmount(guildId, interaction.user.id, betAmountWei, match.token.ticker);
+          await trackBetAmount(guildId, interaction.user.id, betAmountWei, token.identifier, token.ticker);
 
           // No transaction hash needed for virtual bets
 
@@ -7664,8 +11271,8 @@ client.on('interactionCreate', async (interaction) => {
             const matchMessage = await channel.messages.fetch(match.embeds[guildId].messageId);
             if (matchMessage && matchMessage.embeds && matchMessage.embeds.length > 0) {
               // Calculate current pot size using utility function
-              const potSize = calculateMatchPotSize(guildId, matchId);
-              console.log(`[FOOTBALL] Calculated pot size: ${potSize.totalPotHuman} ${match.token.ticker}`);
+              const potSize = await calculateMatchPotSize(guildId, matchId);
+              console.log(`[FOOTBALL] Calculated pot size: ${potSize.totalPotHuman} ${token.ticker}`);
               
               // Update the embed - handle both fetched message embeds and EmbedBuilder
               let updatedEmbed;
@@ -7677,16 +11284,31 @@ client.on('interactionCreate', async (interaction) => {
                 updatedEmbed = EmbedBuilder.from(matchMessage.embeds[0]);
               }
               
-              // Check if fields exist and find the pot size field
+              // Check if fields exist and update both pot size and stake fields
               if (updatedEmbed.data && updatedEmbed.data.fields && Array.isArray(updatedEmbed.data.fields)) {
                 const potSizeField = updatedEmbed.data.fields.find(field => field.name === '🏆 Pot Size');
+                const stakeField = updatedEmbed.data.fields.find(field => field.name === '💰 Stake');
+                
+                let needsUpdate = false;
+                
                 if (potSizeField) {
-                  potSizeField.value = `${potSize.totalPotHuman} ${match.token.ticker}`;
-                  
+                  potSizeField.value = `${potSize.totalPotHuman} ${token.ticker}`;
+                  needsUpdate = true;
+                }
+                
+                // Also update stake field to ensure it shows the correct guild-specific stake
+                if (stakeField) {
+                  const stakeAmountWei = getMatchStakeForGuild(match, guildId);
+                  const stakeAmountHuman = new BigNumber(stakeAmountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+                  stakeField.value = `${stakeAmountHuman} ${token.ticker}`;
+                  needsUpdate = true;
+                }
+                
+                if (needsUpdate) {
                   await matchMessage.edit({ embeds: [updatedEmbed] });
-                  console.log(`[FOOTBALL] Updated match embed pot size to ${potSize.totalPotHuman} ${match.token.ticker} for match ${matchId}`);
+                  console.log(`[FOOTBALL] Updated match embed pot size to ${potSize.totalPotHuman} ${token.ticker} and stake for match ${matchId}`);
                 } else {
-                  console.log(`[FOOTBALL] Pot size field not found in embed for match ${matchId}. Available fields:`, updatedEmbed.data.fields.map(f => f.name));
+                  console.log(`[FOOTBALL] Pot size or stake field not found in embed for match ${matchId}. Available fields:`, updatedEmbed.data.fields.map(f => f.name));
                 }
               } else {
                 console.log(`[FOOTBALL] Embed fields not accessible for match ${matchId}. Fields type:`, typeof updatedEmbed.data?.fields);
@@ -7709,7 +11331,7 @@ client.on('interactionCreate', async (interaction) => {
                   .setDescription(`${interaction.user} placed a virtual bet on **${match.home} vs ${match.away}**`)
                   .addFields([
                     { name: 'Outcome', value: outcome === 'H' ? 'Home Win' : outcome === 'A' ? 'Away Win' : 'Draw', inline: true },
-                    { name: 'Amount', value: `${requiredAmount} ${match.token.ticker}`, inline: true },
+                    { name: 'Amount', value: `${requiredAmount} ${token.ticker}`, inline: true },
                     { name: 'Type', value: 'Virtual Balance', inline: true }
                   ])
                   .setColor('#00FF00')
@@ -7722,7 +11344,7 @@ client.on('interactionCreate', async (interaction) => {
             }
           }
 
-          const betMessage = `✅ Virtual bet accepted successfully! Match: ${match.home} vs ${match.away}, Outcome: ${outcome === 'H' ? 'Home Win' : outcome === 'A' ? 'Away Win' : 'Draw'}, Amount: ${requiredAmount} ${match.token.ticker}`;
+          const betMessage = `✅ Virtual bet accepted successfully! Match: ${match.home} vs ${match.away}, Outcome: ${outcome === 'H' ? 'Home Win' : outcome === 'A' ? 'Away Win' : 'Draw'}, Amount: ${requiredAmount} ${token.ticker}`;
           
           await interaction.editReply({ 
             content: betMessage, 
@@ -7745,7 +11367,7 @@ client.on('interactionCreate', async (interaction) => {
           const memo = interaction.fields.getTextInputValue('memo') || 'No memo provided';
 
           // Get the challenge
-          const challenges = getRPSChallenges(guildId);
+          const challenges = await getRPSChallenges(guildId);
           const challenge = challenges[challengeId];
           
           if (!challenge) {
@@ -7771,20 +11393,21 @@ client.on('interactionCreate', async (interaction) => {
           }
 
           // Check if community fund is set
-          const fundProject = serverData[guildId]?.communityFundProject;
+          const fundProject = await getCommunityFundProject(guildId);
           if (!fundProject) {
             await interaction.reply({ content: 'No Community Tip Fund is set for this server. Please ask an admin to run /set-community-fund.', flags: [MessageFlags.Ephemeral] });
             return;
           }
 
-          const projects = getProjects(guildId);
-          if (!projects[fundProject]) {
-            await interaction.reply({ content: `The Community Tip Fund project ("${fundProject}") no longer exists. Please ask an admin to set it again.`, flags: [MessageFlags.Ephemeral] });
+          const projects = await getProjects(guildId);
+          const projectName = getCommunityFundProjectName();
+          if (!projects[projectName]) {
+            await interaction.reply({ content: `The Community Tip Fund project no longer exists. Please ask an admin to set it again.`, flags: [MessageFlags.Ephemeral] });
             return;
           }
 
           // Get community fund wallet address
-          const communityFundWallet = projects[fundProject]?.walletAddress;
+          const communityFundWallet = projects[projectName]?.walletAddress;
           if (!communityFundWallet) {
             await interaction.reply({ content: 'Community Fund wallet address not found. Please ask an admin to update the project.', flags: [MessageFlags.Ephemeral] });
             return;
@@ -7793,29 +11416,40 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
           await interaction.editReply({ content: '💸 Processing your virtual entry...', flags: [MessageFlags.Ephemeral] });
 
-          // Deduct balance from challenged person's virtual account
-          const deductionResult = virtualAccounts.deductFundsFromAccount(
-            guildId, 
-            interaction.user.id, 
-            challenge.token, 
-            challenge.amountWei, 
-            `RPS Challenge: ${challenge.memo}`
-          );
-
-          if (!deductionResult.success) {
+          // Use humanAmount (display value) or amount (stored value) - prefer humanAmount for consistency
+          const amountToDeduct = challenge.humanAmount || challenge.amount;
+          if (!amountToDeduct) {
             await interaction.editReply({ 
-              content: `❌ **Insufficient virtual balance!**\n\nYou have: **${deductionResult.currentBalance}** ${challenge.token}\nRequired: **${challenge.humanAmount}** ${challenge.token}\n\nTop up your account by making a transfer to any Community Fund wallet!`, 
+              content: `❌ **Invalid challenge amount!** The challenge amount could not be determined.`, 
               flags: [MessageFlags.Ephemeral] 
             });
             return;
           }
 
-          // Update challenge status
-          challenge.status = 'active';
-          challenge.joinedAt = Date.now();
-          challenge.joinerTransactionHash = null; // No blockchain transaction needed
-          challenge.joinerMemo = memo;
-          saveRpsGamesData();
+          // Deduct balance from challenged person's virtual account
+          const deductionResult = await virtualAccounts.deductFundsFromAccount(
+            guildId, 
+            interaction.user.id, 
+            challenge.token, 
+            amountToDeduct.toString(), 
+            `RPS Challenge: ${challenge.memo}`
+          );
+
+          if (!deductionResult.success) {
+            await interaction.editReply({ 
+              content: `❌ **Insufficient virtual balance!**\n\nYou have: **${deductionResult.currentBalance || '0'}** ${challenge.token}\nRequired: **${amountToDeduct}** ${challenge.token}\n\nTop up your account by making a transfer to any Community Fund wallet!`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+            return;
+          }
+
+          // Update challenge status in database
+          await dbRpsGames.updateGame(guildId, challengeId, {
+            status: 'active',
+            joinedAt: Date.now(),
+            joinerTransactionHash: null, // No blockchain transaction needed
+            joinerMemo: memo
+          });
 
           // Create the embed for game start
           const embed = new EmbedBuilder()
@@ -7884,7 +11518,7 @@ client.on('interactionCreate', async (interaction) => {
           
           const auctionId = customId.split(':')[1];
           console.log(`[AUCTIONS] Auction ID: ${auctionId}`);
-          const auctions = getAuctions(guildId);
+          const auctions = await getAuctions(guildId);
           console.log(`[AUCTIONS] Available auctions:`, Object.keys(auctions));
           const auction = auctions[auctionId];
           
@@ -7928,14 +11562,25 @@ client.on('interactionCreate', async (interaction) => {
             return;
           }
 
-          // Check user balance
-          const userBalance = virtualAccounts.getUserBalance(guildId, interaction.user.id, auction.tokenTicker);
+          // Resolve token identifier (use stored identifier if available, otherwise resolve from ticker)
+          const tokenIdentifier = auction.tokenIdentifier || await resolveTokenIdentifier(guildId, auction.tokenTicker);
+          if (!tokenIdentifier) {
+            await interaction.editReply({ 
+              content: `❌ **Error:** Could not resolve token identifier for auction. Please contact an administrator.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+            return;
+          }
+
+          // Check user balance (using identifier)
+          const userBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, tokenIdentifier);
           const balanceBN = new BigNumber(userBalance);
 
           if (balanceBN.isLessThan(bidAmountBN)) {
             // Get community fund QR code URL
-            const communityFundProject = serverData[guildId]?.communityFundProject;
-            const qrCodeUrl = serverData[guildId]?.communityFundQR?.[communityFundProject] || null;
+            const communityFundProject = await getCommunityFundProject(guildId);
+            const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+        const qrCodeUrl = communityFundQRData?.[communityFundProject] || null;
             
             let errorMessage = `❌ **Insufficient balance!**\n\n`;
             errorMessage += `You need **${bidAmountBN.toString()} ${auction.tokenTicker}** but you only have **${userBalance} ${auction.tokenTicker}**.\n\n`;
@@ -7957,6 +11602,9 @@ client.on('interactionCreate', async (interaction) => {
           }
 
           // Record bid (no deduction yet)
+          if (!auction.bids) {
+            auction.bids = [];
+          }
           auction.bids.push({
             userId: interaction.user.id,
             userTag: interaction.user.tag,
@@ -7964,11 +11612,35 @@ client.on('interactionCreate', async (interaction) => {
             timestamp: Date.now()
           });
 
-          // Update auction with new highest bidder
+          // Update auction with new highest bidder and save to database
           auction.currentBid = bidAmountBN.toString();
           auction.highestBidderId = interaction.user.id;
           auction.highestBidderTag = interaction.user.tag;
-          saveAuctionsData();
+          
+          // Save auction updates to database
+          await dbAuctions.updateAuction(guildId, auctionId, {
+            currentBid: bidAmountBN.toString(),
+            highestBidderId: interaction.user.id,
+            highestBidderTag: interaction.user.tag
+          });
+
+          // Save bid to auction_bids table for historical record
+          try {
+            const storedDecimals = await getStoredTokenDecimals(guildId, auction.tokenTicker);
+            if (storedDecimals !== null) {
+              const bidAmountWei = toBlockchainAmount(bidAmountBN.toString(), storedDecimals);
+              await dbAuctions.createBid(guildId, auctionId, {
+                bidderId: interaction.user.id,
+                bidderTag: interaction.user.tag,
+                bidAmountWei: bidAmountWei,
+                txHash: null // Virtual account bid, no blockchain transaction
+              });
+              console.log(`[AUCTIONS] Bid saved to database: ${bidAmountBN.toString()} ${auction.tokenTicker} by ${interaction.user.tag}`);
+            }
+          } catch (bidError) {
+            console.error('[AUCTIONS] Error saving bid to database:', bidError.message);
+            // Don't fail the bid if database save fails
+          }
 
           // Update embed
           await updateAuctionEmbed(guildId, auctionId);
@@ -8004,6 +11676,688 @@ client.on('interactionCreate', async (interaction) => {
       }
 });
 
+// LOTTERY HELPER FUNCTIONS
+
+// Process ticket purchase
+async function processTicketPurchase(guildId, lotteryId, userId, userTag, numbers, lottery) {
+  try {
+    // Get token decimals using identifier
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    let tokenDecimals = 8;
+    if (tokenMetadata[lottery.tokenIdentifier]) {
+      tokenDecimals = tokenMetadata[lottery.tokenIdentifier].decimals;
+    }
+    
+    // Convert ticket price to human amount
+    const ticketPriceHuman = new BigNumber(lottery.ticketPriceWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    
+    // Check user's virtual account balance
+    // Try using token identifier first (balances are stored by identifier like "REWARD-cf6eac")
+    // If not found, fall back to ticker
+    let currentBalance = await virtualAccounts.getUserBalance(guildId, userId, lottery.tokenIdentifier);
+    console.log(`[LOTTERY] Balance check for ${lottery.tokenIdentifier}: ${currentBalance}`);
+    
+    if (new BigNumber(currentBalance).isZero() || new BigNumber(currentBalance).isLessThan(ticketPriceHuman)) {
+      // Try with ticker as fallback
+      const balanceByTicker = await virtualAccounts.getUserBalance(guildId, userId, lottery.tokenTicker);
+      console.log(`[LOTTERY] Balance check for ${lottery.tokenTicker}: ${balanceByTicker}`);
+      if (new BigNumber(balanceByTicker).isGreaterThan(new BigNumber(currentBalance))) {
+        currentBalance = balanceByTicker;
+      }
+    }
+    
+    if (new BigNumber(currentBalance).isLessThan(ticketPriceHuman)) {
+      throw new Error(`Insufficient balance! You have ${currentBalance} ${lottery.tokenTicker}, but need ${ticketPriceHuman} ${lottery.tokenTicker}`);
+    }
+    
+    // Deduct funds from virtual account (using identifier - migration handled automatically)
+    const deductionResult = await virtualAccounts.deductFundsFromAccount(
+      guildId,
+      userId,
+      lottery.tokenIdentifier,
+      ticketPriceHuman,
+      `Lottery ticket: ${lotteryId.substring(0, 16)}...`
+    );
+    
+    if (!deductionResult.success) {
+      throw new Error(deductionResult.error || 'Failed to deduct funds');
+    }
+    
+    // Sort numbers for storage
+    const sortedNumbers = [...numbers].sort((a, b) => a - b);
+    
+    // Create ticket
+    const ticketId = `ticket_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    await dbLottery.createTicket(guildId, ticketId, {
+      lotteryId,
+      userId,
+      userTag,
+      numbers: sortedNumbers,
+      tokenIdentifier: lottery.tokenIdentifier,
+      tokenTicker: lottery.tokenTicker,
+      ticketPriceWei: lottery.ticketPriceWei,
+      status: 'LIVE',
+      createdAt: Date.now()
+    });
+    
+    // Update lottery stats
+    const tickets = await dbLottery.getTicketsByLottery(guildId, lotteryId);
+    const ticketCount = Object.keys(tickets).length;
+    const uniqueUsers = new Set(Object.values(tickets).map(t => t.userId));
+    const uniqueParticipants = uniqueUsers.size;
+    
+    // Calculate new prize pool
+    const newPrizePoolWei = new BigNumber(lottery.prizePoolWei).plus(new BigNumber(lottery.ticketPriceWei)).toString();
+    
+    await dbLottery.updateLottery(guildId, lotteryId, {
+      totalTickets: ticketCount,
+      uniqueParticipants: uniqueParticipants,
+      prizePoolWei: newPrizePoolWei
+    });
+    
+    // Update embed
+    await updateLotteryEmbed(guildId, lotteryId);
+    
+    // Post notification in thread
+    try {
+      if (lottery.threadId) {
+        const channel = await client.channels.fetch(lottery.channelId);
+        if (channel) {
+          const thread = await channel.threads.cache.get(lottery.threadId) || await channel.threads.fetch(lottery.threadId);
+          if (thread) {
+            await thread.send(`🎫 **Ticket purchased!** ${userTag} bought a ticket for this lottery.`);
+          }
+        }
+      }
+    } catch (threadError) {
+      console.error('[LOTTERY] Error posting to thread:', threadError.message);
+      // Don't fail ticket purchase if thread post fails
+    }
+    
+    console.log(`[LOTTERY] Ticket purchased: ${ticketId} for lottery ${lotteryId} by user ${userTag}`);
+    
+  } catch (error) {
+    console.error('[LOTTERY] Error processing ticket purchase:', error.message);
+    throw error;
+  }
+}
+
+// Update lottery embed
+async function updateLotteryEmbed(guildId, lotteryId) {
+  try {
+    const lottery = await dbLottery.getLottery(guildId, lotteryId);
+    if (!lottery || !lottery.messageId || !lottery.channelId) {
+      return;
+    }
+    
+    const channel = await client.channels.fetch(lottery.channelId);
+    if (!channel) return;
+    
+    const message = await channel.messages.fetch(lottery.messageId);
+    if (!message) return;
+    
+    // Get token decimals first
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    let tokenDecimals = 8;
+    for (const [identifier, metadata] of Object.entries(tokenMetadata)) {
+      if (identifier === lottery.tokenIdentifier) {
+        tokenDecimals = metadata.decimals;
+        break;
+      }
+    }
+    
+    // Fetch token price from MultiversX API
+    let tokenPriceUsd = 0;
+    try {
+      const priceResponse = await fetch(`https://api.multiversx.com/tokens/${lottery.tokenIdentifier}?denominated=true`);
+      if (priceResponse.ok) {
+        const priceData = await priceResponse.json();
+        tokenPriceUsd = priceData.price || 0;
+      }
+    } catch (error) {
+      console.error('[LOTTERY] Error fetching token price:', error.message);
+      // Try to calculate from existing USD value if available
+      if (lottery.prizePoolUsd > 0 && parseFloat(lottery.prizePoolWei) > 0) {
+        const prizePoolHuman = new BigNumber(lottery.prizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        if (parseFloat(prizePoolHuman) > 0) {
+          tokenPriceUsd = parseFloat(lottery.prizePoolUsd) / parseFloat(prizePoolHuman);
+        }
+      }
+    }
+    
+    const prizePoolHuman = new BigNumber(lottery.prizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    const ticketPriceHuman = new BigNumber(lottery.ticketPriceWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    const prizePoolUsdValue = tokenPriceUsd > 0 ? new BigNumber(prizePoolHuman).multipliedBy(tokenPriceUsd).toFixed(2) : '0.00';
+    
+    // Update prize pool USD in database
+    await dbLottery.updateLottery(guildId, lotteryId, {
+      prizePoolUsd: parseFloat(prizePoolUsdValue)
+    });
+    
+    const isExpired = Date.now() >= lottery.endTime || lottery.status === 'EXPIRED';
+    const color = isExpired ? 0xFF0000 : 0x00FF00;
+    const statusText = isExpired ? '🔴 Ended' : '🟢 Live';
+    const endTimeText = isExpired ? 'Ended' : `<t:${Math.floor(lottery.endTime / 1000)}:R>`;
+    
+    const lotteryEmbed = new EmbedBuilder()
+      .setTitle(lottery.isRollover ? '🎰 Lottery (Rollover)' : '🎰 Lottery')
+      .setDescription(`${lottery.isRollover ? `**Rollover #${lottery.rolloverCount}** - No winners in previous draw!\n\n` : ''}**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers}`)
+      .addFields([
+        { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${lottery.tokenTicker}`, inline: true },
+        { name: '💰 Prize Pool', value: `${prizePoolHuman} ${lottery.tokenTicker} (≈ $${prizePoolUsdValue})`, inline: true },
+        { name: '🏦 House Commission', value: `${lottery.houseCommissionPercent}%`, inline: true },
+        { name: '⏰ End Time', value: endTimeText, inline: true },
+        { name: '🎫 Tickets Sold', value: lottery.totalTickets.toString(), inline: true },
+        { name: '👥 Participants', value: lottery.uniqueParticipants.toString(), inline: true }
+      ])
+      .setColor(color)
+      .setTimestamp(new Date(lottery.endTime))
+      .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+    
+    // Add winning numbers if lottery has ended
+    if (lottery.winningNumbers && lottery.winningNumbers.length > 0) {
+      const winningNumbersDisplay = lotteryHelpers.formatNumbersForDisplay(lottery.winningNumbers);
+      lotteryEmbed.addFields({
+        name: '🎯 Winning Numbers',
+        value: winningNumbersDisplay,
+        inline: false
+      });
+    }
+    
+    // Create buttons
+    const components = [];
+    if (!isExpired) {
+      const buyTicketButton = new ButtonBuilder()
+        .setCustomId(`lottery-buy-ticket:${lotteryId}`)
+        .setLabel('Buy Ticket')
+        .setStyle(ButtonStyle.Primary);
+      
+      const luckyDipButton = new ButtonBuilder()
+        .setCustomId(`lottery-lucky-dip:${lotteryId}`)
+        .setLabel('Lucky Dip')
+        .setStyle(ButtonStyle.Success);
+      
+      const myActiveTicketsButton = new ButtonBuilder()
+        .setCustomId(`lottery-my-active:${lotteryId}`)
+        .setLabel('My Active Tickets')
+        .setStyle(ButtonStyle.Secondary);
+      
+      const myResultsButton = new ButtonBuilder()
+        .setCustomId(`lottery-my-results:${lotteryId}`)
+        .setLabel('My Results')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true);
+      
+      const buttonRow = new ActionRowBuilder()
+        .addComponents(buyTicketButton, luckyDipButton, myActiveTicketsButton, myResultsButton);
+      
+      components.push(buttonRow);
+    } else {
+      // Lottery ended - enable My Results button
+      const myActiveTicketsButton = new ButtonBuilder()
+        .setCustomId(`lottery-my-active:${lotteryId}`)
+        .setLabel('My Active Tickets')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true);
+      
+      const myResultsButton = new ButtonBuilder()
+        .setCustomId(`lottery-my-results:${lotteryId}`)
+        .setLabel('My Results')
+        .setStyle(ButtonStyle.Secondary);
+      
+      const buttonRow = new ActionRowBuilder()
+        .addComponents(myActiveTicketsButton, myResultsButton);
+      
+      components.push(buttonRow);
+    }
+    
+    await message.edit({ embeds: [lotteryEmbed], components });
+    
+  } catch (error) {
+    console.error(`[LOTTERY] Error updating embed for lottery ${lotteryId}:`, error.message);
+  }
+}
+
+// Process lottery draw
+async function processLotteryDraw(guildId, lotteryId) {
+  try {
+    console.log(`[LOTTERY] Processing draw for lottery ${lotteryId}`);
+    
+    const lottery = await dbLottery.getLottery(guildId, lotteryId);
+    if (!lottery || lottery.status !== 'LIVE') {
+      return;
+    }
+    
+    // Generate winning numbers
+    const winningNumbers = lotteryHelpers.generateRandomNumbers(lottery.winningNumbersCount, lottery.totalPoolNumbers);
+    
+    // Get all tickets for this lottery to calculate matched numbers
+    const allTickets = await dbLottery.getTicketsByLottery(guildId, lotteryId);
+    const ticketArray = Object.values(allTickets).filter(t => t.status === 'LIVE');
+    
+    // Calculate matched numbers for all tickets and find winners
+    const winningTickets = [];
+    for (const ticket of ticketArray) {
+      const match = lotteryHelpers.checkTicketMatch(ticket.numbers, winningNumbers);
+      
+      // Update ticket with matched numbers
+      await dbLottery.updateTicketStatus(
+        guildId, 
+        ticket.ticketId, 
+        match.isWinner ? 'WINNER' : 'EXPIRED', 
+        match.isWinner, 
+        match.matchedCount
+      );
+      
+      if (match.isWinner) {
+        winningTickets.push({
+          ...ticket,
+          matchedNumbers: match.matchedCount
+        });
+      }
+    }
+    
+    // Update lottery with winning numbers
+    await dbLottery.updateLottery(guildId, lotteryId, {
+      winningNumbers: winningNumbers,
+      hasWinners: winningTickets.length > 0,
+      status: 'EXPIRED'
+    });
+    
+    if (winningTickets.length > 0) {
+      // We have winners!
+      console.log(`[LOTTERY] Found ${winningTickets.length} winning ticket(s) for lottery ${lotteryId}`);
+      
+      // Calculate prize distribution
+      const prizeDistribution = lotteryHelpers.calculatePrizeDistribution(
+        lottery.prizePoolWei,
+        winningTickets.length,
+        lottery.houseCommissionPercent
+      );
+      
+      // Get token decimals
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      let tokenDecimals = 8;
+      for (const [identifier, metadata] of Object.entries(tokenMetadata)) {
+        if (identifier === lottery.tokenIdentifier) {
+          tokenDecimals = metadata.decimals;
+          break;
+        }
+      }
+      
+      // Distribute prizes (tickets already marked as WINNER above)
+      for (const ticket of winningTickets) {
+        
+        // Credit prize to virtual account
+        const prizeHuman = new BigNumber(prizeDistribution.prizePerWinner).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        await virtualAccounts.addFundsToAccount(
+          guildId,
+          ticket.userId,
+          lottery.tokenIdentifier,
+          prizeHuman,
+          null,
+          'lottery_prize',
+          ticket.userTag
+        );
+        
+        // Record winner - calculate USD value
+        let prizeUsd = 0;
+        try {
+          const priceResponse = await fetch(`https://api.multiversx.com/tokens/${lottery.tokenIdentifier}?denominated=true`);
+          if (priceResponse.ok) {
+            const priceData = await priceResponse.json();
+            const tokenPriceUsd = priceData.price || 0;
+            prizeUsd = parseFloat(new BigNumber(prizeHuman).multipliedBy(tokenPriceUsd).toFixed(2));
+          }
+        } catch (error) {
+          console.error('[LOTTERY] Error fetching token price for winner:', error.message);
+        }
+        
+        await dbLottery.createWinner(guildId, {
+          lotteryId,
+          userId: ticket.userId,
+          userTag: ticket.userTag,
+          ticketId: ticket.ticketId,
+          tokenIdentifier: lottery.tokenIdentifier,
+          tokenTicker: lottery.tokenTicker,
+          prizeAmountWei: prizeDistribution.prizePerWinner,
+          prizeAmountUsd: prizeUsd,
+          winningNumbers: winningNumbers,
+          ticketNumbers: ticket.numbers
+        });
+      }
+      
+      // Track house commission (using identifier)
+      // CRITICAL: Validate identifier format before tracking (prevent ticker-only storage)
+      if (prizeDistribution.commission !== '0') {
+        const identifierFormatCheck = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+        if (identifierFormatCheck.test(lottery.tokenIdentifier)) {
+          await trackLotteryEarnings(guildId, lottery.tokenIdentifier, prizeDistribution.commission);
+        } else {
+          console.error(`[LOTTERY] Cannot track earnings: Invalid token identifier format in lottery ${lotteryId}: "${lottery.tokenIdentifier}". Expected full identifier format (e.g., "REWARD-cf6eac").`);
+          // Try to resolve identifier from ticker as fallback
+          const resolvedIdentifier = await resolveTokenIdentifier(guildId, lottery.tokenIdentifier);
+          if (resolvedIdentifier && identifierFormatCheck.test(resolvedIdentifier)) {
+            console.log(`[LOTTERY] Resolved identifier "${resolvedIdentifier}" from ticker "${lottery.tokenIdentifier}", tracking earnings...`);
+            await trackLotteryEarnings(guildId, resolvedIdentifier, prizeDistribution.commission);
+            // Update lottery with correct identifier for future draws
+            await dbLottery.updateLottery(guildId, lotteryId, { tokenIdentifier: resolvedIdentifier });
+          } else {
+            console.error(`[LOTTERY] Failed to resolve identifier for ticker "${lottery.tokenIdentifier}". Earnings not tracked.`);
+          }
+        }
+      }
+      
+      // Update embed
+      await updateLotteryEmbed(guildId, lotteryId);
+      
+      // Calculate unique winners and group tickets by winner
+      const uniqueWinnerIds = new Set(winningTickets.map(t => t.userId));
+      const uniqueWinnersCount = uniqueWinnerIds.size;
+      
+      // Group winning tickets by userId
+      const winnersMap = new Map();
+      for (const ticket of winningTickets) {
+        if (!winnersMap.has(ticket.userId)) {
+          winnersMap.set(ticket.userId, {
+            userId: ticket.userId,
+            userTag: ticket.userTag,
+            tickets: []
+          });
+        }
+        winnersMap.get(ticket.userId).tickets.push(ticket.ticketId);
+      }
+      
+      // Send winner announcement in thread and as reply in channel
+      try {
+        const channel = await client.channels.fetch(lottery.channelId);
+        if (channel) {
+          const prizeHuman = new BigNumber(prizeDistribution.prizePerWinner).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+          
+          // Build winner mentions and ticket IDs list
+          const winnerMentions = [];
+          const winnerDetails = [];
+          
+          for (const [userId, winnerData] of winnersMap.entries()) {
+            winnerMentions.push(`<@${userId}>`);
+            const ticketIdsList = winnerData.tickets.map(id => `\`${id.substring(0, 16)}...\``).join(', ');
+            winnerDetails.push(`**<@${userId}>** (${winnerData.tickets.length} ticket${winnerData.tickets.length > 1 ? 's' : ''}): ${ticketIdsList}`);
+          }
+          
+          const winnerEmbed = new EmbedBuilder()
+            .setTitle('🎉 Lottery Winners!')
+            .setDescription(`**${winningTickets.length} winning ticket(s) found!**\n\n🏆 **Winners:** ${winnerMentions.join(', ')}`)
+            .addFields([
+              { name: '🎫 Lottery ID', value: `\`${lotteryId}\``, inline: false },
+              { name: '🎯 Winning Numbers', value: lotteryHelpers.formatNumbersForDisplay(winningNumbers), inline: false },
+              { name: '💰 Prize Per Winner', value: `${prizeHuman} ${lottery.tokenTicker}`, inline: true },
+              { name: '🎫 Winning Tickets', value: winningTickets.length.toString(), inline: true },
+              { name: '👥 Unique Winners', value: uniqueWinnersCount.toString(), inline: true },
+              { name: '🎟️ Winning Ticket IDs', value: winnerDetails.join('\n') || 'N/A', inline: false }
+            ])
+            .setColor(0x00FF00)
+            .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+            .setTimestamp();
+          
+          // Send as reply to original lottery message in channel
+          if (lottery.messageId) {
+            try {
+              const originalMessage = await channel.messages.fetch(lottery.messageId);
+              if (originalMessage) {
+                await originalMessage.reply({ embeds: [winnerEmbed] });
+              } else {
+                // Fallback if message not found
+                await channel.send({ embeds: [winnerEmbed] });
+              }
+            } catch (replyError) {
+              console.error('[LOTTERY] Error replying to original message:', replyError.message);
+              // Fallback to regular send
+              await channel.send({ embeds: [winnerEmbed] });
+            }
+          } else {
+            await channel.send({ embeds: [winnerEmbed] });
+          }
+          
+          // Also post in thread
+          if (lottery.threadId) {
+            try {
+              const thread = await channel.threads.cache.get(lottery.threadId) || await channel.threads.fetch(lottery.threadId);
+              if (thread) {
+                await thread.send({ embeds: [winnerEmbed] });
+              }
+            } catch (threadError) {
+              console.error('[LOTTERY] Error posting to thread:', threadError.message);
+            }
+          }
+          
+          // Send DM to each unique winner
+          const projectLogoUrl = await getProjectLogoUrl(guildId, 'Community Fund'); // Get project logo for DM
+          for (const [userId, winnerData] of winnersMap.entries()) {
+            try {
+              const user = await client.users.fetch(userId);
+              if (user) {
+                const winnerTicketCount = winnerData.tickets.length;
+                const totalPrizeForUser = new BigNumber(prizeDistribution.prizePerWinner).multipliedBy(winnerTicketCount).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+                
+                const dmEmbed = new EmbedBuilder()
+                  .setTitle('🎉 Congratulations! You Won the Lottery!')
+                  .setDescription(`You won **${totalPrizeForUser} ${lottery.tokenTicker}** with ${winnerTicketCount} winning ticket${winnerTicketCount > 1 ? 's' : ''}!`)
+                  .addFields([
+                    { name: '🎫 Lottery ID', value: `\`${lotteryId}\``, inline: false },
+                    { name: '🎯 Winning Numbers', value: lotteryHelpers.formatNumbersForDisplay(winningNumbers), inline: false },
+                    { name: '🎟️ Your Winning Ticket IDs', value: winnerData.tickets.map(id => `\`${id}\``).join('\n'), inline: false },
+                    { name: '💰 Prize Per Ticket', value: `${prizeHuman} ${lottery.tokenTicker}`, inline: true },
+                    { name: '🎫 Your Tickets', value: winnerTicketCount.toString(), inline: true },
+                    { name: '💎 Total Prize', value: `${totalPrizeForUser} ${lottery.tokenTicker}`, inline: true }
+                  ])
+                  .setColor(0x00FF00)
+                  .setThumbnail(projectLogoUrl)
+                  .setFooter({ text: 'Prize has been added to your virtual account! Use /check-balance to see your winnings.', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+                  .setTimestamp();
+                
+                await user.send({ embeds: [dmEmbed] });
+                console.log(`[LOTTERY] Sent winner DM to ${user.tag} (${userId}) for lottery ${lotteryId}`);
+              }
+            } catch (dmError) {
+              // User might have DMs disabled or blocked the bot
+              console.error(`[LOTTERY] Failed to send DM to winner ${userId}:`, dmError.message);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[LOTTERY] Error sending winner announcement:', error.message);
+      }
+      
+    } else {
+      // No winners - rollover
+      console.log(`[LOTTERY] No winners found for lottery ${lotteryId}, creating rollover`);
+      
+      // Create rollover lottery
+      const rolloverLotteryId = `lottery_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const frequencyMs = lotteryHelpers.parseFrequency(lottery.drawingFrequency);
+      const newEndTime = Date.now() + frequencyMs;
+      
+      await dbLottery.createLottery(guildId, rolloverLotteryId, {
+        winningNumbersCount: lottery.winningNumbersCount,
+        totalPoolNumbers: lottery.totalPoolNumbers,
+        tokenIdentifier: lottery.tokenIdentifier,
+        tokenTicker: lottery.tokenTicker,
+        drawingFrequency: lottery.drawingFrequency,
+        houseCommissionPercent: lottery.houseCommissionPercent,
+        ticketPriceWei: lottery.ticketPriceWei,
+        prizePoolWei: lottery.prizePoolWei, // Carry over prize pool
+        prizePoolUsd: lottery.prizePoolUsd,
+        startTime: Date.now(),
+        endTime: newEndTime,
+        nextDrawTime: newEndTime,
+        status: 'LIVE',
+        hasWinners: false,
+        totalTickets: 0,
+        uniqueParticipants: 0,
+        isRollover: true,
+        originalLotteryId: lottery.lotteryId,
+        rolloverCount: lottery.rolloverCount + 1
+      });
+      
+      // Create new embed for rollover lottery
+      try {
+        const channel = await client.channels.fetch(lottery.channelId);
+        if (channel) {
+          // Fetch token price
+          let tokenPriceUsd = 0;
+          try {
+            const priceResponse = await fetch(`https://api.multiversx.com/tokens/${lottery.tokenIdentifier}?denominated=true`);
+            if (priceResponse.ok) {
+              const priceData = await priceResponse.json();
+              tokenPriceUsd = priceData.price || 0;
+            }
+          } catch (error) {
+            console.error('[LOTTERY] Error fetching token price:', error.message);
+          }
+          
+          const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+          let tokenDecimals = 8;
+          for (const [identifier, metadata] of Object.entries(tokenMetadata)) {
+            if (identifier === lottery.tokenIdentifier) {
+              tokenDecimals = metadata.decimals;
+              break;
+            }
+          }
+          
+          const prizePoolHuman = new BigNumber(lottery.prizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+          const ticketPriceHuman = new BigNumber(lottery.ticketPriceWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+          const prizePoolUsdValue = new BigNumber(prizePoolHuman).multipliedBy(tokenPriceUsd).toFixed(2);
+          
+          const rolloverEmbed = new EmbedBuilder()
+            .setTitle('🎰 Lottery (Rollover)')
+            .setDescription(`**Lottery ID:** \`${rolloverLotteryId}\`\n\n**Rollover #${lottery.rolloverCount + 1}** - No winners in previous draw!\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers}`)
+            .addFields([
+              { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${lottery.tokenTicker}`, inline: true },
+              { name: '💰 Prize Pool', value: `${prizePoolHuman} ${lottery.tokenTicker} (≈ $${prizePoolUsdValue})`, inline: true },
+              { name: '🏦 House Commission', value: `${lottery.houseCommissionPercent}%`, inline: true },
+              { name: '⏰ End Time', value: `<t:${Math.floor(newEndTime / 1000)}:R>`, inline: true },
+              { name: '🎫 Tickets Sold', value: '0', inline: true },
+              { name: '👥 Participants', value: '0', inline: true }
+            ])
+            .setColor(0x00FF00)
+            .setTimestamp(new Date(newEndTime))
+            .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+          
+          const buyTicketButton = new ButtonBuilder()
+            .setCustomId(`lottery-buy-ticket:${rolloverLotteryId}`)
+            .setLabel('Buy Ticket')
+            .setStyle(ButtonStyle.Primary);
+          
+          const luckyDipButton = new ButtonBuilder()
+            .setCustomId(`lottery-lucky-dip:${rolloverLotteryId}`)
+            .setLabel('Lucky Dip')
+            .setStyle(ButtonStyle.Success);
+          
+          const myActiveTicketsButton = new ButtonBuilder()
+            .setCustomId(`lottery-my-active:${rolloverLotteryId}`)
+            .setLabel('My Active Tickets')
+            .setStyle(ButtonStyle.Secondary);
+          
+          const myResultsButton = new ButtonBuilder()
+            .setCustomId(`lottery-my-results:${rolloverLotteryId}`)
+            .setLabel('My Results')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(true);
+          
+          const buttonRow = new ActionRowBuilder()
+            .addComponents(buyTicketButton, luckyDipButton, myActiveTicketsButton, myResultsButton);
+          
+          const rolloverMessage = await channel.send({
+            embeds: [rolloverEmbed],
+            components: [buttonRow]
+          });
+          
+          // Create thread
+          let threadId = null;
+          try {
+            const thread = await rolloverMessage.startThread({
+              name: `Lottery ${rolloverLotteryId.substring(0, 8)}`,
+              autoArchiveDuration: 1440
+            });
+            threadId = thread.id;
+          } catch (threadError) {
+            console.error('[LOTTERY] Error creating thread:', threadError.message);
+          }
+          
+          // Update lottery with message/channel/thread IDs
+          await dbLottery.updateLottery(guildId, rolloverLotteryId, {
+            channelId: channel.id,
+            messageId: rolloverMessage.id,
+            threadId: threadId
+          });
+        }
+      } catch (error) {
+        console.error('[LOTTERY] Error creating rollover embed:', error.message);
+      }
+      
+      // Update original lottery embed
+      await updateLotteryEmbed(guildId, lotteryId);
+    }
+    
+  } catch (error) {
+    console.error(`[LOTTERY] Error processing draw for lottery ${lotteryId}:`, error.message);
+  }
+}
+
+// Track lottery earnings (house commission)
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f")
+async function trackLotteryEarnings(guildId, tokenIdentifier, commissionWei) {
+  try {
+    // Validate token identifier format
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      console.error(`[LOTTERY] Invalid token identifier format: ${tokenIdentifier}`);
+      return;
+    }
+    
+    // Get token metadata for ticker display
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    const tokenTicker = tokenMetadata[tokenIdentifier]?.ticker || tokenIdentifier.split('-')[0];
+    
+    // Get current house balance
+    const currentBalance = await getHouseBalance(guildId, tokenIdentifier);
+    const houseBalance = currentBalance || {
+      bettingEarnings: {},
+      bettingSpending: {},
+      bettingPNL: {},
+      auctionEarnings: {},
+      auctionSpending: {},
+      auctionPNL: {},
+      lotteryEarnings: {},
+      lotterySpending: {},
+      lotteryPNL: {}
+    };
+    
+    // Track lottery earnings (using identifier as key, not ticker)
+    if (!houseBalance.lotteryEarnings[tokenIdentifier]) {
+      houseBalance.lotteryEarnings[tokenIdentifier] = '0';
+    }
+    const currentLotteryEarnings = new BigNumber(houseBalance.lotteryEarnings[tokenIdentifier] || '0');
+    const newLotteryEarnings = currentLotteryEarnings.plus(new BigNumber(commissionWei));
+    houseBalance.lotteryEarnings[tokenIdentifier] = newLotteryEarnings.toString();
+    
+    // Recalculate lottery PNL (using identifier as key)
+    const lotterySpending = new BigNumber(houseBalance.lotterySpending[tokenIdentifier] || '0');
+    houseBalance.lotteryPNL[tokenIdentifier] = newLotteryEarnings.minus(lotterySpending).toString();
+    
+    // Save to database
+    await dbServerData.updateHouseBalance(guildId, tokenIdentifier, houseBalance);
+    
+    // Log earnings
+    const tokenDecimals = tokenMetadata[tokenIdentifier]?.decimals || 8;
+    const humanAmount = new BigNumber(commissionWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    console.log(`[HOUSE] Tracked lottery earnings: +${humanAmount} ${tokenTicker} (Lottery house balance)`);
+    
+  } catch (error) {
+    console.error(`[HOUSE] Error tracking lottery earnings:`, error.message);
+  }
+}
+
 // Ready event
 client.on('ready', async () => {
   console.log(`Multi-Server ESDT Tipping Bot with Virtual Accounts is ready with ID: ${client.user.tag}`);
@@ -8017,17 +12371,13 @@ client.on('ready', async () => {
   // Set up periodic cleanup of expired RPS challenges
   setInterval(async () => {
     await cleanupExpiredChallenges();
-    cleanupExpiredTxHashes();
   }, 5 * 60 * 1000); // Run every 5 minutes
   
-  // Set up daily cleanup of FINISHED football matches
-  setInterval(() => {
-    cleanupFinishedMatches();
-  }, 24 * 60 * 60 * 1000); // Run once a day
+  // FINISHED matches remain in database for historical records - no cleanup needed
 
   // Set up weekly cleanup of old transaction history
-  setInterval(() => {
-    const cleanupResult = virtualAccounts.cleanupOldTransactions();
+  setInterval(async () => {
+    const cleanupResult = await virtualAccounts.cleanupOldTransactions();
     if (cleanupResult.totalCleaned > 0) {
       console.log(`🧹 Weekly cleanup: Removed ${cleanupResult.totalCleaned} old transactions from ${cleanupResult.usersProcessed} users`);
     }
@@ -8036,14 +12386,18 @@ client.on('ready', async () => {
   // Set up periodic check for expired auctions
   setInterval(async () => {
     try {
-      for (const guildId in auctionsData) {
-        const auctions = auctionsData[guildId];
-        for (const auctionId in auctions) {
-          const auction = auctions[auctionId];
-          if (auction.status === 'active' && isAuctionExpired(auction)) {
-            console.log(`[AUCTIONS] Processing expired auction ${auctionId}`);
-            await processAuctionClosure(guildId, auctionId);
+      const allGuilds = await client.guilds.fetch();
+      for (const [guildId, guild] of allGuilds) {
+        try {
+          const activeAuctions = await dbAuctions.getActiveAuctions(guildId);
+          for (const auction of activeAuctions) {
+            if (isAuctionExpired(auction)) {
+              console.log(`[AUCTIONS] Processing expired auction ${auction.auctionId}`);
+              await processAuctionClosure(guildId, auction.auctionId);
+            }
           }
+        } catch (error) {
+          console.error(`[AUCTIONS] Error checking auctions for guild ${guildId}:`, error.message);
         }
       }
     } catch (error) {
@@ -8051,16 +12405,52 @@ client.on('ready', async () => {
     }
   }, 60 * 1000); // Check every minute
   
+  // Set up periodic check for expired lotteries
+  setInterval(async () => {
+    try {
+      const expiredLotteries = await dbLottery.getAllLotteriesForDrawCheck();
+      for (const lottery of expiredLotteries) {
+        console.log(`[LOTTERY] Processing expired lottery ${lottery.lotteryId}`);
+        await processLotteryDraw(lottery.guildId, lottery.lotteryId);
+      }
+    } catch (error) {
+      console.error('[LOTTERY] Error checking expired lotteries:', error.message);
+    }
+  }, 60 * 1000); // Check every minute
+  
+  // Set up periodic update for lottery embeds (USD price)
+  setInterval(async () => {
+    try {
+      const allGuilds = await client.guilds.fetch();
+      for (const [guildId, guild] of allGuilds) {
+        try {
+          const activeLotteries = await dbLottery.getActiveLotteries(guildId);
+          for (const lotteryId of Object.keys(activeLotteries)) {
+            await updateLotteryEmbed(guildId, lotteryId);
+          }
+        } catch (error) {
+          console.error(`[LOTTERY] Error updating embeds for guild ${guildId}:`, error.message);
+        }
+      }
+    } catch (error) {
+      console.error('[LOTTERY] Error updating lottery embeds:', error.message);
+    }
+  }, 10 * 60 * 1000); // Update every 10 minutes
+  
   console.log('RPS challenge cleanup scheduled (every 5 minutes)');
   console.log('Football match cleanup scheduled (once a day)');
   console.log('Transaction history cleanup scheduled (once a week)');
   console.log('Auction expiration check scheduled (every minute)');
+  console.log('Lottery draw check scheduled (every minute)');
+  console.log('Lottery embed update scheduled (every 10 minutes)');
   
   // Clean up old transaction history on startup
-  const cleanupResult = virtualAccounts.cleanupOldTransactions();
-  if (cleanupResult.totalCleaned > 0) {
-    console.log(`🧹 Cleanup: Removed ${cleanupResult.totalCleaned} old transactions from ${cleanupResult.usersProcessed} users`);
-  }
+  (async () => {
+    const cleanupResult = await virtualAccounts.cleanupOldTransactions();
+    if (cleanupResult.totalCleaned > 0) {
+      console.log(`🧹 Cleanup: Removed ${cleanupResult.totalCleaned} old transactions from ${cleanupResult.usersProcessed} users`);
+    }
+  })();
 
   // Refresh football match pot sizes on startup (with delay to ensure data is loaded)
   setTimeout(() => {
@@ -8080,63 +12470,9 @@ client.login(process.env.TOKEN).catch(error => {
   console.error('Failed to login:', error);
 }); 
 
-// --- RPS Games Data (rps-games.json) ---
-function loadRpsGamesData() {
-  try {
-    if (fs.existsSync(RPS_GAMES_FILE)) {
-      rpsGamesData = JSON.parse(fs.readFileSync(RPS_GAMES_FILE, 'utf8'));
-      console.log(`[RPS] Loaded RPS games data for ${Object.keys(rpsGamesData).length} servers`);
-    }
-  } catch (error) {
-    console.error('[RPS] Error loading RPS games data:', error.message);
-    rpsGamesData = {};
-  }
-}
-
-function saveRpsGamesData() {
-  try {
-    fs.writeFileSync(RPS_GAMES_FILE, JSON.stringify(rpsGamesData, null, 2));
-  } catch (error) {
-    console.error('[RPS] Error saving RPS games data:', error.message);
-  }
-}
-
-function initializeRpsGamesData(guildId) {
-  if (!rpsGamesData[guildId]) {
-    rpsGamesData[guildId] = {};
-    saveRpsGamesData();
-  }
-  return rpsGamesData[guildId];
-}
-
-// --- Used Transaction Hashes Data (used-tx-hashes.json) ---
-function loadUsedTxHashesData() {
-  try {
-    if (fs.existsSync(USED_TX_HASHES_FILE)) {
-      usedTxHashesData = JSON.parse(fs.readFileSync(USED_TX_HASHES_FILE, 'utf8'));
-      console.log(`[RPS] Loaded used tx hashes for ${Object.keys(usedTxHashesData).length} servers`);
-    }
-  } catch (error) {
-    console.error('[RPS] Error loading used tx hashes:', error.message);
-    usedTxHashesData = {};
-  }
-}
-
-function saveUsedTxHashesData() {
-  try {
-    fs.writeFileSync(USED_TX_HASHES_FILE, JSON.stringify(usedTxHashesData, null, 2));
-  } catch (error) {
-    console.error('[RPS] Error saving used tx hashes:', error.message);
-  }
-}
-
-function getUsedTxHashes(guildId) {
-  if (!usedTxHashesData[guildId]) {
-    usedTxHashesData[guildId] = {};
-    saveUsedTxHashesData();
-  }
-  return usedTxHashesData[guildId];
-}
+// --- RPS Games Data (now in database) ---
+// All RPS games data is stored in Supabase database
+// Use dbRpsGames module directly
 
 // --- Token Decimals Helpers ---
 const tokenDecimalsCache = {};
@@ -8213,19 +12549,8 @@ async function updateTokenMetadata(guildId, tokenIdentifier) {
       return false;
     }
     
-    // Initialize token metadata storage if it doesn't exist
-    if (!serverData[guildId]) {
-      serverData[guildId] = {};
-    }
-    if (!serverData[guildId].tokenMetadata) {
-      serverData[guildId].tokenMetadata = {};
-    }
-    
-    // Store the token metadata
-    serverData[guildId].tokenMetadata[tokenIdentifier] = tokenMetadata;
-    
-    // Save to file
-    saveServerData();
+    // Store the token metadata in database
+    await dbServerData.setTokenMetadata(guildId, tokenIdentifier, tokenMetadata);
     
     console.log(`[TOKEN] Successfully stored metadata for ${tokenIdentifier}: ${tokenMetadata.decimals} decimals`);
     return true;
@@ -8236,10 +12561,11 @@ async function updateTokenMetadata(guildId, tokenIdentifier) {
 }
 
 // Function to get token decimals from stored metadata
-function getStoredTokenDecimals(guildId, tokenIdentifier) {
+async function getStoredTokenDecimals(guildId, tokenIdentifier) {
   try {
-    if (serverData[guildId] && serverData[guildId].tokenMetadata && serverData[guildId].tokenMetadata[tokenIdentifier]) {
-      return serverData[guildId].tokenMetadata[tokenIdentifier].decimals;
+    const metadata = await dbServerData.getTokenMetadata(guildId);
+    if (metadata && metadata[tokenIdentifier]) {
+      return metadata[tokenIdentifier].decimals;
     }
     return null; // Not found in stored metadata
   } catch (error) {
@@ -8284,6 +12610,45 @@ async function getTokenIdentifier(tokenTicker) {
   } catch (error) {
     console.error(`[TOKEN] Error getting token identifier for "${tokenTicker}":`, error.message);
     return null;
+  }
+}
+
+// Helper function to resolve token identifier from ticker using metadata
+// Returns identifier if found, otherwise returns the input (for backward compatibility)
+async function resolveTokenIdentifier(guildId, tokenInput) {
+  try {
+    // Clean input - remove any quotes or whitespace
+    let cleanInput = typeof tokenInput === 'string' ? tokenInput.trim() : String(tokenInput).trim();
+    cleanInput = cleanInput.replace(/^["']+|["']+$/g, ''); // Remove surrounding quotes
+    
+    // If already a full identifier, return it (cleaned)
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (esdtIdentifierRegex.test(cleanInput)) {
+      return cleanInput; // Return plain string without quotes
+    }
+    
+    // Try to find identifier from metadata
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    for (const [identifier, metadata] of Object.entries(tokenMetadata)) {
+      // Clean identifier from metadata too
+      const cleanIdentifier = identifier.replace(/^["']+|["']+$/g, '');
+      if (metadata.ticker === cleanInput || cleanIdentifier === cleanInput) {
+        return cleanIdentifier; // Return plain string without quotes
+      }
+    }
+    
+    // If not found in metadata, try API lookup
+    const identifier = await getTokenIdentifier(cleanInput);
+    if (identifier) {
+      // Clean the identifier from API too
+      return identifier.replace(/^["']+|["']+$/g, '');
+    }
+    return cleanInput; // Fallback to cleaned input if not found
+  } catch (error) {
+    console.error(`[TOKEN] Error resolving identifier for "${tokenInput}":`, error.message);
+    // Clean and return input on error
+    const cleanInput = typeof tokenInput === 'string' ? tokenInput.trim() : String(tokenInput).trim();
+    return cleanInput.replace(/^["']+|["']+$/g, '');
   }
 }
 
@@ -8333,222 +12698,26 @@ function isValidTransactionHash(txHash) {
   return /^[a-fA-F0-9]{64}$/.test(txHash);
 }
 
-// --- Football Games Data (data/matches.json, data/bets.json) ---
-function loadFootballData() {
-  console.log('[FOOTBALL] 🚀 Starting football data loading...');
-  try {
-    if (fs.existsSync(FOOTBALL_MATCHES_FILE)) {
-      footballMatchesData = JSON.parse(fs.readFileSync(FOOTBALL_MATCHES_FILE, 'utf8'));
-      console.log(`[FOOTBALL] ✅ Loaded football matches data: ${Object.keys(footballMatchesData).length} matches`);
-      
-      // Log details about loaded matches
-      const scheduledMatches = Object.values(footballMatchesData).filter(match => match.status === 'SCHEDULED' || match.status === 'TIMED');
-      console.log(`[FOOTBALL] 📍 Scheduled matches: ${scheduledMatches.length}`);
-        
-        // Log some match details
-      scheduledMatches.forEach(match => {
-        console.log(`[FOOTBALL] ⏰ Scheduled match: ${match.home} vs ${match.away} (ID: ${match.matchId}) - Guilds: ${match.guildIds.length}`);
-      });
-    } else {
-      console.log('[FOOTBALL] ⚠️ No football matches file found, starting fresh');
-      footballMatchesData = {};
-    }
-  } catch (error) {
-    console.error('[FOOTBALL] ❌ Error loading football matches data:', error.message);
-    footballMatchesData = {};
-  }
+// All football and auction data is stored in Supabase database
+// Use dbFootball and dbAuctions modules directly
 
+async function getAuctions(guildId) {
   try {
-    if (fs.existsSync(FOOTBALL_BETS_FILE)) {
-      footballBetsData = JSON.parse(fs.readFileSync(FOOTBALL_BETS_FILE, 'utf8'));
-      console.log(`[FOOTBALL] Loaded football bets data for ${Object.keys(footballBetsData).length} servers`);
-    }
+    return await dbAuctions.getAuctionsByGuild(guildId);
   } catch (error) {
-    console.error('[FOOTBALL] Error loading football bets data:', error.message);
-    footballBetsData = {};
+    console.error(`[AUCTIONS] Error getting auctions for guild ${guildId}:`, error.message);
+    return {};
   }
-
-  try {
-    if (fs.existsSync(USED_TX_HASHES_FILE)) {
-      usedTxHashesData = JSON.parse(fs.readFileSync(USED_TX_HASHES_FILE, 'utf8'));
-      console.log(`[FOOTBALL] Loaded used transaction hashes data for ${Object.keys(usedTxHashesData).length} servers`);
-    }
-  } catch (error) {
-    console.error('[FOOTBALL] Error loading used transaction hashes data:', error.message);
-    usedTxHashesData = {};
-  }
-
-  try {
-    if (fs.existsSync(FOOTBALL_LEADERBOARD_FILE)) {
-      footballLeaderboardData = JSON.parse(fs.readFileSync(FOOTBALL_LEADERBOARD_FILE, 'utf8'));
-      console.log(`[FOOTBALL] Loaded leaderboard data for ${Object.keys(footballLeaderboardData).length} servers`);
-    } else {
-      console.log('[FOOTBALL] No leaderboard file found, starting fresh');
-      footballLeaderboardData = {};
-    }
-  } catch (error) {
-    console.error('[FOOTBALL] Error loading leaderboard data:', error.message);
-    footballLeaderboardData = {};
-  }
-}
-
-function saveFootballMatchesData() {
-  try {
-    fs.writeFileSync(FOOTBALL_MATCHES_FILE, JSON.stringify(footballMatchesData, null, 2));
-  } catch (error) {
-    console.error('[FOOTBALL] Error saving football matches data:', error.message);
-  }
-}
-
-function saveFootballBetsData() {
-  try {
-    fs.writeFileSync(FOOTBALL_BETS_FILE, JSON.stringify(footballBetsData, null, 2));
-  } catch (error) {
-    console.error('[FOOTBALL] Error saving football bets data:', error.message);
-  }
-}
-
-function saveLeaderboardData() {
-  try {
-    fs.writeFileSync(FOOTBALL_LEADERBOARD_FILE, JSON.stringify(footballLeaderboardData, null, 2));
-  } catch (error) {
-    console.error('[FOOTBALL] Error saving leaderboard data:', error.message);
-  }
-}
-
-// --- Auction Data (data/auctions.json) ---
-function loadAuctionsData() {
-  try {
-    if (fs.existsSync(AUCTIONS_FILE)) {
-      const fileContent = fs.readFileSync(AUCTIONS_FILE, 'utf8').trim();
-      
-      // Check if file is empty or just whitespace
-      if (!fileContent || fileContent.length === 0) {
-        console.log('[AUCTIONS] auctions.json file is empty, starting fresh');
-        auctionsData = {};
-        // Save empty structure to fix the file
-        saveAuctionsData();
-        return;
-      }
-      
-      try {
-        auctionsData = JSON.parse(fileContent);
-        
-        // Validate that auctionsData is an object
-        if (typeof auctionsData !== 'object' || auctionsData === null || Array.isArray(auctionsData)) {
-          console.error('[AUCTIONS] Invalid auctions data structure, resetting');
-          auctionsData = {};
-          saveAuctionsData();
-          return;
-        }
-        
-        const totalAuctions = Object.values(auctionsData).reduce((sum, guildAuctions) => {
-          if (typeof guildAuctions === 'object' && guildAuctions !== null && !Array.isArray(guildAuctions)) {
-            return sum + Object.keys(guildAuctions).length;
-          }
-          return sum;
-        }, 0);
-        console.log(`[AUCTIONS] Loaded auctions data for ${Object.keys(auctionsData).length} servers, ${totalAuctions} total auctions`);
-        
-        // Log guild IDs and their auction counts for debugging
-        for (const guildId in auctionsData) {
-          const guildAuctions = auctionsData[guildId];
-          if (typeof guildAuctions === 'object' && guildAuctions !== null && !Array.isArray(guildAuctions)) {
-            const auctionCount = Object.keys(guildAuctions).length;
-            console.log(`[AUCTIONS] Guild ${guildId}: ${auctionCount} auctions`);
-            if (auctionCount > 0) {
-              console.log(`[AUCTIONS] Guild ${guildId} auction IDs:`, Object.keys(guildAuctions));
-            }
-          } else {
-            console.error(`[AUCTIONS] Invalid guild auctions structure for ${guildId}, resetting`);
-            auctionsData[guildId] = {};
-          }
-        }
-      } catch (parseError) {
-        console.error('[AUCTIONS] JSON parse error:', parseError.message);
-        console.error('[AUCTIONS] File content (first 500 chars):', fileContent.substring(0, 500));
-        
-        // Try to backup the corrupted file
-        try {
-          const backupFile = `${AUCTIONS_FILE}.backup.${Date.now()}`;
-          fs.writeFileSync(backupFile, fileContent);
-          console.log(`[AUCTIONS] Backed up corrupted file to ${backupFile}`);
-        } catch (backupError) {
-          console.error('[AUCTIONS] Failed to backup corrupted file:', backupError.message);
-        }
-        
-        // Reset to empty structure
-        auctionsData = {};
-        saveAuctionsData();
-      }
-    } else {
-      console.log('[AUCTIONS] No auctions file found, starting fresh');
-      auctionsData = {};
-    }
-  } catch (error) {
-    console.error('[AUCTIONS] Error loading auctions data:', error.message);
-    console.error('[AUCTIONS] Full error:', error);
-    auctionsData = {};
-    // Try to save empty structure to fix any file issues
-    try {
-      saveAuctionsData();
-    } catch (saveError) {
-      console.error('[AUCTIONS] Failed to save empty structure:', saveError.message);
-    }
-  }
-}
-
-function saveAuctionsData() {
-  try {
-    // Ensure data directory exists
-    const dataDir = 'data';
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    
-    // Validate auctionsData is an object, not an array
-    if (Array.isArray(auctionsData)) {
-      console.error('[AUCTIONS] CRITICAL: auctionsData is an array, resetting to object');
-      auctionsData = {};
-    }
-    
-    // Log what we're saving for debugging
-    const totalAuctions = Object.values(auctionsData).reduce((sum, guildAuctions) => {
-      if (typeof guildAuctions === 'object' && guildAuctions !== null && !Array.isArray(guildAuctions)) {
-        return sum + Object.keys(guildAuctions).length;
-      }
-      return sum;
-    }, 0);
-    console.log(`[AUCTIONS] Saving auctions data: ${Object.keys(auctionsData).length} guilds, ${totalAuctions} total auctions`);
-    
-    fs.writeFileSync(AUCTIONS_FILE, JSON.stringify(auctionsData, null, 2));
-    console.log(`[AUCTIONS] Successfully saved auctions data to ${AUCTIONS_FILE}`);
-  } catch (error) {
-    console.error('[AUCTIONS] Error saving auctions data:', error.message);
-    console.error('[AUCTIONS] Full error:', error);
-  }
-}
-
-function getAuctions(guildId) {
-  if (!auctionsData[guildId]) {
-    console.log(`[AUCTIONS] Creating new auctions object for guild ${guildId}`);
-    auctionsData[guildId] = {};
-    // Only save if this is intentional (not after a failed load)
-    // We'll save when an auction is actually created
-  }
-  const auctions = auctionsData[guildId];
-  console.log(`[AUCTIONS] getAuctions(${guildId}) returning ${Object.keys(auctions).length} auctions:`, Object.keys(auctions));
-  return auctions;
 }
 
 // Check if auction is expired
 function isAuctionExpired(auction) {
-  return Date.now() >= auction.endTime || auction.status !== 'active';
+  return Date.now() >= auction.endTime || auction.status !== 'ACTIVE';
 }
 
 // Update auction embed
 async function updateAuctionEmbed(guildId, auctionId) {
-  const auction = auctionsData[guildId]?.[auctionId];
+  const auction = await dbAuctions.getAuction(guildId, auctionId);
   if (!auction) return;
 
   try {
@@ -8615,12 +12784,11 @@ async function updateAuctionEmbed(guildId, auctionId) {
 
 // Process auction closure
 async function processAuctionClosure(guildId, auctionId) {
-  const auction = auctionsData[guildId]?.[auctionId];
+  const auction = await dbAuctions.getAuction(guildId, auctionId);
   if (!auction) return;
 
   // Mark as finished
-  auction.status = 'finished';
-  saveAuctionsData();
+  await dbAuctions.updateAuction(guildId, auctionId, { status: 'FINISHED' });
 
   // Update embed
   await updateAuctionEmbed(guildId, auctionId);
@@ -8640,8 +12808,12 @@ async function processAuctionClosure(guildId, auctionId) {
     }
 
     // Get winner's wallet
-    const userWallets = getUserWallets(guildId);
+    const userWallets = await getUserWallets(guildId);
     const winnerWallet = userWallets[auction.highestBidderId];
+
+    console.log(`[AUCTIONS] Winner ID: ${auction.highestBidderId}`);
+    console.log(`[AUCTIONS] Available wallets:`, Object.keys(userWallets));
+    console.log(`[AUCTIONS] Winner wallet:`, winnerWallet);
 
     if (!winnerWallet) {
       if (thread) {
@@ -8650,14 +12822,23 @@ async function processAuctionClosure(guildId, auctionId) {
       return;
     }
 
-    // Get user's balance before transfer
-    const balanceBefore = virtualAccounts.getUserBalance(guildId, auction.highestBidderId, auction.tokenTicker);
+    // Resolve token identifier (use stored identifier if available, otherwise resolve from ticker)
+    const tokenIdentifier = auction.tokenIdentifier || await resolveTokenIdentifier(guildId, auction.tokenTicker);
+    if (!tokenIdentifier) {
+      if (thread) {
+        await thread.send(`❌ **Error:** Could not resolve token identifier for auction. Please contact an administrator.`);
+      }
+      return;
+    }
 
-    // Deduct bid amount from virtual account
-    const deductionResult = virtualAccounts.deductFundsFromAccount(
+    // Get user's balance before transfer (using identifier)
+    const balanceBefore = await virtualAccounts.getUserBalance(guildId, auction.highestBidderId, tokenIdentifier);
+
+    // Deduct bid amount from virtual account (using identifier)
+    const deductionResult = await virtualAccounts.deductFundsFromAccount(
       guildId,
       auction.highestBidderId,
-      auction.tokenTicker,
+      tokenIdentifier,
       auction.currentBid,
       `Auction payment: ${auction.nftName}`,
       'auction'
@@ -8679,18 +12860,18 @@ async function processAuctionClosure(guildId, auctionId) {
       guildId
     );
 
-    const balanceAfter = virtualAccounts.getUserBalance(guildId, auction.highestBidderId, auction.tokenTicker);
+    const balanceAfter = await virtualAccounts.getUserBalance(guildId, auction.highestBidderId, tokenIdentifier);
 
     // Get message to reply to
     const message = await channel.messages.fetch(auction.messageId);
     if (!message) return;
 
     if (transferResult.success) {
-      // Track auction earnings for house balance
-      const storedDecimals = getStoredTokenDecimals(guildId, auction.tokenTicker);
+      // Track auction earnings for house balance (using identifier)
+      const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
       if (storedDecimals !== null) {
         const amountWei = toBlockchainAmount(auction.currentBid, storedDecimals);
-        trackAuctionEarnings(guildId, auctionId, amountWei, storedDecimals, auction.tokenTicker);
+        await trackAuctionEarnings(guildId, auctionId, amountWei, storedDecimals, tokenIdentifier);
       }
       
       const explorerUrl = transferResult.txHash
@@ -8724,11 +12905,11 @@ async function processAuctionClosure(guildId, auctionId) {
         await thread.send(`✅ **NFT successfully transferred to winner!** Check the main channel for details.`);
       }
     } else {
-      // Refund the deduction
+      // Refund the deduction (using identifier)
       virtualAccounts.addFundsToAccount(
         guildId,
         auction.highestBidderId,
-        auction.tokenTicker,
+        tokenIdentifier,
         auction.currentBid,
         null,
         'auction_refund',
@@ -8755,7 +12936,7 @@ async function processAuctionClosure(guildId, auctionId) {
       }
 
       auction.status = 'failed';
-      saveAuctionsData();
+      // Removed - using database
     }
   } catch (error) {
     console.error(`[AUCTIONS] Error processing closure for auction ${auctionId}:`, error.message);
@@ -8765,59 +12946,116 @@ async function processAuctionClosure(guildId, auctionId) {
 
 
 // Track house spending (when house pays prizes)
-function trackHouseSpending(guildId, amountWei, tokenTicker, reason = 'manual_payout', source = 'betting') {
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f")
+async function trackHouseSpending(guildId, amountWei, tokenIdentifier, reason = 'manual_payout', source = 'betting') {
   try {
-    initializeServerData(guildId);
-    const houseBalance = serverData[guildId].houseBalance;
-    
-    // Track spending by source
-    if (source === 'betting') {
-      // Track betting spending
-      if (!houseBalance.bettingSpending[tokenTicker]) {
-        houseBalance.bettingSpending[tokenTicker] = '0';
-      }
-      const currentBettingSpending = new BigNumber(houseBalance.bettingSpending[tokenTicker] || '0');
-      const newBettingSpending = currentBettingSpending.plus(new BigNumber(amountWei));
-      houseBalance.bettingSpending[tokenTicker] = newBettingSpending.toString();
-      
-      // Recalculate betting PNL
-      const bettingEarnings = new BigNumber(houseBalance.bettingEarnings[tokenTicker] || '0');
-      houseBalance.bettingPNL[tokenTicker] = bettingEarnings.minus(newBettingSpending).toString();
-    } else if (source === 'auction') {
-      // Track auction spending
-      if (!houseBalance.auctionSpending[tokenTicker]) {
-        houseBalance.auctionSpending[tokenTicker] = '0';
-      }
-      const currentAuctionSpending = new BigNumber(houseBalance.auctionSpending[tokenTicker] || '0');
-      const newAuctionSpending = currentAuctionSpending.plus(new BigNumber(amountWei));
-      houseBalance.auctionSpending[tokenTicker] = newAuctionSpending.toString();
-      
-      // Recalculate auction PNL
-      const auctionEarnings = new BigNumber(houseBalance.auctionEarnings[tokenTicker] || '0');
-      houseBalance.auctionPNL[tokenTicker] = auctionEarnings.minus(newAuctionSpending).toString();
+    // Validate token identifier format
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      console.error(`[HOUSE] Invalid token identifier format: ${tokenIdentifier}`);
+      return { success: false, error: `Invalid token identifier format: ${tokenIdentifier}` };
     }
     
-    // Save updated server data
-    saveServerData();
+    // Get token metadata for ticker display
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    const tokenTicker = tokenMetadata[tokenIdentifier]?.ticker || tokenIdentifier.split('-')[0];
+    
+    // Get current house balance from database (using identifier)
+    const currentBalance = await getHouseBalance(guildId, tokenIdentifier);
+    if (!currentBalance) {
+      // Initialize if doesn't exist
+      await dbServerData.updateHouseBalance(guildId, tokenIdentifier, {
+        bettingEarnings: {},
+        bettingSpending: {},
+        bettingPNL: {},
+        auctionEarnings: {},
+        auctionSpending: {},
+        auctionPNL: {},
+        lotteryEarnings: {},
+        lotterySpending: {},
+        lotteryPNL: {}
+      });
+    }
+    
+    const houseBalance = currentBalance || {
+      bettingEarnings: {},
+      bettingSpending: {},
+      bettingPNL: {},
+      auctionEarnings: {},
+      auctionSpending: {},
+      auctionPNL: {},
+      lotteryEarnings: {},
+      lotterySpending: {},
+      lotteryPNL: {}
+    };
+    
+    // Track spending by source (using identifier as key, not ticker)
+    if (source === 'betting') {
+      // Track betting spending
+      if (!houseBalance.bettingSpending[tokenIdentifier]) {
+        houseBalance.bettingSpending[tokenIdentifier] = '0';
+      }
+      const currentBettingSpending = new BigNumber(houseBalance.bettingSpending[tokenIdentifier] || '0');
+      const newBettingSpending = currentBettingSpending.plus(new BigNumber(amountWei));
+      houseBalance.bettingSpending[tokenIdentifier] = newBettingSpending.toString();
+      
+      // Recalculate betting PNL (using identifier as key)
+      const bettingEarnings = new BigNumber(houseBalance.bettingEarnings[tokenIdentifier] || '0');
+      houseBalance.bettingPNL[tokenIdentifier] = bettingEarnings.minus(newBettingSpending).toString();
+    } else if (source === 'auction') {
+      // Track auction spending
+      if (!houseBalance.auctionSpending[tokenIdentifier]) {
+        houseBalance.auctionSpending[tokenIdentifier] = '0';
+      }
+      const currentAuctionSpending = new BigNumber(houseBalance.auctionSpending[tokenIdentifier] || '0');
+      const newAuctionSpending = currentAuctionSpending.plus(new BigNumber(amountWei));
+      houseBalance.auctionSpending[tokenIdentifier] = newAuctionSpending.toString();
+      
+      // Recalculate auction PNL (using identifier as key)
+      const auctionEarnings = new BigNumber(houseBalance.auctionEarnings[tokenIdentifier] || '0');
+      houseBalance.auctionPNL[tokenIdentifier] = auctionEarnings.minus(newAuctionSpending).toString();
+    } else if (source === 'lottery') {
+      // Track lottery spending
+      if (!houseBalance.lotterySpending[tokenIdentifier]) {
+        houseBalance.lotterySpending[tokenIdentifier] = '0';
+      }
+      const currentLotterySpending = new BigNumber(houseBalance.lotterySpending[tokenIdentifier] || '0');
+      const newLotterySpending = currentLotterySpending.plus(new BigNumber(amountWei));
+      houseBalance.lotterySpending[tokenIdentifier] = newLotterySpending.toString();
+      
+      // Recalculate lottery PNL (using identifier as key)
+      const lotteryEarnings = new BigNumber(houseBalance.lotteryEarnings[tokenIdentifier] || '0');
+      houseBalance.lotteryPNL[tokenIdentifier] = lotteryEarnings.minus(newLotterySpending).toString();
+    }
+    
+    // Save to database (using identifier)
+    await dbServerData.updateHouseBalance(guildId, tokenIdentifier, houseBalance);
     
     // Log spending
-    const storedDecimals = getStoredTokenDecimals(guildId, tokenTicker);
+    const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
     const displayDecimals = storedDecimals !== null ? storedDecimals : 8;
     const humanAmount = new BigNumber(amountWei).dividedBy(new BigNumber(10).pow(displayDecimals)).toString();
-    const sourceName = source === 'auction' ? 'Auction' : 'Betting';
+    const sourceName = source === 'auction' ? 'Auction' : source === 'lottery' ? 'Lottery' : 'Betting';
     console.log(`[HOUSE] Tracked ${sourceName} spending: -${humanAmount} ${tokenTicker} (Reason: ${reason})`);
     
-    // Get current balance for return value
-    const currentBalance = source === 'auction' 
-      ? houseBalance.auctionPNL[tokenTicker] 
-      : houseBalance.bettingPNL[tokenTicker];
+    // Get current balance for return value (using identifier as key)
+    let currentBalanceValue;
+    let totalSpent;
+    if (source === 'auction') {
+      currentBalanceValue = houseBalance.auctionPNL[tokenIdentifier];
+      totalSpent = houseBalance.auctionSpending[tokenIdentifier] || '0';
+    } else if (source === 'lottery') {
+      currentBalanceValue = houseBalance.lotteryPNL[tokenIdentifier];
+      totalSpent = houseBalance.lotterySpending[tokenIdentifier] || '0';
+    } else {
+      currentBalanceValue = houseBalance.bettingPNL[tokenIdentifier];
+      totalSpent = houseBalance.bettingSpending[tokenIdentifier] || '0';
+    }
     
     return {
       success: true,
-      newBalance: currentBalance || '0',
-      totalSpent: source === 'auction' 
-        ? houseBalance.auctionSpending[tokenTicker] || '0'
-        : houseBalance.bettingSpending[tokenTicker] || '0'
+      newBalance: currentBalanceValue || '0',
+      totalSpent: totalSpent
     };
     
   } catch (error) {
@@ -8830,28 +13068,48 @@ function trackHouseSpending(guildId, amountWei, tokenTicker, reason = 'manual_pa
 }
 
 // Track house earnings when no winners (betting)
-function trackHouseEarnings(guildId, matchId, totalPotWei, tokenDecimals, tokenTicker) {
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f")
+async function trackHouseEarnings(guildId, matchId, totalPotWei, tokenDecimals, tokenIdentifier) {
   try {
-    initializeServerData(guildId);
-    const houseBalance = serverData[guildId].houseBalance;
-    
-    // Track betting earnings
-    if (!houseBalance.bettingEarnings[tokenTicker]) {
-      houseBalance.bettingEarnings[tokenTicker] = '0';
+    // Validate token identifier format
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      console.error(`[HOUSE] Invalid token identifier format: ${tokenIdentifier}`);
+      return;
     }
-    const currentBettingEarnings = new BigNumber(houseBalance.bettingEarnings[tokenTicker] || '0');
+    
+    // Get token metadata for ticker display
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    const tokenTicker = tokenMetadata[tokenIdentifier]?.ticker || tokenIdentifier.split('-')[0];
+    
+    // Get current house balance from database (using identifier)
+    const currentBalance = await getHouseBalance(guildId, tokenIdentifier);
+    const houseBalance = currentBalance || {
+      bettingEarnings: {},
+      bettingSpending: {},
+      bettingPNL: {},
+      auctionEarnings: {},
+      auctionSpending: {},
+      auctionPNL: {}
+    };
+    
+    // Track betting earnings (using identifier as key, not ticker)
+    if (!houseBalance.bettingEarnings[tokenIdentifier]) {
+      houseBalance.bettingEarnings[tokenIdentifier] = '0';
+    }
+    const currentBettingEarnings = new BigNumber(houseBalance.bettingEarnings[tokenIdentifier] || '0');
     const newBettingEarnings = currentBettingEarnings.plus(new BigNumber(totalPotWei));
-    houseBalance.bettingEarnings[tokenTicker] = newBettingEarnings.toString();
+    houseBalance.bettingEarnings[tokenIdentifier] = newBettingEarnings.toString();
     
-    // Recalculate betting PNL
-    const bettingSpending = new BigNumber(houseBalance.bettingSpending[tokenTicker] || '0');
-    houseBalance.bettingPNL[tokenTicker] = newBettingEarnings.minus(bettingSpending).toString();
+    // Recalculate betting PNL (using identifier as key)
+    const bettingSpending = new BigNumber(houseBalance.bettingSpending[tokenIdentifier] || '0');
+    houseBalance.bettingPNL[tokenIdentifier] = newBettingEarnings.minus(bettingSpending).toString();
     
-    // Save updated server data
-    saveServerData();
+    // Save to database (using identifier)
+    await dbServerData.updateHouseBalance(guildId, tokenIdentifier, houseBalance);
     
     // Log house earnings
-    const storedDecimals = getStoredTokenDecimals(guildId, tokenTicker);
+    const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
     const displayDecimals = storedDecimals !== null ? storedDecimals : tokenDecimals;
     const humanAmount = new BigNumber(totalPotWei).dividedBy(new BigNumber(10).pow(displayDecimals)).toString();
     console.log(`[HOUSE] Tracked betting earnings from match ${matchId}: +${humanAmount} ${tokenTicker} (Betting house balance)`);
@@ -8862,25 +13120,45 @@ function trackHouseEarnings(guildId, matchId, totalPotWei, tokenDecimals, tokenT
 }
 
 // Track auction earnings (when auction ends successfully)
-function trackAuctionEarnings(guildId, auctionId, amountWei, tokenDecimals, tokenTicker) {
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f")
+async function trackAuctionEarnings(guildId, auctionId, amountWei, tokenDecimals, tokenIdentifier) {
   try {
-    initializeServerData(guildId);
-    const houseBalance = serverData[guildId].houseBalance;
-    
-    // Track auction earnings
-    if (!houseBalance.auctionEarnings[tokenTicker]) {
-      houseBalance.auctionEarnings[tokenTicker] = '0';
+    // Validate token identifier format
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      console.error(`[HOUSE] Invalid token identifier format: ${tokenIdentifier}`);
+      return;
     }
-    const currentAuctionEarnings = new BigNumber(houseBalance.auctionEarnings[tokenTicker] || '0');
+    
+    // Get token metadata for ticker display
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    const tokenTicker = tokenMetadata[tokenIdentifier]?.ticker || tokenIdentifier.split('-')[0];
+    
+    // Get current house balance from database (using identifier)
+    const currentBalance = await getHouseBalance(guildId, tokenIdentifier);
+    const houseBalance = currentBalance || {
+      bettingEarnings: {},
+      bettingSpending: {},
+      bettingPNL: {},
+      auctionEarnings: {},
+      auctionSpending: {},
+      auctionPNL: {}
+    };
+    
+    // Track auction earnings (using identifier as key, not ticker)
+    if (!houseBalance.auctionEarnings[tokenIdentifier]) {
+      houseBalance.auctionEarnings[tokenIdentifier] = '0';
+    }
+    const currentAuctionEarnings = new BigNumber(houseBalance.auctionEarnings[tokenIdentifier] || '0');
     const newAuctionEarnings = currentAuctionEarnings.plus(new BigNumber(amountWei));
-    houseBalance.auctionEarnings[tokenTicker] = newAuctionEarnings.toString();
+    houseBalance.auctionEarnings[tokenIdentifier] = newAuctionEarnings.toString();
     
-    // Recalculate auction PNL
-    const auctionSpending = new BigNumber(houseBalance.auctionSpending[tokenTicker] || '0');
-    houseBalance.auctionPNL[tokenTicker] = newAuctionEarnings.minus(auctionSpending).toString();
+    // Recalculate auction PNL (using identifier as key)
+    const auctionSpending = new BigNumber(houseBalance.auctionSpending[tokenIdentifier] || '0');
+    houseBalance.auctionPNL[tokenIdentifier] = newAuctionEarnings.minus(auctionSpending).toString();
     
-    // Save updated server data
-    saveServerData();
+    // Save to database (using identifier)
+    await dbServerData.updateHouseBalance(guildId, tokenIdentifier, houseBalance);
     
     // Log auction earnings
     const humanAmount = new BigNumber(amountWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
@@ -8892,53 +13170,51 @@ function trackAuctionEarnings(guildId, auctionId, amountWei, tokenDecimals, toke
 }
 
 // Track bet amount when user places a bet
-function trackBetAmount(guildId, userId, betAmountWei, tokenTicker) {
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f")
+// tokenTicker: Token ticker for display/logging (e.g., "USDC")
+async function trackBetAmount(guildId, userId, betAmountWei, tokenIdentifier, tokenTicker) {
   try {
-    if (!footballLeaderboardData[guildId]) {
-      footballLeaderboardData[guildId] = {};
+    // Validate token identifier format
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      console.error(`[FOOTBALL] Invalid token identifier format: ${tokenIdentifier}`);
+      return;
     }
     
-    if (!footballLeaderboardData[guildId][userId]) {
-      footballLeaderboardData[guildId][userId] = {
-        points: 0,
-        wins: 0,
-        totalEarningsWei: '0',
-        totalBetsWei: '0',
-        pnlWei: '0',
-        lastWinISO: null,
-        tokenEarnings: {},
-        tokenBets: {},
-        tokenPNL: {}
-      };
-    }
+    // Get current user stats
+    const currentStats = await dbLeaderboard.getUserStats(guildId, userId);
     
-    const userData = footballLeaderboardData[guildId][userId];
-    
-    // Track total bet amount
-    const currentTotalBets = new BigNumber(userData.totalBetsWei || '0');
+    const currentTotalBets = new BigNumber(currentStats?.totalBetsWei || '0');
     const newTotalBets = currentTotalBets.plus(new BigNumber(betAmountWei));
-    userData.totalBetsWei = newTotalBets.toString();
     
-    // Track bet amount per token
-    if (!userData.tokenBets[tokenTicker]) {
-      userData.tokenBets[tokenTicker] = '0';
+    // Use identifier as key for tokenBets (for consistency with virtual accounts)
+    const tokenBets = currentStats?.tokenBets || {};
+    if (!tokenBets[tokenIdentifier]) {
+      tokenBets[tokenIdentifier] = '0';
     }
-    const currentTokenBets = new BigNumber(userData.tokenBets[tokenTicker] || '0');
+    const currentTokenBets = new BigNumber(tokenBets[tokenIdentifier] || '0');
     const newTokenBets = currentTokenBets.plus(new BigNumber(betAmountWei));
-    userData.tokenBets[tokenTicker] = newTokenBets.toString();
+    tokenBets[tokenIdentifier] = newTokenBets.toString();
     
-    // Calculate PNL for this token (earnings - bets)
-    const totalTokenEarnings = new BigNumber(userData.tokenEarnings[tokenTicker] || '0');
-    userData.tokenPNL[tokenTicker] = totalTokenEarnings.minus(newTokenBets).toString();
+    // Calculate PNL for this token (earnings - bets) - using identifier as key
+    const tokenEarnings = currentStats?.tokenEarnings || {};
+    const totalTokenEarnings = new BigNumber(tokenEarnings[tokenIdentifier] || '0');
+    const tokenPNL = currentStats?.tokenPNL || {};
+    tokenPNL[tokenIdentifier] = totalTokenEarnings.minus(newTokenBets).toString();
     
     // Calculate total PNL
-    const totalEarnings = new BigNumber(userData.totalEarningsWei || '0');
-    userData.pnlWei = totalEarnings.minus(newTotalBets).toString();
+    const totalEarnings = new BigNumber(currentStats?.totalEarningsWei || '0');
+    const pnlWei = totalEarnings.minus(newTotalBets).toString();
     
-    // Save updated leaderboard
-    saveLeaderboardData();
+    // Update leaderboard entry
+    await dbLeaderboard.updateLeaderboardEntry(guildId, userId, {
+      totalBetsWei: newTotalBets.toString(),
+      tokenBets: tokenBets,
+      tokenPNL: tokenPNL,
+      pnlWei: pnlWei
+    });
     
-    console.log(`[FOOTBALL] Tracked bet for user ${userId}: ${betAmountWei} wei of ${tokenTicker}`);
+    console.log(`[FOOTBALL] Tracked bet for user ${userId}: ${betAmountWei} wei of ${tokenTicker} (${tokenIdentifier})`);
     
   } catch (error) {
     console.error(`[FOOTBALL] Error tracking bet amount for user ${userId}:`, error.message);
@@ -8946,60 +13222,57 @@ function trackBetAmount(guildId, userId, betAmountWei, tokenTicker) {
 }
 
 // Update leaderboard when a user wins a match
-function updateLeaderboard(guildId, userId, prizeAmountWei, tokenDecimals, tokenTicker = 'REWARD-cf6eac') {
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f")
+// tokenTicker: Token ticker for display/logging (e.g., "USDC")
+async function updateLeaderboard(guildId, userId, prizeAmountWei, tokenDecimals, tokenIdentifier, tokenTicker) {
   try {
-    if (!footballLeaderboardData[guildId]) {
-      footballLeaderboardData[guildId] = {};
+    // Validate token identifier format
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      console.error(`[FOOTBALL] Invalid token identifier format: ${tokenIdentifier}`);
+      return;
     }
     
-    if (!footballLeaderboardData[guildId][userId]) {
-      footballLeaderboardData[guildId][userId] = {
-        points: 0,
-        wins: 0,
-        totalEarningsWei: '0',
-        totalBetsWei: '0', // NEW: Track total bet amounts
-        pnlWei: '0', // NEW: Track profit/loss
-        lastWinISO: null,
-        tokenEarnings: {}, // Store earnings per token
-        tokenBets: {}, // NEW: Store bet amounts per token
-        tokenPNL: {} // NEW: Store PNL per token
-      };
-    }
+    // Get current user stats
+    const currentStats = await dbLeaderboard.getUserStats(guildId, userId);
     
-    const userData = footballLeaderboardData[guildId][userId];
-    
-    // Add points (3 points per win)
-    userData.points += 3;
-    
-    // Increment wins
-    userData.wins += 1;
-    
-    // Add to total earnings (in wei) - keep for backward compatibility
-    const currentEarnings = new BigNumber(userData.totalEarningsWei || '0');
+    const currentPoints = currentStats?.points || 0;
+    const currentWins = currentStats?.wins || 0;
+    const currentEarnings = new BigNumber(currentStats?.totalEarningsWei || '0');
     const newEarnings = currentEarnings.plus(new BigNumber(prizeAmountWei));
-    userData.totalEarningsWei = newEarnings.toString();
     
-    // Add to token-specific earnings
-    if (!userData.tokenEarnings[tokenTicker]) {
-      userData.tokenEarnings[tokenTicker] = '0';
+    // Use identifier as key for tokenEarnings (for consistency with virtual accounts)
+    const tokenEarnings = currentStats?.tokenEarnings || {};
+    if (!tokenEarnings[tokenIdentifier]) {
+      tokenEarnings[tokenIdentifier] = '0';
     }
-    const currentTokenEarnings = new BigNumber(userData.tokenEarnings[tokenTicker] || '0');
+    const currentTokenEarnings = new BigNumber(tokenEarnings[tokenIdentifier] || '0');
     const newTokenEarnings = currentTokenEarnings.plus(new BigNumber(prizeAmountWei));
-    userData.tokenEarnings[tokenTicker] = newTokenEarnings.toString();
+    tokenEarnings[tokenIdentifier] = newTokenEarnings.toString();
     
-    // NEW: Calculate PNL for this token
-    const totalTokenEarnings = new BigNumber(userData.tokenEarnings[tokenTicker] || '0');
-    const totalTokenBets = new BigNumber(userData.tokenBets[tokenTicker] || '0');
-    userData.tokenPNL[tokenTicker] = totalTokenEarnings.minus(totalTokenBets).toString();
+    // Calculate PNL for this token (using identifier as key)
+    const tokenBets = currentStats?.tokenBets || {};
+    const totalTokenBets = new BigNumber(tokenBets[tokenIdentifier] || '0');
+    const tokenPNL = currentStats?.tokenPNL || {};
+    tokenPNL[tokenIdentifier] = newTokenEarnings.minus(totalTokenBets).toString();
     
-    // Update last win timestamp
-    userData.lastWinISO = new Date().toISOString();
+    // Calculate total PNL
+    const totalBets = new BigNumber(currentStats?.totalBetsWei || '0');
+    const pnlWei = newEarnings.minus(totalBets).toString();
     
-    // Save updated leaderboard
-    saveLeaderboardData();
+    // Update leaderboard entry
+    await dbLeaderboard.updateLeaderboardEntry(guildId, userId, {
+      points: currentPoints + 3,
+      wins: currentWins + 1,
+      totalEarningsWei: newEarnings.toString(),
+      tokenEarnings: tokenEarnings,
+      tokenPNL: tokenPNL,
+      pnlWei: pnlWei,
+      lastWinISO: new Date().toISOString()
+    });
     
     // Get stored decimals for accurate logging
-    const storedDecimals = getStoredTokenDecimals(guildId, tokenTicker);
+    const storedDecimals = await getStoredTokenDecimals(guildId, tokenTicker);
     const displayDecimals = storedDecimals !== null ? storedDecimals : tokenDecimals;
     console.log(`[FOOTBALL] Updated leaderboard for user ${userId}: +3 points, +1 win, +${new BigNumber(prizeAmountWei).dividedBy(new BigNumber(10).pow(displayDecimals)).toString()} ${tokenTicker}`);
     
@@ -9008,50 +13281,61 @@ function updateLeaderboard(guildId, userId, prizeAmountWei, tokenDecimals, token
   }
 }
 
-function initializeFootballData(guildId) {
-  // Initialize bets and leaderboard data for this guild
-  if (!footballBetsData[guildId]) {
-    footballBetsData[guildId] = {};
-    saveFootballBetsData();
-  }
-  if (!footballLeaderboardData[guildId]) {
-    footballLeaderboardData[guildId] = {};
-    saveLeaderboardData();
-  }
-  // Note: footballMatchesData is now flat structure, no guild-specific initialization needed
-}
+// All football data is stored in Supabase database
+// Use dbFootball module directly
 
 // Get guild-specific stake amount for a match
-// Supports both old format (global requiredAmountWei) and new format (per-guild stakes)
+// Token and stake are ONLY stored in match_guilds (per-guild)
 function getMatchStakeForGuild(match, guildId) {
-  // New format: per-guild stakes stored in requiredAmountWeiPerGuild
-  if (match.requiredAmountWeiPerGuild && match.requiredAmountWeiPerGuild[guildId]) {
-    return match.requiredAmountWeiPerGuild[guildId];
+  // Per-guild stakes stored in requiredAmountWeiByGuild (REQUIRED)
+  if (match.requiredAmountWeiByGuild && match.requiredAmountWeiByGuild[guildId]) {
+    return match.requiredAmountWeiByGuild[guildId];
   }
   
-  // Old format: global requiredAmountWei (backward compatibility)
+  // Fallback for getMatchesByGuild (which sets match.requiredAmountWei directly)
   if (match.requiredAmountWei) {
     return match.requiredAmountWei;
   }
   
-  // Fallback: return 0 if no stake found
-  console.warn(`[FOOTBALL] No stake found for match ${match.matchId} in guild ${guildId}`);
+  // No stake found - this should not happen
+  console.error(`[FOOTBALL] No stake found for match ${match.matchId} in guild ${guildId}`);
   return '0';
 }
 
+// Get guild-specific token configuration for a match
+// Token and stake are ONLY stored in match_guilds (per-guild)
+function getMatchTokenForGuild(match, guildId) {
+  // Per-guild token stored in tokenByGuild (REQUIRED)
+  if (match.tokenByGuild && match.tokenByGuild[guildId]) {
+    return match.tokenByGuild[guildId];
+  }
+  
+  // Fallback for getMatchesByGuild (which sets match.token directly)
+  if (match.token) {
+    return match.token;
+  }
+  
+  // No token found - this should not happen
+  console.error(`[FOOTBALL] No token found for match ${match.matchId} in guild ${guildId}`);
+  return null;
+}
+
 // Calculate current pot size for a football match
-function calculateMatchPotSize(guildId, matchId) {
+async function calculateMatchPotSize(guildId, matchId) {
   try {
-    const allBets = Object.values(footballBetsData[guildId] || {});
-    const matchBets = allBets.filter(bet => bet.matchId === matchId);
+    const matchBets = await dbFootball.getBetsByMatch(guildId, matchId);
+    const allBets = Object.values(matchBets || {});
     
-    const totalPotWei = matchBets.reduce((total, bet) => total + Number(bet.amountWei), 0);
+    const totalPotWei = allBets.reduce((total, bet) => total + Number(bet.amountWei || 0), 0);
     
-    // Get match data to access token decimals
-    const match = footballMatchesData[matchId];
-    if (!match || !match.guildIds.includes(guildId)) return { totalPotWei: 0, totalPotHuman: '0' };
+    // Get match data to access token decimals (guild-specific)
+    const match = await dbFootball.getMatch(matchId);
+    if (!match || !match.guildIds || !match.guildIds.includes(guildId)) return { totalPotWei: 0, totalPotHuman: '0' };
     
-    const totalPotHuman = new BigNumber(totalPotWei).dividedBy(new BigNumber(10).pow(match.token.decimals)).toString();
+    const token = getMatchTokenForGuild(match, guildId);
+    if (!token) return { totalPotWei: 0, totalPotHuman: '0' };
+    
+    const totalPotHuman = new BigNumber(totalPotWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
     
     return {
       totalPotWei: totalPotWei,
@@ -9064,26 +13348,36 @@ function calculateMatchPotSize(guildId, matchId) {
 }
 
 // Refresh all match pot sizes on bot startup
-function refreshAllMatchPotSizes() {
+async function refreshAllMatchPotSizes() {
   try {
     console.log('[FOOTBALL] Refreshing all match pot sizes...');
     let totalMatches = 0;
     let updatedMatches = 0;
     
-    for (const matchId in footballMatchesData) {
-      const match = footballMatchesData[matchId];
-        totalMatches++;
+    // Get all scheduled matches from database
+    const scheduledMatches = await dbFootball.getScheduledMatches();
+    totalMatches = scheduledMatches.length;
+    
+    for (const match of scheduledMatches) {
+      const matchId = match.matchId;
         
       if (match.status === 'SCHEDULED' || match.status === 'TIMED') {
-          try {
-          // Calculate pot size for each guild that has this match
-          for (const guildId of match.guildIds) {
-            const potSize = calculateMatchPotSize(guildId, matchId);
-            console.log(`[FOOTBALL] Match ${matchId} (${guildId}) pot size: ${potSize.totalPotHuman} ${match.token.ticker}`);
+        try {
+          // Get full match data with guildIds
+          const fullMatch = await dbFootball.getMatch(matchId);
+          if (fullMatch && fullMatch.guildIds) {
+            // Calculate pot size for each guild that has this match
+            for (const guildId of fullMatch.guildIds) {
+              const potSize = await calculateMatchPotSize(guildId, matchId);
+              const token = getMatchTokenForGuild(fullMatch, guildId);
+              if (token) {
+                console.log(`[FOOTBALL] Match ${matchId} (${guildId}) pot size: ${potSize.totalPotHuman} ${token.ticker}`);
+              }
+            }
           }
           updatedMatches++;
-          } catch (error) {
-            console.error(`[FOOTBALL] Error calculating pot size for match ${matchId}:`, error.message);
+        } catch (error) {
+          console.error(`[FOOTBALL] Error calculating pot size for match ${matchId}:`, error.message);
         }
       }
     }
@@ -9123,8 +13417,9 @@ async function checkAndUpdateMatchResults() {
     let totalMatches = 0;
     let updatedMatches = 0;
     
-    // Get all unfinished matches
-    const unfinishedMatches = Object.values(footballMatchesData).filter(match => 
+    // Get all unfinished matches from database
+    const scheduledMatches = await dbFootball.getScheduledMatches();
+    const unfinishedMatches = scheduledMatches.filter(match => 
       match.status !== 'FINISHED' && match.compCode
     );
     
@@ -9214,25 +13509,33 @@ async function checkAndUpdateMatchResults() {
           // Store old status before updating
           const oldStatus = match.status;
           
-          // Update match data
-          match.status = newStatus;
+          // Update match data in database
+          await dbFootball.updateMatch(match.matchId, {
+            status: newStatus,
+            ftScore: newScore && newScore.home !== undefined && newScore.away !== undefined 
+              ? { home: newScore.home, away: newScore.away } 
+              : undefined
+          });
           
-          if (newScore && newScore.home !== undefined && newScore.away !== undefined) {
-            match.ftScore = { home: newScore.home, away: newScore.away };
+          // Get full match data with guild relationships
+          const fullMatch = await dbFootball.getMatch(match.matchId);
+          if (!fullMatch || !fullMatch.guildIds || fullMatch.guildIds.length === 0) {
+            console.log(`[FOOTBALL] ⚠️ Match ${match.matchId} has no guild relationships, skipping embed/prize updates`);
+            continue;
           }
           
           // Update embeds if there was a status change OR score change
           if (oldStatus !== newStatus || scoreChanged) {
-            console.log(`[FOOTBALL] ${oldStatus !== newStatus ? 'Status' : 'Score'} changed, updating embeds...`);
-            for (const guildId of match.guildIds) {
+            console.log(`[FOOTBALL] ${oldStatus !== newStatus ? 'Status' : 'Score'} changed, updating embeds for ${fullMatch.guildIds.length} guild(s)...`);
+            for (const guildId of fullMatch.guildIds) {
               await updateMatchEmbed(guildId, match.matchId);
             }
           }
           
           // If match is finished, process prizes for all guilds
           if (newStatus === 'FINISHED') {
-            console.log(`[FOOTBALL] 🏁 Match ${match.matchId} finished! Processing prizes...`);
-            for (const guildId of match.guildIds) {
+            console.log(`[FOOTBALL] 🏁 Match ${match.matchId} finished! Processing prizes for ${fullMatch.guildIds.length} guild(s)...`);
+            for (const guildId of fullMatch.guildIds) {
               await processMatchPrizes(guildId, match.matchId);
             }
           }
@@ -9249,7 +13552,7 @@ async function checkAndUpdateMatchResults() {
     }
     
     if (updatedMatches > 0) {
-      saveFootballMatchesData();
+      // Removed - using database
       console.log(`[FOOTBALL] Updated ${updatedMatches} finished matches`);
     }
     
@@ -9268,9 +13571,9 @@ async function checkAndUpdateMatchResults() {
 async function updateMatchEmbed(guildId, matchId) {
   try {
     console.log(`[FOOTBALL] Updating embed for match ${matchId} in guild ${guildId}`);
-    const match = footballMatchesData[matchId];
+    const match = await dbFootball.getMatch(matchId);
     if (!match) {
-      console.log(`[FOOTBALL] Match ${matchId} not found in footballMatchesData`);
+      console.log(`[FOOTBALL] Match ${matchId} not found in database`);
       return;
     }
     if (!match.embeds[guildId]) {
@@ -9310,7 +13613,7 @@ async function updateMatchEmbed(guildId, matchId) {
     if (!message) return;
     
     // Calculate final pot size
-    const potSize = calculateMatchPotSize(guildId, matchId);
+    const potSize = await calculateMatchPotSize(guildId, matchId);
     
     // Create updated embed based on match status
     let title, statusText, color, footerText;
@@ -9347,14 +13650,21 @@ async function updateMatchEmbed(guildId, matchId) {
       footerText = 'Click Bet below to place your bet!';
     }
     
+    // Get guild-specific token configuration
+    const token = getMatchTokenForGuild(match, guildId);
+    if (!token) {
+      console.error(`[FOOTBALL] No token configuration found for match ${matchId} in guild ${guildId}`);
+      return;
+    }
+    
     // Create fields array
     const stakeAmountWei = getMatchStakeForGuild(match, guildId);
-    const stakeAmountHuman = new BigNumber(stakeAmountWei).dividedBy(new BigNumber(10).pow(match.token.decimals)).toString();
+    const stakeAmountHuman = new BigNumber(stakeAmountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
     const fields = [
         { name: '🏆 Competition', value: match.compName, inline: true },
         { name: '🎮 Game ID', value: matchId, inline: true },
-        { name: '💰 Stake', value: `${stakeAmountHuman} ${match.token.ticker}`, inline: true },
-      { name: '🏆 Pot Size', value: `${potSize.totalPotHuman} ${match.token.ticker}`, inline: true },
+        { name: '💰 Stake', value: `${stakeAmountHuman} ${token.ticker}`, inline: true },
+      { name: '🏆 Pot Size', value: `${potSize.totalPotHuman} ${token.ticker}`, inline: true },
         { name: '📊 Score', value: `${match.ftScore.home} - ${match.ftScore.away}`, inline: true },
       { name: '⏰ Status', value: statusText, inline: true }
     ];
@@ -9405,11 +13715,11 @@ async function updateMatchEmbed(guildId, matchId) {
 // Process prizes for a finished match
 async function processMatchPrizes(guildId, matchId) {
   try {
-    const match = footballMatchesData[matchId];
-    if (!match || !match.guildIds.includes(guildId)) return;
+    const match = await dbFootball.getMatch(matchId);
+    if (!match || !match.guildIds || !match.guildIds.includes(guildId)) return;
     
-    const guildBets = footballBetsData[guildId] || {};
-    const matchBets = Object.values(guildBets).filter(bet => bet.matchId === matchId);
+    const matchBetsObj = await dbFootball.getBetsByMatch(guildId, matchId);
+    const matchBets = Object.values(matchBetsObj || {});
     
     if (matchBets.length === 0) {
       console.log(`[FOOTBALL] No bets found for match ${matchId}, skipping prize distribution`);
@@ -9449,7 +13759,7 @@ async function processMatchPrizes(guildId, matchId) {
       // Update stored score if we got it from API
       if (!match.ftScore || match.ftScore.home === undefined) {
         match.ftScore = { home: homeScore, away: awayScore };
-        saveFootballMatchesData();
+        // Removed - using database
       }
     } else {
       console.log(`[FOOTBALL] No valid score data for match ${matchId}`);
@@ -9470,66 +13780,67 @@ async function processMatchPrizes(guildId, matchId) {
       return;
     }
     
+    // Get guild-specific token configuration
+    const token = getMatchTokenForGuild(match, guildId);
+    if (!token) {
+      console.error(`[FOOTBALL] No token configuration found for match ${matchId} in guild ${guildId}`);
+      return;
+    }
+    
     // Step 4: Calculate prize distribution (use all winners for fair pot distribution)
     const totalPotWei = matchBets.reduce((total, bet) => total + Number(bet.amountWei), 0);
-    const totalPotHuman = new BigNumber(totalPotWei).dividedBy(new BigNumber(10).pow(match.token.decimals)).toString();
+    const totalPotHuman = new BigNumber(totalPotWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
     
     if (allWinners.length === 0) {
       console.log(`[FOOTBALL] No winners for match ${matchId}, all bets lose`);
       
-      // Track house earnings when no winners (only if not already tracked)
-      const hasNoWinnersBeenProcessed = matchBets.every(bet => !bet.prizeSent);
-      if (hasNoWinnersBeenProcessed) {
-        trackHouseEarnings(guildId, matchId, totalPotWei, match.token.decimals, match.token.ticker);
+      // Track house earnings when no winners (only if not already tracked for this guild)
+      const houseEarningsTracked = match.houseEarningsTrackedByGuild?.[guildId] || false;
+      if (!houseEarningsTracked) {
+        await trackHouseEarnings(guildId, matchId, totalPotWei, token.decimals, token.identifier);
+        await dbFootball.updateMatchGuildHouseEarnings(matchId, guildId, true);
         await sendNoWinnersNotification(guildId, matchId, losers, winningOutcome, totalPotHuman);
+      } else {
+        console.log(`[FOOTBALL] House earnings already tracked for match ${matchId} in guild ${guildId}, skipping`);
       }
       return;
     }
     
     // Winners split the pot equally (use allWinners for fair distribution, but only process unprocessed ones)
     const prizePerWinnerWei = Math.floor(totalPotWei / allWinners.length);
-    const prizePerWinnerHuman = new BigNumber(prizePerWinnerWei).dividedBy(new BigNumber(10).pow(match.token.decimals)).toString();
+    const prizePerWinnerHuman = new BigNumber(prizePerWinnerWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
     
-    console.log(`[FOOTBALL] Match ${matchId} total pot: ${totalPotHuman} ${match.token.ticker}`);
-    console.log(`[FOOTBALL] Prize per winner: ${prizePerWinnerHuman} ${match.token.ticker}`);
+    console.log(`[FOOTBALL] Match ${matchId} total pot: ${totalPotHuman} ${token.ticker}`);
+    console.log(`[FOOTBALL] Prize per winner: ${prizePerWinnerHuman} ${token.ticker}`);
     
     // Step 5: Distribute prizes to winners using virtual accounts (only unprocessed ones)
     console.log(`[FOOTBALL] Distributing prizes to virtual accounts for ${winners.length} unprocessed winners`);
     
     for (const winner of winners) {
       try {
-        // Double-check that this bet hasn't been processed (race condition protection)
-        const currentBet = footballBetsData[guildId]?.[winner.betId];
-        if (currentBet && currentBet.prizeSent === true && currentBet.prizeAmount) {
-          console.log(`[FOOTBALL] Bet ${winner.betId} already processed, skipping`);
-          continue;
-        }
+        // Note: Prize tracking is now handled by the database
+        // Race condition protection is handled by database transactions
         
-        console.log(`[FOOTBALL] Adding ${prizePerWinnerHuman} ${match.token.ticker} to virtual account for winner ${winner.userId}`);
+        console.log(`[FOOTBALL] Adding ${prizePerWinnerHuman} ${token.ticker} to virtual account for winner ${winner.userId}`);
         
-        // Add prize to winner's virtual account
-        const prizeResult = virtualAccounts.addFundsToAccount(
+        // Add prize to winner's virtual account (using identifier)
+        const prizeResult = await virtualAccounts.addFundsToAccount(
           guildId,
           winner.userId,
-          match.token.ticker,
+          token.identifier,
           prizePerWinnerHuman,
           null, // No transaction hash for virtual prize
           'football_prize'
         );
         
         if (prizeResult.success) {
-          console.log(`[FOOTBALL] Successfully added prize to virtual account for ${winner.userId}: ${prizeResult.newBalance} ${match.token.ticker}`);
+          console.log(`[FOOTBALL] Successfully added prize to virtual account for ${winner.userId}: ${prizeResult.newBalance} ${token.ticker}`);
           
-          // Update bet status to indicate prize sent
-          if (!footballBetsData[guildId]) footballBetsData[guildId] = {};
-          if (!footballBetsData[guildId][winner.betId]) footballBetsData[guildId][winner.betId] = {};
-          footballBetsData[guildId][winner.betId].prizeSent = true;
-          footballBetsData[guildId][winner.betId].prizeAmount = prizePerWinnerHuman;
-          footballBetsData[guildId][winner.betId].prizeTxHash = 'VIRTUAL_PRIZE'; // Mark as virtual prize
-          saveFootballBetsData();
+          // Update bet record to mark prize as sent
+          await dbFootball.updateBetPrize(winner.betId, guildId, prizePerWinnerHuman);
           
-          // Update leaderboard for this winner (only if not already counted)
-          updateLeaderboard(guildId, winner.userId, prizePerWinnerWei, match.token.decimals, match.token.ticker);
+          // Update leaderboard for this winner (only if not already counted) - using identifier
+          await updateLeaderboard(guildId, winner.userId, prizePerWinnerWei, token.decimals, token.identifier, token.ticker);
           
         } else {
           console.error(`[FOOTBALL] Failed to add prize to virtual account for ${winner.userId}: ${prizeResult.error}`);
@@ -9553,9 +13864,16 @@ async function processMatchPrizes(guildId, matchId) {
 // Send winner notification to match thread
 async function sendWinnerNotification(guildId, matchId, winners, losers, winningOutcome, totalPotHuman, prizePerWinnerHuman) {
   try {
-    const match = footballMatchesData[matchId];
-    if (!match || !match.guildIds.includes(guildId) || !match.embeds[guildId]?.threadId) {
+    const match = await dbFootball.getMatch(matchId);
+    if (!match || !match.guildIds || !match.guildIds.includes(guildId) || !match.embeds[guildId]?.threadId) {
       console.log(`[FOOTBALL] No thread found for match ${matchId}, cannot send winner notification`);
+      return;
+    }
+    
+    // Get guild-specific token configuration
+    const token = getMatchTokenForGuild(match, guildId);
+    if (!token) {
+      console.error(`[FOOTBALL] No token configuration found for match ${matchId} in guild ${guildId}`);
       return;
     }
     
@@ -9573,17 +13891,14 @@ async function sendWinnerNotification(guildId, matchId, winners, losers, winning
       return;
     }
     
-    // Get winner details with transaction hashes
+    // Get winner details - prizes are tracked via virtual account transactions
     const winnerDetails = winners.map(winner => {
-      const bet = Object.values(footballBetsData[guildId] || {}).find(b => b.betId === winner.betId);
-      // prizeAmount is already stored in human-readable format, no need to divide by decimals again
-      const prizeAmount = bet?.prizeAmount || prizePerWinnerHuman;
-      const txHash = bet?.prizeTxHash || 'Processing...';
-      
+      // Prize amount is already calculated, use it directly
+      // Transaction hash is tracked in virtual account transaction history
       return {
         userId: winner.userId,
-        amount: prizeAmount,
-        txHash: txHash
+        amount: prizePerWinnerHuman,
+        txHash: 'VIRTUAL_PRIZE' // Virtual prizes don't have blockchain tx hashes
       };
     });
     
@@ -9594,9 +13909,9 @@ async function sendWinnerNotification(guildId, matchId, winners, losers, winning
       .addFields([
         { name: '📊 Final Score', value: `${match.ftScore.home} - ${match.ftScore.away}`, inline: true },
         { name: '🎯 Winning Outcome', value: winningOutcome, inline: true },
-        { name: '💰 Total Pot', value: `${totalPotHuman} ${match.token.ticker}`, inline: true },
+        { name: '💰 Total Pot', value: `${totalPotHuman} ${token.ticker}`, inline: true },
         { name: '🏆 Winners', value: `${winners.length} player(s)`, inline: true },
-        { name: '💎 Prize per Winner', value: `${prizePerWinnerHuman} ${match.token.ticker}`, inline: true },
+        { name: '💎 Prize per Winner', value: `${prizePerWinnerHuman} ${token.ticker}`, inline: true },
         { name: '❌ Losers', value: `${losers.length} player(s)`, inline: true }
       ])
       .setColor('#00FF00')
@@ -9619,7 +13934,7 @@ async function sendWinnerNotification(guildId, matchId, winners, losers, winning
         
         winnerListEmbed.addFields({
           name: `🏆 ${username}`,
-          value: `**Prize:** ${winner.amount} ${match.token.ticker}\n**Status:** Added to virtual account`,
+          value: `**Prize:** ${winner.amount} ${token.ticker}\n**Status:** Added to virtual account`,
           inline: false
         });
       }
@@ -9648,9 +13963,16 @@ async function sendWinnerNotification(guildId, matchId, winners, losers, winning
 // Send notification when no one wins (all bets lose)
 async function sendNoWinnersNotification(guildId, matchId, losers, winningOutcome, totalPotHuman) {
   try {
-    const match = footballMatchesData[matchId];
-    if (!match || !match.guildIds.includes(guildId) || !match.embeds[guildId]?.threadId) {
+    const match = await dbFootball.getMatch(matchId);
+    if (!match || !match.guildIds || !match.guildIds.includes(guildId) || !match.embeds[guildId]?.threadId) {
       console.log(`[FOOTBALL] No thread found for match ${matchId}, cannot send no-winners notification`);
+      return;
+    }
+    
+    // Get guild-specific token configuration
+    const token = getMatchTokenForGuild(match, guildId);
+    if (!token) {
+      console.error(`[FOOTBALL] No token configuration found for match ${matchId} in guild ${guildId}`);
       return;
     }
     
@@ -9675,7 +13997,7 @@ async function sendNoWinnersNotification(guildId, matchId, losers, winningOutcom
       .addFields([
         { name: '📊 Final Score', value: `${match.ftScore.home} - ${match.ftScore.away}`, inline: true },
         { name: '🎯 Winning Outcome', value: winningOutcome, inline: true },
-        { name: '💰 Total Pot', value: `${totalPotHuman} ${match.token.ticker}`, inline: true },
+        { name: '💰 Total Pot', value: `${totalPotHuman} ${token.ticker}`, inline: true },
         { name: '❌ All Bets Lost', value: `${losers.length} player(s)`, inline: true },
         { name: '💸 House Takes All', value: 'No prizes distributed', inline: true }
       ])
@@ -9689,7 +14011,7 @@ async function sendNoWinnersNotification(guildId, matchId, losers, winningOutcom
     // Send consolation message
     const consolationEmbed = new EmbedBuilder()
       .setTitle('😔 Tough Break!')
-      .setDescription(`All ${losers.length} player(s) bet on the wrong outcome. The total pot of **${totalPotHuman} ${match.token.ticker}** will be kept by the house.\n\nDon't give up! Keep betting and your luck will turn around! 🍀`)
+      .setDescription(`All ${losers.length} player(s) bet on the wrong outcome. The total pot of **${totalPotHuman} ${token.ticker}** will be kept by the house.\n\nDon't give up! Keep betting and your luck will turn around! 🍀`)
       .setColor('#FF6B6B')
       .setTimestamp();
     
@@ -9702,26 +14024,6 @@ async function sendNoWinnersNotification(guildId, matchId, losers, winningOutcom
   }
 }
 
-// Function to properly update used-tx-hashes.json
-function updateUsedTxHashes(guildId, txHash) {
-  try {
-    if (!usedTxHashesData[guildId]) {
-      usedTxHashesData[guildId] = {};
-    }
-    
-    usedTxHashesData[guildId][txHash] = {
-      timestamp: Date.now(),
-      guildId: guildId
-    };
-    
-    // Save to file
-    fs.writeFileSync(USED_TX_HASHES_FILE, JSON.stringify(usedTxHashesData, null, 2));
-    console.log(`[FOOTBALL] Updated used-tx-hashes.json with transaction ${txHash}`);
-  } catch (error) {
-    console.error('[FOOTBALL] Error updating used-tx-hashes.json:', error.message);
-  }
-}
-
 // Set up simple round-robin match checking (every 15 seconds, one match at a time)
 console.log('[FOOTBALL] ⏰ Setting up simple round-robin match checking every 15 seconds...');
 
@@ -9729,8 +14031,10 @@ let currentMatchIndex = 0;
 let allMatches = [];
 
 // Initialize the match list
-function initializeMatchList() {
-  const unfinishedMatches = Object.values(footballMatchesData).filter(match => 
+async function initializeMatchList() {
+  // Get all unfinished matches from database
+  const scheduledMatches = await dbFootball.getScheduledMatches();
+  const unfinishedMatches = scheduledMatches.filter(match => 
     match.status !== 'FINISHED' && match.status !== 'CANCELED' && match.status !== 'CANCELLED' && match.compCode
   );
   
@@ -9751,7 +14055,7 @@ function initializeMatchList() {
 async function checkSingleMatch() {
   // Reinitialize match list every 10 cycles (2.5 minutes) to pick up new matches
   if (allMatches.length === 0 || (currentMatchIndex % 10 === 0)) {
-    initializeMatchList();
+    await initializeMatchList();
     if (allMatches.length === 0) {
       return;
     }
@@ -9793,25 +14097,38 @@ async function checkSingleMatch() {
       // Store old status before updating
       const oldStatus = match.status;
       
-      // Update match data
-      match.status = newStatus;
+      // Update match data in database
+      await dbFootball.updateMatch(match.matchId, {
+        status: newStatus,
+        ftScore: newScore && newScore.home !== undefined && newScore.away !== undefined 
+          ? { home: newScore.home, away: newScore.away } 
+          : undefined
+      });
       
-      if (newScore && newScore.home !== undefined && newScore.away !== undefined) {
-        match.ftScore = { home: newScore.home, away: newScore.away };
+      // Get full match data with guild relationships
+      const fullMatch = await dbFootball.getMatch(match.matchId);
+      if (!fullMatch || !fullMatch.guildIds || fullMatch.guildIds.length === 0) {
+        console.log(`[FOOTBALL] ⚠️ Match ${match.matchId} has no guild relationships, skipping embed/prize updates`);
+        // Remove from list if no guilds
+        allMatches = allMatches.filter(m => m.matchId !== match.matchId);
+        if (currentMatchIndex >= allMatches.length) {
+          currentMatchIndex = 0;
+        }
+        return;
       }
       
       // Update embeds if there was a status change OR score change
       if (oldStatus !== newStatus || scoreChanged) {
-        console.log(`[FOOTBALL] ${oldStatus !== newStatus ? 'Status' : 'Score'} changed, updating embeds...`);
-        for (const guildId of match.guildIds) {
+        console.log(`[FOOTBALL] ${oldStatus !== newStatus ? 'Status' : 'Score'} changed, updating embeds for ${fullMatch.guildIds.length} guild(s)...`);
+        for (const guildId of fullMatch.guildIds) {
           await updateMatchEmbed(guildId, match.matchId);
         }
       }
       
       // If match is finished, process prizes for all guilds
       if (newStatus === 'FINISHED') {
-        console.log(`[FOOTBALL] 🏁 Match ${match.matchId} finished! Processing prizes...`);
-        for (const guildId of match.guildIds) {
+        console.log(`[FOOTBALL] 🏁 Match ${match.matchId} finished! Processing prizes for ${fullMatch.guildIds.length} guild(s)...`);
+        for (const guildId of fullMatch.guildIds) {
           await processMatchPrizes(guildId, match.matchId);
         }
         // Remove finished match from the list
@@ -9822,7 +14139,6 @@ async function checkSingleMatch() {
       }
       
       console.log(`[FOOTBALL] ✅ Updated match ${match.matchId} - Status: ${newStatus}, Score: ${newScore ? `${newScore.home}-${newScore.away}` : 'N/A'}`);
-      saveFootballMatchesData();
     } else {
       console.log(`[FOOTBALL] No updates for match ${match.matchId}`);
     }
@@ -9833,8 +14149,8 @@ async function checkSingleMatch() {
 }
 
 // Initialize match list on startup
-setTimeout(() => {
-  initializeMatchList();
+setTimeout(async () => {
+  await initializeMatchList();
 }, 5000);
 
 // Check one match every 15 seconds

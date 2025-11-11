@@ -83,4 +83,19 @@ Thumbs.db
 
 # Backup files
 *.backup
-*.bak 
+*.backup.*
+*.bak
+
+# Migration scripts (one-time use, already completed)
+migrate-timestamp-to-supabase.js
+compare-and-update-balances.js
+TIMESTAMP_MIGRATION_GUIDE.md
+
+# Test files
+test-*.js
+
+# Alternative/utility scripts (not used by main bot)
+register-commands-batch.js
+register-commands-skip-delete.js
+register-commands-guild.js
+delete-guild-commands.js 

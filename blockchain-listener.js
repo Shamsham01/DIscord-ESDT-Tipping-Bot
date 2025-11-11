@@ -1,5 +1,4 @@
 const fetch = require('node-fetch');
-const fs = require('fs');
 const BigNumber = require('bignumber.js');
 
 // Import virtual accounts functions
@@ -12,44 +11,82 @@ try {
   virtualAccounts = null;
 }
 
+// Import Supabase client
+const supabase = require('./supabase-client');
+
 // Blockchain listener configuration
 const POLLING_INTERVAL = 10000; // 10 seconds
 const API_BASE_URL = 'https://api.multiversx.com';
-const TIMESTAMP_FILE = 'timestamp.json';
 
 // Track processed transactions to avoid duplicates
 let processedTransactions = new Set();
 
-// Load timestamps from file
-function loadTimestamps() {
+// Load timestamps from Supabase
+async function loadTimestamps() {
   try {
-    if (fs.existsSync(TIMESTAMP_FILE)) {
-      const data = JSON.parse(fs.readFileSync(TIMESTAMP_FILE, 'utf8'));
-      console.log(`[BLOCKCHAIN] 📅 Loaded timestamps for ${Object.keys(data.wallets || {}).length} wallets`);
-      return data.wallets || {};
+    const { data, error } = await supabase
+      .from('wallet_timestamps')
+      .select('wallet_address, last_timestamp');
+    
+    if (error) {
+      console.error('[BLOCKCHAIN] Error loading timestamps from Supabase:', error.message);
+      return {};
     }
+    
+    const wallets = {};
+    if (data && Array.isArray(data)) {
+      data.forEach(row => {
+        wallets[row.wallet_address] = row.last_timestamp;
+      });
+    }
+    
+    console.log(`[BLOCKCHAIN] 📅 Loaded timestamps for ${Object.keys(wallets).length} wallets from Supabase`);
+    return wallets;
   } catch (error) {
     console.error('[BLOCKCHAIN] Error loading timestamps:', error.message);
+    return {};
   }
-  return {};
 }
 
-// Save timestamps to file
-function saveTimestamps(wallets) {
+// Save timestamps to Supabase (upsert for each wallet)
+async function saveTimestamps(wallets) {
   try {
-    const data = {
-      wallets: wallets,
-      lastUpdated: new Date().toISOString()
-    };
-    fs.writeFileSync(TIMESTAMP_FILE, JSON.stringify(data, null, 2));
-    console.log(`[BLOCKCHAIN] 💾 Saved timestamps for ${Object.keys(wallets).length} wallets`);
+    if (!wallets || Object.keys(wallets).length === 0) {
+      return;
+    }
+    
+    const records = Object.keys(wallets).map(walletAddress => ({
+      wallet_address: walletAddress,
+      last_timestamp: wallets[walletAddress],
+      last_updated: new Date().toISOString()
+    }));
+    
+    // Upsert in batches to avoid overwhelming the database
+    const batchSize = 50;
+    let saved = 0;
+    
+    for (let i = 0; i < records.length; i += batchSize) {
+      const batch = records.slice(i, i + batchSize);
+      
+      const { error } = await supabase
+        .from('wallet_timestamps')
+        .upsert(batch, { onConflict: 'wallet_address' });
+      
+      if (error) {
+        console.error(`[BLOCKCHAIN] Error saving timestamp batch ${i / batchSize + 1}:`, error.message);
+      } else {
+        saved += batch.length;
+      }
+    }
+    
+    console.log(`[BLOCKCHAIN] 💾 Saved timestamps for ${saved} wallets to Supabase`);
   } catch (error) {
     console.error('[BLOCKCHAIN] Error saving timestamps:', error.message);
   }
 }
 
 // Get or create timestamp for a wallet
-function getWalletTimestamp(walletAddress, currentTimestamps) {
+async function getWalletTimestamp(walletAddress, currentTimestamps) {
   if (currentTimestamps[walletAddress]) {
     return currentTimestamps[walletAddress];
   }
@@ -57,32 +94,83 @@ function getWalletTimestamp(walletAddress, currentTimestamps) {
   // New wallet - start from current time
   const newTimestamp = Math.floor(Date.now() / 1000);
   currentTimestamps[walletAddress] = newTimestamp;
+  
+  // Save to Supabase immediately
+  try {
+    await supabase
+      .from('wallet_timestamps')
+      .upsert({
+        wallet_address: walletAddress,
+        last_timestamp: newTimestamp,
+        last_updated: new Date().toISOString()
+      }, { onConflict: 'wallet_address' });
+  } catch (error) {
+    console.error(`[BLOCKCHAIN] Error saving new wallet timestamp:`, error.message);
+  }
+  
   console.log(`[BLOCKCHAIN] 🆕 New wallet ${walletAddress} - starting from timestamp: ${newTimestamp}`);
   return newTimestamp;
 }
 
 // Update timestamp for a wallet after processing transaction
-function updateWalletTimestamp(walletAddress, transactionTimestamp, currentTimestamps) {
+async function updateWalletTimestamp(walletAddress, transactionTimestamp, currentTimestamps) {
   // Increment by 1 second to avoid processing the same transaction again
   const newTimestamp = transactionTimestamp + 1;
   currentTimestamps[walletAddress] = newTimestamp;
+  
+  // Save to Supabase immediately
+  try {
+    await supabase
+      .from('wallet_timestamps')
+      .upsert({
+        wallet_address: walletAddress,
+        last_timestamp: newTimestamp,
+        last_updated: new Date().toISOString()
+      }, { onConflict: 'wallet_address' });
+  } catch (error) {
+    console.error(`[BLOCKCHAIN] Error updating wallet timestamp:`, error.message);
+  }
+  
   console.log(`[BLOCKCHAIN] ⏰ Updated timestamp for ${walletAddress}: ${transactionTimestamp} → ${newTimestamp}`);
 }
 
-// Get all community fund wallets from server data
-function getAllCommunityFundWallets() {
+// Get all community fund wallets from database
+async function getAllCommunityFundWallets() {
   try {
-    const serverData = JSON.parse(fs.readFileSync('server-data.json', 'utf8'));
+    const dbServerData = require('./db/server-data');
+    const supabase = require('./supabase-client');
+    
+    // Get all guild settings to find community fund projects
+    const { data: guildSettings, error: settingsError } = await supabase
+      .from('guild_settings')
+      .select('guild_id, community_fund_project')
+      .not('community_fund_project', 'is', null);
+    
+    if (settingsError) {
+      console.error('[BLOCKCHAIN] Error fetching guild settings:', settingsError);
+      return [];
+    }
+    
+    if (!guildSettings || guildSettings.length === 0) {
+      console.log('[BLOCKCHAIN] No community fund projects found');
+      return [];
+    }
+    
     const wallets = new Set();
     
-    for (const [guildId, server] of Object.entries(serverData)) {
-      const projects = server.projects || {};
-      const communityFundProject = server.communityFundProject;
+    // For each guild with a community fund project, get the project details
+    for (const setting of guildSettings) {
+      const guildId = setting.guild_id;
+      const communityFundProject = setting.community_fund_project; // This is the fund name for display
       
-      // Only monitor the community fund project wallet, not all project wallets
-      if (communityFundProject && projects[communityFundProject] && projects[communityFundProject].walletAddress) {
+      if (!communityFundProject) continue;
+      
+      // Get the project details (always use "Community Fund" as the project name)
+      const project = await dbServerData.getProject(guildId, 'Community Fund');
+      
+      if (project && project.walletAddress) {
         wallets.add({
-          address: projects[communityFundProject].walletAddress,
+          address: project.walletAddress,
           guildId: guildId,
           projectName: communityFundProject
         });
@@ -92,7 +180,7 @@ function getAllCommunityFundWallets() {
     console.log(`[BLOCKCHAIN] Found ${wallets.size} community fund wallets to monitor`);
     return Array.from(wallets);
   } catch (error) {
-    console.error('[BLOCKCHAIN] Error reading server data:', error.message);
+    console.error('[BLOCKCHAIN] Error getting community fund wallets:', error.message);
     return [];
   }
 }
@@ -127,7 +215,7 @@ async function fetchLatestTransactions(walletAddress, fromTimestamp) {
 }
 
 // Process a blockchain transaction
-function processTransaction(transaction, guildId, projectName) {
+async function processTransaction(transaction, guildId, projectName) {
   try {
     console.log(`[BLOCKCHAIN] 🔍 Processing transaction for ${projectName}:`, {
       txHash: transaction.txHash,
@@ -162,48 +250,51 @@ function processTransaction(transaction, guildId, projectName) {
     
     for (const transfer of transfers) {
       if (transfer.type === 'FungibleESDT') {
-        const tokenTicker = transfer.token || transfer.identifier || transfer.ticker;
+        // Extract token identifier (full identifier like "USDC-c76f1f")
+        // Priority: identifier > token > ticker (for backward compatibility)
+        const tokenIdentifier = transfer.identifier || transfer.token || transfer.ticker;
         const amountWei = transfer.value;
         const decimals = transfer.decimals || 8;
         
         // Convert from wei to human readable amount
         const humanAmount = new BigNumber(amountWei).dividedBy(new BigNumber(10).pow(decimals)).toString();
         
-        console.log(`[BLOCKCHAIN] Processing transfer: ${humanAmount} ${tokenTicker} to ${projectName} in guild ${guildId}`);
+        console.log(`[BLOCKCHAIN] Processing transfer: ${humanAmount} ${tokenIdentifier} to ${projectName} in guild ${guildId}`);
         console.log(`[BLOCKCHAIN] Sender: ${transaction.sender}, Receiver: ${transaction.receiver}`);
         
-        // Process the deposit
-        const depositResult = virtualAccounts.processBlockchainDeposit(
+        // Process the deposit (await the async function)
+        const depositResult = await virtualAccounts.processBlockchainDeposit(
           guildId,
           transaction.sender,
           transaction.receiver,
-          tokenTicker,
+          tokenIdentifier,
           humanAmount,
           transaction.txHash
         );
         
-        if (depositResult.success) {
-          console.log(`[BLOCKCHAIN] Successfully processed deposit: ${humanAmount} ${tokenTicker} for user in guild ${guildId}`);
+        if (depositResult && depositResult.success) {
+          console.log(`[BLOCKCHAIN] Successfully processed deposit: ${humanAmount} ${tokenIdentifier} for user in guild ${guildId}`);
           
           // Send Discord notification if possible
           try {
-            sendDepositNotification(guildId, transaction.sender, tokenTicker, humanAmount, transaction.txHash, projectName);
+            sendDepositNotification(guildId, transaction.sender, tokenIdentifier, humanAmount, transaction.txHash, projectName);
           } catch (notifyError) {
             console.error('[BLOCKCHAIN] Error sending Discord notification:', notifyError.message);
           }
           
           results.push({
-            token: tokenTicker,
+            token: tokenIdentifier,
             success: true,
             amount: humanAmount,
             txHash: transaction.txHash
           });
         } else {
-          console.error(`[BLOCKCHAIN] Failed to process deposit:`, depositResult.error);
+          const errorMsg = depositResult?.error || 'Unknown error';
+          console.error(`[BLOCKCHAIN] Failed to process deposit:`, errorMsg);
           results.push({
-            token: tokenTicker,
+            token: tokenIdentifier,
             success: false,
-            error: depositResult.error
+            error: errorMsg
           });
         }
       }
@@ -227,11 +318,11 @@ function processTransaction(transaction, guildId, projectName) {
 }
 
 // Send deposit notification to Discord
-async function sendDepositNotification(guildId, senderWallet, tokenTicker, amount, txHash, projectName) {
+async function sendDepositNotification(guildId, senderWallet, tokenIdentifier, amount, txHash, projectName) {
   try {
     // This function will be implemented in the main bot file
     // For now, we'll just log the notification
-    console.log(`[BLOCKCHAIN] Would send Discord notification: User ${senderWallet} deposited ${amount} ${tokenTicker} to ${projectName} in guild ${guildId}`);
+    console.log(`[BLOCKCHAIN] Would send Discord notification: User ${senderWallet} deposited ${amount} ${tokenIdentifier} to ${projectName} in guild ${guildId}`);
     
     // TODO: Implement actual Discord notification
     // This requires access to the Discord client from the main bot
@@ -244,28 +335,34 @@ async function sendDepositNotification(guildId, senderWallet, tokenTicker, amoun
 // Main polling function
 async function pollBlockchain() {
   try {
-    const wallets = getAllCommunityFundWallets();
+    const wallets = await getAllCommunityFundWallets();
     
     if (wallets.length === 0) {
       console.log('[BLOCKCHAIN] No community fund wallets found to monitor');
+      // Clean up orphaned timestamps if no wallets exist
+      await cleanupOrphanedTimestamps();
       return;
     }
     
     console.log(`[BLOCKCHAIN] 🔍 Polling ${wallets.length} community fund wallets...`);
     
-    // Load current timestamps
-    const currentTimestamps = loadTimestamps();
-    let timestampsChanged = false;
+    // Load current timestamps from Supabase
+    const currentTimestamps = await loadTimestamps();
+    
+    // Periodically clean up orphaned timestamps (every 10th poll cycle)
+    if (Math.random() < 0.1) {
+      await cleanupOrphanedTimestamps();
+    }
     
     for (const wallet of wallets) {
       try {
-        // Get existing timestamp for this wallet (don't create new ones during polling)
+        // Get existing timestamp for this wallet, or initialize if new
         let walletTimestamp = currentTimestamps[wallet.address];
         
         if (!walletTimestamp) {
-          // This is a new wallet that wasn't initialized yet - skip this poll cycle
-          console.log(`[BLOCKCHAIN] ⏳ New wallet ${wallet.address} not yet initialized - skipping this poll cycle`);
-          continue;
+          // This is a new wallet - initialize it now
+          walletTimestamp = await getWalletTimestamp(wallet.address, currentTimestamps);
+          console.log(`[BLOCKCHAIN] 🆕 Auto-initialized new wallet ${wallet.address} (${wallet.projectName}) - starting monitoring`);
         }
         
         const transactions = await fetchLatestTransactions(wallet.address, walletTimestamp);
@@ -279,14 +376,13 @@ async function pollBlockchain() {
             console.log(`[BLOCKCHAIN] 📅 Transaction timestamp: ${latestTransaction.timestamp}`);
             console.log(`[BLOCKCHAIN] 🏁 Wallet last timestamp: ${walletTimestamp}`);
             
-            const result = processTransaction(latestTransaction, wallet.guildId, wallet.projectName);
+            const result = await processTransaction(latestTransaction, wallet.guildId, wallet.projectName);
             
             if (result.processed) {
               console.log(`[BLOCKCHAIN] ✅ Processed transaction ${latestTransaction.txHash} for ${wallet.projectName}`);
               
-              // Update timestamp for this wallet
-              updateWalletTimestamp(wallet.address, latestTransaction.timestamp, currentTimestamps);
-              timestampsChanged = true;
+              // Update timestamp for this wallet (saves to Supabase immediately)
+              await updateWalletTimestamp(wallet.address, latestTransaction.timestamp, currentTimestamps);
             } else {
               // Log why transaction wasn't processed (for debugging)
               if (result.reason === 'Already processed') {
@@ -315,38 +411,152 @@ async function pollBlockchain() {
       }
     }
     
-    // Save timestamps if any changed
-    if (timestampsChanged) {
-      saveTimestamps(currentTimestamps);
-    }
-    
   } catch (error) {
     console.error('[BLOCKCHAIN] Error in blockchain polling:', error.message);
   }
 }
 
+// Initialize timestamp for a single wallet
+async function initializeWalletTimestamp(walletAddress, projectName = null) {
+  try {
+    // Check if timestamp already exists in Supabase
+    const { data, error } = await supabase
+      .from('wallet_timestamps')
+      .select('last_timestamp')
+      .eq('wallet_address', walletAddress)
+      .single();
+    
+    if (error && error.code !== 'PGRST116') {
+      // PGRST116 is "not found" which is fine
+      throw error;
+    }
+    
+    if (data && data.last_timestamp) {
+      console.log(`[BLOCKCHAIN] ✅ Wallet ${walletAddress} already has timestamp: ${data.last_timestamp}`);
+      return data.last_timestamp;
+    }
+    
+    // Create new timestamp for this wallet (use creation time)
+    const newTimestamp = Math.floor(Date.now() / 1000);
+    
+    const { error: insertError } = await supabase
+      .from('wallet_timestamps')
+      .upsert({
+        wallet_address: walletAddress,
+        last_timestamp: newTimestamp,
+        last_updated: new Date().toISOString()
+      }, { onConflict: 'wallet_address' });
+    
+    if (insertError) {
+      throw insertError;
+    }
+    
+    console.log(`[BLOCKCHAIN] 🆕 Initialized wallet ${walletAddress}${projectName ? ` (${projectName})` : ''} with timestamp: ${newTimestamp}`);
+    return newTimestamp;
+  } catch (error) {
+    console.error('[BLOCKCHAIN] Error initializing wallet timestamp:', error.message);
+    return null;
+  }
+}
+
+// Remove timestamp for a deleted wallet
+async function removeWalletTimestamp(walletAddress, projectName = null) {
+  try {
+    const { error } = await supabase
+      .from('wallet_timestamps')
+      .delete()
+      .eq('wallet_address', walletAddress);
+    
+    if (error) {
+      throw error;
+    }
+    
+    console.log(`[BLOCKCHAIN] 🗑️ Removed timestamp for deleted wallet ${walletAddress}${projectName ? ` (${projectName})` : ''}`);
+    return true;
+  } catch (error) {
+    if (error.code === 'PGRST116') {
+      console.log(`[BLOCKCHAIN] ℹ️ Wallet ${walletAddress} had no timestamp to remove`);
+      return false;
+    }
+    console.error('[BLOCKCHAIN] Error removing wallet timestamp:', error.message);
+    return false;
+  }
+}
+
+// Clean up orphaned timestamps (wallets that no longer exist in database)
+async function cleanupOrphanedTimestamps() {
+  try {
+    console.log('[BLOCKCHAIN] 🧹 Cleaning up orphaned timestamps...');
+    
+    const wallets = await getAllCommunityFundWallets();
+    const currentTimestamps = await loadTimestamps();
+    const activeWalletAddresses = new Set(wallets.map(w => w.address));
+    let removedCount = 0;
+    
+    // Find timestamps for wallets that no longer exist
+    for (const walletAddress of Object.keys(currentTimestamps)) {
+      if (!activeWalletAddresses.has(walletAddress)) {
+        const { error } = await supabase
+          .from('wallet_timestamps')
+          .delete()
+          .eq('wallet_address', walletAddress);
+        
+        if (!error) {
+          removedCount++;
+          console.log(`[BLOCKCHAIN] 🗑️ Removed orphaned timestamp for wallet ${walletAddress}`);
+        }
+      }
+    }
+    
+    if (removedCount > 0) {
+      console.log(`[BLOCKCHAIN] 💾 Cleaned up ${removedCount} orphaned timestamp(s)`);
+    } else {
+      console.log(`[BLOCKCHAIN] ✅ No orphaned timestamps found`);
+    }
+    
+    return removedCount;
+  } catch (error) {
+    console.error('[BLOCKCHAIN] Error cleaning up orphaned timestamps:', error.message);
+    return 0;
+  }
+}
+
 // Initialize timestamps for all wallets
-function initializeWalletTimestamps() {
+async function initializeWalletTimestamps() {
   try {
     console.log('[BLOCKCHAIN] 🔧 Initializing wallet timestamps...');
     
-    const wallets = getAllCommunityFundWallets();
-    const currentTimestamps = loadTimestamps();
+    const wallets = await getAllCommunityFundWallets();
+    const currentTimestamps = await loadTimestamps();
     let timestampsChanged = false;
+    
+    const recordsToInsert = [];
     
     for (const wallet of wallets) {
       if (!currentTimestamps[wallet.address]) {
         // Create new timestamp for this wallet
         const newTimestamp = Math.floor(Date.now() / 1000);
         currentTimestamps[wallet.address] = newTimestamp;
+        recordsToInsert.push({
+          wallet_address: wallet.address,
+          last_timestamp: newTimestamp,
+          last_updated: new Date().toISOString()
+        });
         console.log(`[BLOCKCHAIN] 🆕 Initialized wallet ${wallet.address} (${wallet.projectName}) with timestamp: ${newTimestamp}`);
         timestampsChanged = true;
       }
     }
     
-    if (timestampsChanged) {
-      saveTimestamps(currentTimestamps);
-      console.log(`[BLOCKCHAIN] 💾 Saved initialized timestamps for ${Object.keys(currentTimestamps).length} wallets`);
+    if (timestampsChanged && recordsToInsert.length > 0) {
+      // Insert new timestamps in batches
+      const batchSize = 50;
+      for (let i = 0; i < recordsToInsert.length; i += batchSize) {
+        const batch = recordsToInsert.slice(i, i + batchSize);
+        await supabase
+          .from('wallet_timestamps')
+          .upsert(batch, { onConflict: 'wallet_address' });
+      }
+      console.log(`[BLOCKCHAIN] 💾 Saved initialized timestamps for ${recordsToInsert.length} wallets to Supabase`);
     } else {
       console.log(`[BLOCKCHAIN] ✅ All wallets already have timestamps`);
     }
@@ -359,14 +569,14 @@ function initializeWalletTimestamps() {
 }
 
 // Start the blockchain listener
-function startBlockchainListener() {
+async function startBlockchainListener() {
   try {
     console.log('[BLOCKCHAIN] 🚀 Starting blockchain listener...');
     console.log(`[BLOCKCHAIN] 📡 Will poll every ${POLLING_INTERVAL / 1000} seconds`);
     console.log(`[BLOCKCHAIN] 🌐 Using API: ${API_BASE_URL}`);
     
     // Initialize timestamps for all wallets first
-    const timestamps = initializeWalletTimestamps();
+    const timestamps = await initializeWalletTimestamps();
     console.log(`[BLOCKCHAIN] 📅 Initialized timestamps for ${Object.keys(timestamps).length} wallets`);
     
     // Initial poll
@@ -399,11 +609,19 @@ function stopBlockchainListener() {
 }
 
 // Get listener status
-function getListenerStatus() {
+async function getListenerStatus() {
   try {
-    const wallets = getAllCommunityFundWallets();
-    const timestamps = loadTimestamps();
+    const wallets = await getAllCommunityFundWallets();
+    const timestamps = await loadTimestamps();
     const isRunning = global.blockchainPollInterval !== null;
+    
+    // Get last updated timestamp from Supabase
+    const { data: lastUpdatedData } = await supabase
+      .from('wallet_timestamps')
+      .select('last_updated')
+      .order('last_updated', { ascending: false })
+      .limit(1)
+      .single();
     
     return {
       success: true,
@@ -412,7 +630,7 @@ function getListenerStatus() {
       monitoredWallets: wallets.length,
       processedTransactions: processedTransactions.size,
       trackedWallets: Object.keys(timestamps).length,
-      lastUpdated: timestamps.lastUpdated || 'Never',
+      lastUpdated: lastUpdatedData?.last_updated || 'Never',
       currentTimestamp: new Date().toISOString()
     };
   } catch (error) {
@@ -442,7 +660,10 @@ module.exports = {
   startBlockchainListener,
   stopBlockchainListener,
   getListenerStatus,
-  pollBlockchain
+  pollBlockchain,
+  initializeWalletTimestamp,
+  removeWalletTimestamp,
+  cleanupOrphanedTimestamps
 };
 
 // Start listener if this file is run directly

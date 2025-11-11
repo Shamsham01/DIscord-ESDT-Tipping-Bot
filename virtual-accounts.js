@@ -1,136 +1,80 @@
-const fs = require('fs');
 const BigNumber = require('bignumber.js');
-
-// Virtual accounts data file
-const VIRTUAL_ACCOUNTS_FILE = 'virtual-accounts.json';
-
-// Global virtual accounts data
-let virtualAccountsData = {};
-
-// Load virtual accounts data from disk
-function loadVirtualAccountsData() {
-  try {
-    if (fs.existsSync(VIRTUAL_ACCOUNTS_FILE)) {
-      virtualAccountsData = JSON.parse(fs.readFileSync(VIRTUAL_ACCOUNTS_FILE, 'utf8'));
-      console.log(`[VIRTUAL] Loaded virtual accounts for ${Object.keys(virtualAccountsData).length} servers`);
-    }
-  } catch (error) {
-    console.error('[VIRTUAL] Error loading virtual accounts data:', error.message);
-    virtualAccountsData = {};
-  }
-}
-
-// Save virtual accounts data to disk
-function saveVirtualAccountsData() {
-  try {
-    fs.writeFileSync(VIRTUAL_ACCOUNTS_FILE, JSON.stringify(virtualAccountsData, null, 2));
-  } catch (error) {
-    console.error('[VIRTUAL] Error saving virtual accounts data:', error.message);
-  }
-}
-
-// Initialize virtual accounts for a server
-function initializeVirtualAccounts(guildId) {
-  if (!virtualAccountsData[guildId]) {
-    virtualAccountsData[guildId] = {};
-    saveVirtualAccountsData();
-  }
-  return virtualAccountsData[guildId];
-}
+const dbVirtualAccounts = require('./db/virtual-accounts');
 
 // Get or create user account
-function getUserAccount(guildId, userId, username = null) {
-  initializeVirtualAccounts(guildId);
-  
-  if (!virtualAccountsData[guildId][userId]) {
-    virtualAccountsData[guildId][userId] = {
-      balances: {},
-      transactions: [],
-      createdAt: Date.now(),
-      lastUpdated: Date.now(),
-      username: username || null
-    };
-    saveVirtualAccountsData();
-  } else if (username && virtualAccountsData[guildId][userId].username !== username) {
-    // Update username if provided and different
-    virtualAccountsData[guildId][userId].username = username;
-    virtualAccountsData[guildId][userId].lastUpdated = Date.now();
-    saveVirtualAccountsData();
+async function getUserAccount(guildId, userId, username = null) {
+  try {
+    return await dbVirtualAccounts.getUserAccount(guildId, userId, username);
+  } catch (error) {
+    console.error('[VIRTUAL] Error getting user account:', error);
+    throw error;
   }
-  
-  return virtualAccountsData[guildId][userId];
 }
 
 // Get user balance for a specific token
-function getUserBalance(guildId, userId, tokenTicker) {
-  // Force reload data from disk to ensure we have the latest
-  loadVirtualAccountsData();
-  
-  const account = getUserAccount(guildId, userId);
-  
-  // Find the token with case-insensitive matching
-  const availableTokens = Object.keys(account.balances);
-  const matchingToken = availableTokens.find(token => 
-    token.toLowerCase() === tokenTicker.toLowerCase()
-  );
-  
-  const balance = matchingToken ? account.balances[matchingToken] : '0';
-  return balance;
+async function getUserBalance(guildId, userId, tokenTicker) {
+  try {
+    return await dbVirtualAccounts.getAccountBalance(guildId, userId, tokenTicker);
+  } catch (error) {
+    console.error('[VIRTUAL] Error getting user balance:', error);
+    return '0';
+  }
 }
 
 // Get all user balances
-function getAllUserBalances(guildId, userId) {
-  // Force reload data from disk to ensure we have the latest
-  loadVirtualAccountsData();
-  
-  const account = getUserAccount(guildId, userId);
-  return account.balances || {};
+async function getAllUserBalances(guildId, userId) {
+  try {
+    return await dbVirtualAccounts.getAllUserBalances(guildId, userId);
+  } catch (error) {
+    console.error('[VIRTUAL] Error getting all user balances:', error);
+    return {};
+  }
 }
 
 // Add funds to user account (from blockchain deposit)
-function addFundsToAccount(guildId, userId, tokenTicker, amount, txHash, source = 'deposit', username = null) {
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") or ticker for backward compatibility
+async function addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHash, source = 'deposit', username = null) {
   try {
-    const account = getUserAccount(guildId, userId, username);
+    // Get current account to find existing token key
+    const account = await getUserAccount(guildId, userId, username);
+    const balances = account.balances || {};
     
-    // Find existing token with case-insensitive matching
-    const availableTokens = Object.keys(account.balances);
-    const existingToken = availableTokens.find(token => 
-      token.toLowerCase() === tokenTicker.toLowerCase()
-    );
-    
-    // Use existing token key if found, otherwise use the provided tokenTicker
-    const tokenKey = existingToken || tokenTicker;
-    
-    // Initialize token balance if it doesn't exist
-    if (!account.balances[tokenKey]) {
-      account.balances[tokenKey] = '0';
+    // Validate tokenIdentifier format - must be full identifier (TICKER-6hexchars)
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      throw new Error(`Invalid token identifier: "${tokenIdentifier}". Must be full identifier format: TICKER-6hexchars (e.g., "USDC-c76f1f"). Tickers are not allowed for security.`);
     }
     
-    // Add funds
-    const currentBalance = new BigNumber(account.balances[tokenKey]);
+    // Find existing token by identifier only (no ticker matching)
+    const availableTokens = Object.keys(balances);
+    const existingToken = availableTokens.find(token => 
+      token.toLowerCase() === tokenIdentifier.toLowerCase()
+    );
+    
+    // Calculate new balance
+    const currentBalance = new BigNumber(balances[tokenIdentifier] || '0');
     const newBalance = currentBalance.plus(new BigNumber(amount));
-    account.balances[tokenKey] = newBalance.toString();
+    
+    // Update balance in database (always use identifier)
+    await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, amount);
     
     // Record transaction
     const transaction = {
       id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       type: 'deposit',
-      token: tokenKey,
+      token: tokenIdentifier,
       amount: amount,
       balanceBefore: currentBalance.toString(),
       balanceAfter: newBalance.toString(),
       txHash: txHash,
       source: source,
       timestamp: Date.now(),
-      description: `Deposit of ${amount} ${tokenKey}`
+      description: `Deposit of ${amount} ${tokenIdentifier}`
     };
     
-    account.transactions.push(transaction);
-    account.lastUpdated = Date.now();
+    await dbVirtualAccounts.addTransaction(guildId, userId, transaction);
     
-    saveVirtualAccountsData();
-    
-    console.log(`[VIRTUAL] Added ${amount} ${tokenTicker} to user ${userId} in guild ${guildId}. New balance: ${newBalance.toString()}`);
+    console.log(`[VIRTUAL] Added ${amount} ${tokenIdentifier} to user ${userId} in guild ${guildId}. New balance: ${newBalance.toString()}`);
     
     return {
       success: true,
@@ -147,46 +91,90 @@ function addFundsToAccount(guildId, userId, tokenTicker, amount, txHash, source 
 }
 
 // Deduct funds from user account (for tips, games, etc.)
-function deductFundsFromAccount(guildId, userId, tokenTicker, amount, description, gameType = null) {
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") or ticker for backward compatibility
+async function deductFundsFromAccount(guildId, userId, tokenIdentifier, amount, description, gameType = null) {
   try {
-    const account = getUserAccount(guildId, userId);
+    // Validate and convert amount to string
+    const amountNum = typeof amount === 'string' ? parseFloat(amount) : Number(amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      return {
+        success: false,
+        error: `Invalid amount: ${amount}`,
+        currentBalance: '0',
+        requiredAmount: amount
+      };
+    }
+    const amountStr = amountNum.toString();
     
-    // Find existing token with case-insensitive matching
-    const availableTokens = Object.keys(account.balances);
-    const existingToken = availableTokens.find(token => 
-      token.toLowerCase() === tokenTicker.toLowerCase()
-    );
+    // Get current account to find existing token key
+    const account = await getUserAccount(guildId, userId);
+    const balances = account.balances || {};
     
-    // Use existing token key if found, otherwise use the provided tokenTicker
-    const tokenKey = existingToken || tokenTicker;
-    
-    // Check if user has sufficient balance
-    if (!account.balances[tokenKey]) {
-      account.balances[tokenKey] = '0';
+    // Validate tokenIdentifier format - must be full identifier (TICKER-6hexchars)
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      return {
+        success: false,
+        error: `Invalid token identifier: "${tokenIdentifier}". Must be full identifier format: TICKER-6hexchars (e.g., "USDC-c76f1f"). Tickers are not allowed for security.`
+      };
     }
     
-    const currentBalance = new BigNumber(account.balances[tokenKey]);
-    const deductionAmount = new BigNumber(amount);
+    // Extract ticker from identifier (e.g., "USDC-c76f1f" -> "USDC")
+    const tokenTicker = tokenIdentifier.split('-')[0];
+    
+    // Check if balance exists under ticker (legacy data) and migrate to identifier
+    const balanceByTicker = balances[tokenTicker];
+    const balanceByIdentifier = balances[tokenIdentifier] || '0';
+    
+    if (balanceByTicker && new BigNumber(balanceByTicker).isGreaterThan(0)) {
+      console.log(`[VIRTUAL] Found legacy balance under ticker "${tokenTicker}": ${balanceByTicker}. Migrating to identifier "${tokenIdentifier}".`);
+      
+      // Migrate ticker balance to identifier by adding it
+      const tickerBalance = new BigNumber(balanceByTicker);
+      const identifierBalance = new BigNumber(balanceByIdentifier);
+      const totalBalance = tickerBalance.plus(identifierBalance);
+      
+      // Calculate the amount to add to identifier (difference between total and current identifier balance)
+      const amountToAdd = totalBalance.minus(identifierBalance);
+      
+      // Update identifier balance with the migrated amount
+      await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, amountToAdd.toString());
+      
+      console.log(`[VIRTUAL] Migrated ${balanceByTicker} from ticker "${tokenTicker}" to identifier "${tokenIdentifier}". New identifier balance: ${totalBalance.toString()}`);
+      
+      // Reload account to get updated balances
+      const updatedAccount = await getUserAccount(guildId, userId);
+      balances[tokenIdentifier] = totalBalance.toString();
+      // Note: ticker balance remains in DB but will be ignored in future operations
+      
+      // Use the updated balance for the rest of the function
+      balances[tokenIdentifier] = updatedAccount.balances?.[tokenIdentifier] || totalBalance.toString();
+    }
+    
+    // Check if user has sufficient balance (after migration)
+    const currentBalance = new BigNumber(balances[tokenIdentifier] || '0');
+    const deductionAmount = new BigNumber(amountStr);
     
     if (currentBalance.isLessThan(deductionAmount)) {
       return {
         success: false,
         error: 'Insufficient balance',
         currentBalance: currentBalance.toString(),
-        requiredAmount: amount
+        requiredAmount: amountStr
       };
     }
     
-    // Deduct funds
-    const newBalance = currentBalance.minus(deductionAmount);
-    account.balances[tokenKey] = newBalance.toString();
+    // Deduct funds (using negative amount)
+    const negativeAmount = deductionAmount.negated().toString();
+    const newBalanceStr = await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, negativeAmount);
+    const newBalance = new BigNumber(newBalanceStr);
     
     // Record transaction
     const transaction = {
       id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       type: 'deduction',
-      token: tokenKey,
-      amount: amount,
+      token: tokenIdentifier,
+      amount: amountStr, // Ensure amount is always a valid string
       balanceBefore: currentBalance.toString(),
       balanceAfter: newBalance.toString(),
       description: description,
@@ -194,12 +182,9 @@ function deductFundsFromAccount(guildId, userId, tokenTicker, amount, descriptio
       timestamp: Date.now()
     };
     
-    account.transactions.push(transaction);
-    account.lastUpdated = Date.now();
+    await dbVirtualAccounts.addTransaction(guildId, userId, transaction);
     
-    saveVirtualAccountsData();
-    
-    console.log(`[VIRTUAL] Deducted ${amount} ${tokenTicker} from user ${userId} in guild ${guildId}. New balance: ${newBalance.toString()}`);
+    console.log(`[VIRTUAL] Deducted ${amountStr} ${tokenIdentifier} from user ${userId} in guild ${guildId}. New balance: ${newBalance.toString()}`);
     
     return {
       success: true,
@@ -216,19 +201,19 @@ function deductFundsFromAccount(guildId, userId, tokenTicker, amount, descriptio
 }
 
 // Transfer funds between users (for tips)
-function transferFundsBetweenUsers(guildId, fromUserId, toUserId, tokenTicker, amount, description) {
+async function transferFundsBetweenUsers(guildId, fromUserId, toUserId, tokenIdentifier, amount, description) {
   try {
     // Deduct from sender
-    const deductionResult = deductFundsFromAccount(guildId, fromUserId, tokenTicker, amount, `Tip to user: ${description}`, 'tip');
+    const deductionResult = await deductFundsFromAccount(guildId, fromUserId, tokenIdentifier, amount, `Tip to user: ${description}`, 'tip');
     if (!deductionResult.success) {
       return deductionResult;
     }
     
     // Add to recipient
-    const additionResult = addFundsToAccount(guildId, toUserId, tokenTicker, amount, null, 'tip');
+    const additionResult = await addFundsToAccount(guildId, toUserId, tokenIdentifier, amount, null, 'tip');
     if (!additionResult.success) {
       // If adding to recipient fails, refund the sender
-      addFundsToAccount(guildId, fromUserId, tokenTicker, amount, null, 'refund');
+      await addFundsToAccount(guildId, fromUserId, tokenIdentifier, amount, null, 'refund');
       return {
         success: false,
         error: 'Failed to add funds to recipient',
@@ -241,7 +226,7 @@ function transferFundsBetweenUsers(guildId, fromUserId, toUserId, tokenTicker, a
       fromUserNewBalance: deductionResult.newBalance,
       toUserNewBalance: additionResult.newBalance,
       amount: amount,
-      token: tokenTicker
+      token: tokenIdentifier
     };
   } catch (error) {
     console.error(`[VIRTUAL] Error transferring funds between users:`, error.message);
@@ -253,15 +238,9 @@ function transferFundsBetweenUsers(guildId, fromUserId, toUserId, tokenTicker, a
 }
 
 // Get user transaction history
-function getUserTransactionHistory(guildId, userId, limit = 20) {
+async function getUserTransactionHistory(guildId, userId, limit = 20) {
   try {
-    const account = getUserAccount(guildId, userId);
-    const transactions = account.transactions || [];
-    
-    // Sort by timestamp (newest first) and limit results
-    return transactions
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, limit);
+    return await dbVirtualAccounts.getTransactionHistory(guildId, userId, limit);
   } catch (error) {
     console.error(`[VIRTUAL] Error getting transaction history:`, error.message);
     return [];
@@ -269,32 +248,9 @@ function getUserTransactionHistory(guildId, userId, limit = 20) {
 }
 
 // Clean up old transaction history (keep only last 100 transactions per user)
-function cleanupOldTransactions() {
+async function cleanupOldTransactions() {
   try {
-    let totalCleaned = 0;
-    let usersProcessed = 0;
-    
-    for (const guildId in virtualAccountsData) {
-      const guildData = virtualAccountsData[guildId];
-      for (const userId in guildData) {
-        const account = guildData[userId];
-        if (account.transactions && account.transactions.length > 100) {
-          const oldCount = account.transactions.length;
-          // Keep only the last 100 transactions (newest first)
-          account.transactions = account.transactions
-            .sort((a, b) => b.timestamp - a.timestamp)
-            .slice(0, 100);
-          totalCleaned += (oldCount - account.transactions.length);
-          usersProcessed++;
-        }
-      }
-    }
-    
-    if (totalCleaned > 0) {
-      saveVirtualAccountsData();
-    }
-    
-    return { totalCleaned, usersProcessed };
+    return await dbVirtualAccounts.cleanupOldTransactions();
   } catch (error) {
     console.error(`[VIRTUAL] Error cleaning up old transactions:`, error.message);
     return { totalCleaned: 0, usersProcessed: 0 };
@@ -302,38 +258,9 @@ function cleanupOldTransactions() {
 }
 
 // Get server-wide virtual accounts summary
-function getServerVirtualAccountsSummary(guildId) {
+async function getServerVirtualAccountsSummary(guildId) {
   try {
-    const serverAccounts = virtualAccountsData[guildId] || {};
-    const totalUsers = Object.keys(serverAccounts).length;
-    
-    let totalBalances = {};
-    let activeUsers = 0;
-    
-    for (const [userId, account] of Object.entries(serverAccounts)) {
-      if (Object.keys(account.balances).length > 0) {
-        activeUsers++;
-        
-        for (const [token, balance] of Object.entries(account.balances)) {
-          if (!totalBalances[token]) {
-            totalBalances[token] = new BigNumber(0);
-          }
-          totalBalances[token] = totalBalances[token].plus(new BigNumber(balance));
-        }
-      }
-    }
-    
-    // Convert BigNumber totals to strings
-    const formattedTotals = {};
-    for (const [token, total] of Object.entries(totalBalances)) {
-      formattedTotals[token] = total.toString();
-    }
-    
-    return {
-      totalUsers,
-      activeUsers,
-      totalBalances: formattedTotals
-    };
+    return await dbVirtualAccounts.getServerVirtualAccountsSummary(guildId);
   } catch (error) {
     console.error(`[VIRTUAL] Error getting server summary:`, error.message);
     return {
@@ -345,13 +272,14 @@ function getServerVirtualAccountsSummary(guildId) {
 }
 
 // Process blockchain deposit event
-function processBlockchainDeposit(guildId, senderWallet, receiverWallet, tokenTicker, amount, txHash) {
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") or ticker for backward compatibility
+async function processBlockchainDeposit(guildId, senderWallet, receiverWallet, tokenIdentifier, amount, txHash) {
   try {
     // Load server data to find user by wallet address
-    const serverData = JSON.parse(fs.readFileSync('server-data.json', 'utf8'));
-    const guildData = serverData[guildId];
+    const dbServerData = require('./db/server-data');
+    const userWallets = await dbServerData.getUserWallets(guildId);
     
-    if (!guildData || !guildData.userWallets) {
+    if (!userWallets || Object.keys(userWallets).length === 0) {
       console.log(`[VIRTUAL] No user wallets found for guild ${guildId}`);
       return {
         success: false,
@@ -361,7 +289,7 @@ function processBlockchainDeposit(guildId, senderWallet, receiverWallet, tokenTi
     
     // Find user by wallet address
     let userId = null;
-    for (const [uid, wallet] of Object.entries(guildData.userWallets)) {
+    for (const [uid, wallet] of Object.entries(userWallets)) {
       if (wallet.toLowerCase() === senderWallet.toLowerCase()) {
         userId = uid;
         break;
@@ -390,10 +318,10 @@ function processBlockchainDeposit(guildId, senderWallet, receiverWallet, tokenTi
     }
     
     // Add funds to user account (with username if available)
-    const result = addFundsToAccount(guildId, userId, tokenTicker, amount, txHash, 'blockchain_deposit', username);
+    const result = await addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHash, 'blockchain_deposit', username);
     
     if (result.success) {
-      console.log(`[VIRTUAL] Successfully processed blockchain deposit: ${amount} ${tokenTicker} for user ${userId} in guild ${guildId}`);
+      console.log(`[VIRTUAL] Successfully processed blockchain deposit: ${amount} ${tokenIdentifier} for user ${userId} in guild ${guildId}`);
       console.log(`[VIRTUAL] Account created/updated with username: ${username || 'null (will be updated on next Discord command)'}`);
     }
     
@@ -407,29 +335,16 @@ function processBlockchainDeposit(guildId, senderWallet, receiverWallet, tokenTi
   }
 }
 
-// Load data on startup
-loadVirtualAccountsData();
-
-// Force reload function for debugging
+// Force reload function for debugging (no-op with database)
 function forceReloadData() {
-  console.log('[VIRTUAL] 🔄 Force reloading virtual accounts data...');
-  loadVirtualAccountsData();
-  console.log('[VIRTUAL] ✅ Data reloaded successfully');
+  console.log('[VIRTUAL] 🔄 Database always has latest data, no reload needed');
 }
 
 // Update username for a user account
-function updateUserUsername(guildId, userId, username) {
+async function updateUserUsername(guildId, userId, username) {
   try {
-    const account = getUserAccount(guildId, userId, username);
-    if (account.username !== username) {
-      const oldUsername = account.username;
-      account.username = username;
-      account.lastUpdated = Date.now();
-      saveVirtualAccountsData();
-      console.log(`[VIRTUAL] Updated username for user ${userId}: "${oldUsername}" → "${username}"`);
-    } else {
-      console.log(`[VIRTUAL] Username for user ${userId} is already up to date: "${username}"`);
-    }
+    // getUserAccount automatically updates username if provided and different
+    await dbVirtualAccounts.getUserAccount(guildId, userId, username);
     return { success: true };
   } catch (error) {
     console.error(`[VIRTUAL] Error updating username:`, error.message);
@@ -438,25 +353,19 @@ function updateUserUsername(guildId, userId, username) {
 }
 
 // Update usernames for all users in a guild (called from Discord bot)
-function updateAllUsernamesInGuild(guildId, userMap) {
+async function updateAllUsernamesInGuild(guildId, userMap) {
   try {
-    if (!virtualAccountsData[guildId]) {
-      console.log(`[VIRTUAL] No virtual accounts found for guild ${guildId}`);
-      return { success: true, updated: 0 };
-    }
-    
     let updated = 0;
-    for (const [userId, account] of Object.entries(virtualAccountsData[guildId])) {
-      if (userMap[userId] && account.username !== userMap[userId]) {
-        account.username = userMap[userId];
-        account.lastUpdated = Date.now();
+    for (const [userId, username] of Object.entries(userMap)) {
+      try {
+        await dbVirtualAccounts.getUserAccount(guildId, userId, username);
         updated++;
-        console.log(`[VIRTUAL] Updated username for user ${userId} to ${userMap[userId]}`);
+      } catch (error) {
+        console.error(`[VIRTUAL] Error updating username for user ${userId}:`, error.message);
       }
     }
     
     if (updated > 0) {
-      saveVirtualAccountsData();
       console.log(`[VIRTUAL] Updated ${updated} usernames in guild ${guildId}`);
     }
     
@@ -467,11 +376,18 @@ function updateAllUsernamesInGuild(guildId, userMap) {
   }
 }
 
+// Get all virtual accounts with balances for a guild
+async function getAllVirtualAccountsWithBalances(guildId) {
+  try {
+    return await dbVirtualAccounts.getAllVirtualAccountsWithBalances(guildId);
+  } catch (error) {
+    console.error('[VIRTUAL] Error getting all virtual accounts with balances:', error);
+    throw error;
+  }
+}
+
 // Export functions
 module.exports = {
-  loadVirtualAccountsData,
-  saveVirtualAccountsData,
-  initializeVirtualAccounts,
   getUserAccount,
   getUserBalance,
   getAllUserBalances,
@@ -484,5 +400,6 @@ module.exports = {
   forceReloadData,
   updateUserUsername,
   updateAllUsernamesInGuild,
-  cleanupOldTransactions
+  cleanupOldTransactions,
+  getAllVirtualAccountsWithBalances
 };

@@ -1,0 +1,477 @@
+const supabase = require('../supabase-client');
+const BigNumber = require('bignumber.js');
+
+async function getUserAccount(guildId, userId, username = null) {
+  try {
+    const { data, error } = await supabase
+      .from('virtual_accounts')
+      .select('*')
+      .eq('guild_id', guildId)
+      .eq('user_id', userId)
+      .single();
+    
+    if (error && error.code !== 'PGRST116') throw error;
+    
+    if (!data) {
+      // Create new account if it doesn't exist
+      const now = Date.now();
+      const newAccount = {
+        guild_id: guildId,
+        user_id: userId,
+        username: username,
+        balances: {},
+        created_at: now,
+        last_updated: now
+      };
+      
+      const { data: createdData, error: createError } = await supabase
+        .from('virtual_accounts')
+        .insert(newAccount)
+        .select()
+        .single();
+      
+      if (createError) throw createError;
+      
+      return {
+        guildId: createdData.guild_id,
+        userId: createdData.user_id,
+        username: createdData.username,
+        balances: createdData.balances || {},
+        createdAt: createdData.created_at,
+        lastUpdated: createdData.last_updated
+      };
+    }
+    
+    // Update username if provided and different
+    if (username && data.username !== username) {
+      await supabase
+        .from('virtual_accounts')
+        .update({ username: username })
+        .eq('guild_id', guildId)
+        .eq('user_id', userId);
+    }
+    
+    // Sanitize balances - replace "NaN" strings with "0"
+    const balances = data.balances || {};
+    const sanitizedBalances = {};
+    for (const [token, balance] of Object.entries(balances)) {
+      if (balance === null || balance === undefined || balance === 'null' || balance === 'undefined' || balance === 'NaN') {
+        sanitizedBalances[token] = '0';
+      } else {
+        // Double-check with BigNumber to catch numeric NaN
+        const BigNumber = require('bignumber.js');
+        const balanceBN = new BigNumber(balance);
+        if (balanceBN.isNaN()) {
+          sanitizedBalances[token] = '0';
+        } else {
+          sanitizedBalances[token] = balance.toString();
+        }
+      }
+    }
+    
+    return {
+      guildId: data.guild_id,
+      userId: data.user_id,
+      username: data.username,
+      balances: sanitizedBalances,
+      createdAt: data.created_at,
+      lastUpdated: data.last_updated
+    };
+  } catch (error) {
+    console.error('[DB] Error getting user account:', error);
+    throw error;
+  }
+}
+
+async function getAccountBalance(guildId, userId, tokenTicker) {
+  try {
+    const account = await getUserAccount(guildId, userId);
+    const balances = account.balances || {};
+    
+    // Case-insensitive token lookup
+    const tokenKey = Object.keys(balances).find(
+      key => key.toLowerCase() === tokenTicker.toLowerCase()
+    ) || tokenTicker;
+    
+    let balance = balances[tokenKey];
+    
+    // If token doesn't exist in balances, return '0'
+    if (balance === undefined || balance === null) {
+      console.log(`[DB] Token ${tokenTicker} not found in balances for user ${userId}, returning 0`);
+      return '0';
+    }
+    
+    // Sanitize balance value - handle "NaN" string
+    if (balance === 'null' || balance === 'undefined' || balance === 'NaN') {
+      console.log(`[DB] Invalid balance value "${balance}" for token ${tokenTicker}, returning 0`);
+      return '0';
+    }
+    
+    // Check if it's a valid number
+    const BigNumber = require('bignumber.js');
+    const balanceBN = new BigNumber(balance);
+    if (balanceBN.isNaN()) {
+      console.log(`[DB] Balance "${balance}" is NaN for token ${tokenTicker}, returning 0`);
+      return '0';
+    }
+    
+    return balance.toString();
+  } catch (error) {
+    console.error('[DB] Error getting account balance:', error);
+    // Return '0' on error instead of throwing, to prevent undefined returns
+    return '0';
+  }
+}
+
+async function getAllUserBalances(guildId, userId) {
+  try {
+    const account = await getUserAccount(guildId, userId);
+    return account.balances || {};
+  } catch (error) {
+    console.error('[DB] Error getting all user balances:', error);
+    throw error;
+  }
+}
+
+async function updateAccountBalance(guildId, userId, tokenIdentifier, amountChange) {
+  try {
+    // Validate that tokenIdentifier is a full identifier (format: TICKER-6hexchars)
+    // This ensures we NEVER store tickers, only identifiers
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      throw new Error(`Invalid token identifier format: "${tokenIdentifier}". Expected format: TICKER-6hexchars (e.g., "USDC-c76f1f"). Tickers are not allowed for security reasons.`);
+    }
+    
+    const account = await getUserAccount(guildId, userId);
+    const balances = account.balances || {};
+    
+    // Find existing token with case-insensitive matching (by identifier only)
+    const existingToken = Object.keys(balances).find(
+      key => key.toLowerCase() === tokenIdentifier.toLowerCase()
+    );
+    
+    // Use the provided identifier (never fall back to ticker)
+    const tokenKey = tokenIdentifier;
+    
+    // Use BigNumber for large number arithmetic
+    const BigNumber = require('bignumber.js');
+    
+    // Sanitize current balance - handle "NaN" string from database
+    let currentBalanceValue = balances[tokenKey] || '0';
+    if (currentBalanceValue === 'NaN' || currentBalanceValue === null || currentBalanceValue === undefined) {
+      currentBalanceValue = '0';
+    }
+    const currentBalance = new BigNumber(currentBalanceValue);
+    
+    // Validate current balance is not NaN
+    if (currentBalance.isNaN()) {
+      console.warn(`[DB] Current balance for ${tokenKey} is NaN, resetting to 0`);
+      currentBalanceValue = '0';
+    }
+    
+    // Validate and sanitize amountChange
+    let amountChangeStr = amountChange;
+    if (typeof amountChange === 'string' && (amountChange === 'NaN' || isNaN(parseFloat(amountChange)))) {
+      throw new Error(`Invalid amount change: ${amountChange}`);
+    }
+    if (typeof amountChange === 'number' && isNaN(amountChange)) {
+      throw new Error(`Invalid amount change: ${amountChange}`);
+    }
+    amountChangeStr = amountChange.toString();
+    
+    const change = new BigNumber(amountChangeStr);
+    if (change.isNaN()) {
+      throw new Error(`Invalid amount change: ${amountChange}`);
+    }
+    
+    const currentBalanceBN = new BigNumber(currentBalanceValue);
+    const newBalance = currentBalanceBN.plus(change);
+    
+    if (newBalance.isNaN()) {
+      throw new Error('Balance calculation resulted in NaN');
+    }
+    
+    const newBalanceStr = newBalance.toString();
+    balances[tokenKey] = newBalanceStr;
+    
+    // Sanitize all balances before saving to prevent NaN storage
+    const sanitizedBalances = {};
+    for (const [token, balance] of Object.entries(balances)) {
+      if (balance === null || balance === undefined || balance === 'null' || balance === 'undefined' || balance === 'NaN') {
+        sanitizedBalances[token] = '0';
+      } else {
+        const balanceBN = new BigNumber(balance);
+        if (balanceBN.isNaN()) {
+          sanitizedBalances[token] = '0';
+        } else {
+          sanitizedBalances[token] = balance.toString();
+        }
+      }
+    }
+    
+    const { error } = await supabase
+      .from('virtual_accounts')
+      .update({
+        balances: sanitizedBalances,
+        last_updated: Date.now(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('guild_id', guildId)
+      .eq('user_id', userId);
+    
+    if (error) throw error;
+    return newBalanceStr;
+  } catch (error) {
+    console.error('[DB] Error updating account balance:', error);
+    throw error;
+  }
+}
+
+async function addTransaction(guildId, userId, transaction) {
+  try {
+    const { error } = await supabase
+      .from('virtual_account_transactions')
+      .insert({
+        guild_id: guildId,
+        user_id: userId,
+        transaction_id: transaction.id,
+        type: transaction.type,
+        token: transaction.token,
+        amount: transaction.amount,
+        balance_before: transaction.balanceBefore,
+        balance_after: transaction.balanceAfter,
+        tx_hash: transaction.txHash || null,
+        source: transaction.source || null,
+        timestamp: transaction.timestamp,
+        description: transaction.description || null
+      });
+    
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('[DB] Error adding transaction:', error);
+    throw error;
+  }
+}
+
+async function getTransactionHistory(guildId, userId, limit = 50) {
+  try {
+    const { data, error } = await supabase
+      .from('virtual_account_transactions')
+      .select('*')
+      .eq('guild_id', guildId)
+      .eq('user_id', userId)
+      .order('timestamp', { ascending: false })
+      .limit(limit);
+    
+    if (error) throw error;
+    
+    return (data || []).map(row => ({
+      id: row.transaction_id,
+      type: row.type,
+      token: row.token,
+      amount: row.amount,
+      balanceBefore: row.balance_before,
+      balanceAfter: row.balance_after,
+      txHash: row.tx_hash,
+      source: row.source,
+      timestamp: row.timestamp,
+      description: row.description
+    }));
+  } catch (error) {
+    console.error('[DB] Error getting transaction history:', error);
+    throw error;
+  }
+}
+
+// Clean up old transaction history (keep only last 100 transactions per user)
+async function cleanupOldTransactions() {
+  try {
+    let totalCleaned = 0;
+    let usersProcessed = 0;
+    
+    // Get all unique (guild_id, user_id) combinations
+    const { data: allAccounts, error: accountsError } = await supabase
+      .from('virtual_accounts')
+      .select('guild_id, user_id');
+    
+    if (accountsError) throw accountsError;
+    
+    if (!allAccounts || allAccounts.length === 0) {
+      return { totalCleaned: 0, usersProcessed: 0 };
+    }
+    
+    // Process each user's transactions
+    for (const account of allAccounts) {
+      try {
+        // Get transaction count for this user
+        const { count, error: countError } = await supabase
+          .from('virtual_account_transactions')
+          .select('*', { count: 'exact', head: true })
+          .eq('guild_id', account.guild_id)
+          .eq('user_id', account.user_id);
+        
+        if (countError) {
+          console.error(`[DB] Error counting transactions for user ${account.user_id} in guild ${account.guild_id}:`, countError);
+          continue;
+        }
+        
+        // If user has more than 100 transactions, keep only the latest 100
+        if (count > 100) {
+          // Get the timestamp of the 100th most recent transaction
+          const { data: transactions, error: transError } = await supabase
+            .from('virtual_account_transactions')
+            .select('timestamp')
+            .eq('guild_id', account.guild_id)
+            .eq('user_id', account.user_id)
+            .order('timestamp', { ascending: false })
+            .limit(1)
+            .range(99, 99); // Get the 100th transaction (0-indexed, so 99)
+          
+          if (transError) {
+            console.error(`[DB] Error getting cutoff timestamp for user ${account.user_id}:`, transError);
+            continue;
+          }
+          
+          if (transactions && transactions.length > 0) {
+            const cutoffTimestamp = transactions[0].timestamp;
+            
+            // Delete all transactions older than the cutoff timestamp
+            const { error: deleteError, count: deletedCount } = await supabase
+              .from('virtual_account_transactions')
+              .delete({ count: 'exact' })
+              .eq('guild_id', account.guild_id)
+              .eq('user_id', account.user_id)
+              .lt('timestamp', cutoffTimestamp);
+            
+            if (deleteError) {
+              console.error(`[DB] Error deleting old transactions for user ${account.user_id}:`, deleteError);
+              continue;
+            }
+            
+            totalCleaned += deletedCount || 0;
+          }
+        }
+        
+        usersProcessed++;
+      } catch (error) {
+        console.error(`[DB] Error processing cleanup for user ${account.user_id} in guild ${account.guild_id}:`, error);
+        continue;
+      }
+    }
+    
+    return {
+      totalCleaned,
+      usersProcessed
+    };
+  } catch (error) {
+    console.error('[DB] Error cleaning up old transactions:', error);
+    throw error;
+  }
+}
+
+// Get server-wide virtual accounts summary
+async function getServerVirtualAccountsSummary(guildId) {
+  try {
+    const { data, error } = await supabase
+      .from('virtual_accounts')
+      .select('user_id, balances')
+      .eq('guild_id', guildId);
+    
+    if (error) throw error;
+    
+    const totalUsers = data?.length || 0;
+    let activeUsers = 0;
+    const totalBalances = {};
+    
+    (data || []).forEach(account => {
+      const balances = account.balances || {};
+      let hasBalance = false;
+      
+      for (const [token, balance] of Object.entries(balances)) {
+        const balanceBN = new BigNumber(balance || '0');
+        if (balanceBN.isGreaterThan(0)) {
+          hasBalance = true;
+          
+          if (!totalBalances[token]) {
+            totalBalances[token] = new BigNumber(0);
+          }
+          totalBalances[token] = totalBalances[token].plus(balanceBN);
+        }
+      }
+      
+      if (hasBalance) {
+        activeUsers++;
+      }
+    });
+    
+    // Convert BigNumber values to strings
+    const totalBalancesStr = {};
+    for (const [token, balance] of Object.entries(totalBalances)) {
+      totalBalancesStr[token] = balance.toString();
+    }
+    
+    return {
+      totalUsers,
+      activeUsers,
+      totalBalances: totalBalancesStr
+    };
+  } catch (error) {
+    console.error('[DB] Error getting server virtual accounts summary:', error);
+    throw error;
+  }
+}
+
+// Get all virtual accounts with balances for a guild (for mass refund)
+async function getAllVirtualAccountsWithBalances(guildId) {
+  try {
+    const { data, error } = await supabase
+      .from('virtual_accounts')
+      .select('user_id, username, balances')
+      .eq('guild_id', guildId);
+    
+    if (error) throw error;
+    
+    const accountsWithBalances = [];
+    
+    (data || []).forEach(account => {
+      const balances = account.balances || {};
+      const userBalances = {};
+      let hasBalance = false;
+      
+      for (const [token, balance] of Object.entries(balances)) {
+        const balanceBN = new BigNumber(balance || '0');
+        if (balanceBN.isGreaterThan(0)) {
+          hasBalance = true;
+          userBalances[token] = balance.toString();
+        }
+      }
+      
+      if (hasBalance) {
+        accountsWithBalances.push({
+          userId: account.user_id,
+          username: account.username,
+          balances: userBalances
+        });
+      }
+    });
+    
+    return accountsWithBalances;
+  } catch (error) {
+    console.error('[DB] Error getting all virtual accounts with balances:', error);
+    throw error;
+  }
+}
+
+module.exports = {
+  getUserAccount,
+  getAccountBalance,
+  getAllUserBalances,
+  getAllVirtualAccountsWithBalances,
+  updateAccountBalance,
+  addTransaction,
+  getTransactionHistory,
+  cleanupOldTransactions,
+  getServerVirtualAccountsSummary
+};
+

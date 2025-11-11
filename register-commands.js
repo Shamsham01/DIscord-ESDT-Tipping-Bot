@@ -1,10 +1,22 @@
 require('dotenv').config();
 const { REST, Routes, ApplicationCommandOptionType } = require('discord.js');
+const fetch = require('node-fetch');
 
-// Add debug logging
+// Add debug logging and validation
 console.log('Environment variables check:');
 console.log('TOKEN:', process.env.TOKEN ? 'Found' : 'Missing');
-console.log('CLIENT_ID:', process.env.CLIENT_ID);
+console.log('CLIENT_ID:', process.env.CLIENT_ID ? 'Found' : 'Missing');
+
+// Validate required environment variables
+if (!process.env.TOKEN) {
+    console.error('❌ ERROR: TOKEN is missing from .env file!');
+    process.exit(1);
+}
+
+if (!process.env.CLIENT_ID) {
+    console.error('❌ ERROR: CLIENT_ID is missing from .env file!');
+    process.exit(1);
+}
 
 const commands = [
     {
@@ -171,7 +183,7 @@ const commands = [
     },
     {
         name: 'list-wallets',
-        description: 'List registered wallets by username (Admin only)',
+        description: 'List registered wallets by username (Public - verify your wallet registration)',
         options: [
             {
                 name: 'filter',
@@ -224,8 +236,8 @@ const commands = [
                 required: true,
             },
             {
-                name: 'qr-code-url',
-                description: 'QR code image URL for the wallet address (optional)',
+                name: 'project-logo-url',
+                description: 'Project logo image URL (optional)',
                 type: ApplicationCommandOptionType.String,
                 required: false,
             },
@@ -274,8 +286,14 @@ const commands = [
                 required: false,
             },
             {
+                name: 'project-logo-url',
+                description: 'Project logo image URL (stored in projects table) (optional)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+            },
+            {
                 name: 'qr-code-url',
-                description: 'QR code image URL for the wallet address (optional)',
+                description: 'Community Fund QR code URL (stored in community_fund_qr table) (optional)',
                 type: ApplicationCommandOptionType.String,
                 required: false,
             },
@@ -328,25 +346,37 @@ const commands = [
         default_member_permissions: null, // Permissions are checked in code
     },
     {
-        name: 'set-community-fund',
-        description: 'Set the project to be used as the Community Tip Fund (Admin only)',
+        name: 'delete-all-server-data',
+        description: 'Delete ALL server data and perform mass refund (Admin only - Hard Reset)',
         options: [
             {
-                name: 'project-name',
-                description: 'The project to use as the Community Tip Fund',
+                name: 'confirm',
+                description: 'Type "DELETE ALL DATA" to confirm complete server data deletion',
                 type: ApplicationCommandOptionType.String,
                 required: true,
-                autocomplete: true
+            }
+        ],
+        default_member_permissions: null, // Permissions are checked in code
+    },
+    {
+        name: 'set-community-fund',
+        description: 'Create and set the Community Tip Fund wallet (Admin only - Auto-generated wallet)',
+        options: [
+            {
+                name: 'fund-name',
+                description: 'Name for the Community Fund (e.g., "Main Fund", "Gaming Fund")',
+                type: ApplicationCommandOptionType.String,
+                required: true
+            },
+            {
+                name: 'supported-tokens',
+                description: 'Comma-separated list of supported token tickers (e.g., EGLD,USDC,USDT)',
+                type: ApplicationCommandOptionType.String,
+                required: true
             },
             {
                 name: 'qr-code-url',
                 description: 'URL to the community fund wallet QR code image (optional)',
-                type: ApplicationCommandOptionType.String,
-                required: false
-            },
-            {
-                name: 'confirm',
-                description: 'Type CONFIRM to overwrite the current Community Tip Fund',
                 type: ApplicationCommandOptionType.String,
                 required: false
             }
@@ -421,14 +451,14 @@ const commands = [
         options: [
             {
                 name: 'challenge-id',
-                type: 3,
+                type: ApplicationCommandOptionType.String,
                 description: 'The ID of the RPS challenge',
                 required: true,
                 autocomplete: true
             },
             {
                 name: 'move',
-                type: 3,
+                type: ApplicationCommandOptionType.String,
                 description: 'Your move (rock, paper, or scissors)',
                 required: true,
                 choices: [
@@ -437,7 +467,8 @@ const commands = [
                     { name: 'Scissors', value: 'scissors' }
                 ]
             }
-        ]
+        ],
+        default_member_permissions: null, // Permissions are checked in code
     },
     {
         name: 'debug-server-config',
@@ -631,6 +662,10 @@ const commands = [
                     {
                         name: '🎨 Auction House Balance',
                         value: 'auction'
+                    },
+                    {
+                        name: '🎲 Lottery House Balance',
+                        value: 'lottery'
                     }
                 ]
             },
@@ -674,6 +709,10 @@ const commands = [
                     {
                         name: '🎨 Auction House Balance',
                         value: 'auction'
+                    },
+                    {
+                        name: '🎲 Lottery House Balance',
+                        value: 'lottery'
                     }
                 ]
             },
@@ -693,10 +732,9 @@ const commands = [
             },
             {
                 name: 'amount',
-                description: 'Amount to withdraw',
-                type: ApplicationCommandOptionType.Number,
-                required: true,
-                min_value: 0
+                description: 'Amount to withdraw (enter a number or "MAX" for full balance)',
+                type: ApplicationCommandOptionType.String,
+                required: true
             },
             {
                 name: 'memo',
@@ -762,6 +800,20 @@ const commands = [
         name: 'update-usernames',
         description: 'Update Discord usernames for all virtual accounts (Admin only)',
         options: [],
+        default_member_permissions: null,
+    },
+    {
+        name: 'check-community-fund-balance',
+        description: 'Check Community Fund balances for withdrawals (Admin only)',
+        options: [
+            {
+                name: 'transfers',
+                description: 'Number of transfers to check (default: 1)',
+                type: ApplicationCommandOptionType.Integer,
+                required: false,
+                min_value: 1
+            }
+        ],
         default_member_permissions: null,
     },
     {
@@ -860,7 +912,115 @@ const commands = [
         options: [],
         default_member_permissions: null,
     },
+    {
+        name: 'create-lottery',
+        description: 'Create a new lottery game (Admin only)',
+        options: [
+            {
+                name: 'winning_numbers_count',
+                description: 'Number of numbers users need to pick (1-10)',
+                type: ApplicationCommandOptionType.Integer,
+                required: true,
+                min_value: 1,
+                max_value: 10
+            },
+            {
+                name: 'total_pool_numbers',
+                description: 'Total numbers in the pool (5-100)',
+                type: ApplicationCommandOptionType.Integer,
+                required: true,
+                min_value: 5,
+                max_value: 100
+            },
+            {
+                name: 'token',
+                description: 'Token to use for tickets and prizes',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'drawing_frequency',
+                description: 'How often to draw winners',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                choices: [
+                    { name: '1 Hour', value: '1h' },
+                    { name: '1 Day', value: '1d' },
+                    { name: '1 Week', value: '1W' },
+                    { name: '1 Month', value: '1M' }
+                ]
+            },
+            {
+                name: 'ticket_price',
+                description: 'Price per ticket',
+                type: ApplicationCommandOptionType.Number,
+                required: true,
+                min_value: 0.00000001
+            },
+            {
+                name: 'house_commission',
+                description: 'House commission percentage (0-50)',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 0,
+                max_value: 50
+            }
+        ],
+        default_member_permissions: null, // Permissions checked in code
+    },
+    {
+        name: 'my-active-lottery-tickets',
+        description: 'View your active lottery tickets',
+        options: [
+            {
+                name: 'token',
+                description: 'Filter by token (optional)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                autocomplete: true
+            },
+            {
+                name: 'page',
+                description: 'Page number (default: 1)',
+                type: ApplicationCommandOptionType.Integer,
+                required: false,
+                min_value: 1
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
+        name: 'my-expired-tickets',
+        description: 'View your expired lottery tickets with results',
+        options: [
+            {
+                name: 'token',
+                description: 'Filter by token (optional)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                autocomplete: true
+            },
+            {
+                name: 'page',
+                description: 'Page number (default: 1)',
+                type: ApplicationCommandOptionType.Integer,
+                required: false,
+                min_value: 1
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
+        name: 'my-lottery-stats',
+        description: 'View your lottery statistics across all tokens',
+        options: [],
+        default_member_permissions: null,
+    },
 ];
+
+// Export commands for use in other scripts
+module.exports = { commands };
 
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
@@ -874,43 +1034,160 @@ function withTimeout(promise, timeoutMs, errorMessage) {
     ]);
 }
 
-(async () => {
+// Retry function with exponential backoff
+async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 5000) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        } catch (error) {
+            if (attempt === maxRetries) {
+                throw error;
+            }
+            
+            const delay = initialDelay * Math.pow(2, attempt - 1);
+            console.log(`⚠️  Attempt ${attempt} failed. Retrying in ${delay / 1000} seconds...`);
+            console.log(`   Error: ${error.message}`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
+
+// Only run global registration if this file is executed directly (not imported)
+if (require.main === module) {
+    (async () => {
     try {
         console.log(`\n📊 Registering ${commands.length} commands...`);
         console.log(`⏱️  This may take up to 30 seconds due to Discord rate limits.\n`);
         
-        // Delete all global commands first
-        console.log('🗑️  Step 1: Deleting all global slash commands...');
-        try {
-            await withTimeout(
-                rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: [] }),
-                30000, // 30 second timeout
-                'Command deletion timed out after 30 seconds'
-            );
-            console.log('✅ All global commands deleted.\n');
-        } catch (deleteError) {
-            console.error('❌ Error deleting commands:', deleteError.message);
-            if (deleteError.message.includes('429')) {
-                console.error('⚠️  Rate limited! Please wait 5-10 minutes and try again.');
-                process.exit(1);
+        // Ask user if they want to delete existing commands first
+        // Skip deletion by default to avoid losing commands if registration fails
+        const SKIP_DELETE = process.env.SKIP_DELETE !== 'false'; // Default to true (skip delete)
+        
+        if (!SKIP_DELETE) {
+            // Delete all global commands first
+            console.log('🗑️  Step 1: Deleting all global slash commands...');
+            try {
+                await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: [] });
+                console.log('✅ All global commands deleted.\n');
+            } catch (deleteError) {
+                console.error('❌ Error deleting commands:', deleteError.message);
+                if (deleteError.message.includes('429')) {
+                    console.error('⚠️  Rate limited! Please wait 5-10 minutes and try again.');
+                    process.exit(1);
+                }
+                // Continue anyway - commands might already be deleted
             }
-            // Continue anyway - commands might already be deleted
+
+            // Wait a few seconds to ensure deletion is processed
+            console.log('⏳ Waiting 10 seconds for Discord to process deletion...');
+            await new Promise(resolve => setTimeout(resolve, 10000));
+        } else {
+            console.log('💡 Skipping deletion step (commands will be updated/merged)');
+            console.log('   Set SKIP_DELETE=false in .env to delete first\n');
         }
 
-        // Wait a few seconds to ensure deletion is processed
-        console.log('⏳ Waiting 5 seconds for Discord to process deletion...');
-        await new Promise(resolve => setTimeout(resolve, 5000));
-
-        // Register new global commands
+        // Register new global commands with retry logic
         console.log('📝 Step 2: Registering new global slash commands...');
         console.log(`📦 Total commands: ${commands.length}`);
+        console.log('⏳ This may take 2-3 minutes if Discord API is slow...\n');
         
+        // Validate commands structure first
+        console.log('🔍 Validating command structure...');
+        for (let i = 0; i < commands.length; i++) {
+            const cmd = commands[i];
+            if (!cmd.name || !cmd.description) {
+                console.error(`❌ Command ${i + 1} is missing name or description:`, cmd);
+                process.exit(1);
+            }
+            if (cmd.name.length > 32) {
+                console.error(`❌ Command ${i + 1} name too long (max 32): ${cmd.name}`);
+                process.exit(1);
+            }
+            if (cmd.description.length > 100) {
+                console.error(`❌ Command ${i + 1} description too long (max 100): ${cmd.description}`);
+                process.exit(1);
+            }
+        }
+        console.log('✅ Command structure validation passed.\n');
+        
+        // Test network connectivity first
+        console.log('🌐 Testing network connectivity to Discord API...');
+        try {
+            const testUrl = 'https://discord.com/api/v10';
+            const testResponse = await fetch(testUrl, { 
+                method: 'HEAD',
+                signal: AbortSignal.timeout(5000)
+            });
+            console.log('✅ Network connectivity OK\n');
+        } catch (networkError) {
+            console.error('❌ Network connectivity test failed!');
+            console.error('Error:', networkError.message);
+            console.error('\n💡 Troubleshooting steps:');
+            console.error('   1. Check your internet connection');
+            console.error('   2. Check if Discord API is accessible: https://discord.com/api/v10');
+            console.error('   3. Check firewall/proxy settings');
+            console.error('   4. Try using a VPN if Discord is blocked in your region');
+            console.error('   5. Wait a few minutes and try again (Discord might be experiencing issues)\n');
+            throw new Error('Network connectivity test failed. Cannot proceed with registration.');
+        }
+
         const startTime = Date.now();
-        const registeredCommands = await withTimeout(
-            rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands }),
-            60000, // 60 second timeout
-            'Command registration timed out after 60 seconds. Discord may be rate limiting.'
-        );
+        const registeredCommands = await retryWithBackoff(async () => {
+            try {
+                // Add timeout to the request
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+                
+                try {
+                    const result = await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { 
+                        body: commands,
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    return result;
+                } catch (fetchError) {
+                    clearTimeout(timeoutId);
+                    throw fetchError;
+                }
+            } catch (error) {
+                // Log the actual Discord error response
+                console.error('\n📋 Discord API Error Details:');
+                console.error('Status:', error.status || error.statusCode || 'Unknown');
+                console.error('Message:', error.message);
+                
+                // Handle DNS/network errors specifically
+                if (error.code === 'ENOTFOUND' || error.message.includes('ENOTFOUND') || error.message.includes('getaddrinfo')) {
+                    console.error('\n⚠️  DNS/Network Error Detected!');
+                    console.error('   This is a network connectivity issue, not a code problem.');
+                    console.error('   Possible causes:');
+                    console.error('   - DNS resolution failure');
+                    console.error('   - Firewall/proxy blocking Discord API');
+                    console.error('   - Discord API temporarily unavailable');
+                    console.error('   - Network connectivity issues');
+                    console.error('\n💡 Solutions:');
+                    console.error('   1. Check your internet connection');
+                    console.error('   2. Try again in a few minutes');
+                    console.error('   3. Check firewall/antivirus settings');
+                    console.error('   4. Try using guild commands instead (they work!)');
+                    console.error('   5. Use a VPN if Discord is blocked in your region');
+                }
+                
+                if (error.requestBody) {
+                    console.error('Request Body Size:', JSON.stringify(error.requestBody).length, 'bytes');
+                }
+                if (error.rawError) {
+                    console.error('Raw Error:', JSON.stringify(error.rawError, null, 2));
+                }
+                if (error.code) {
+                    console.error('Error Code:', error.code);
+                }
+                if (error.status === 400) {
+                    console.error('\n⚠️  BAD REQUEST (400) - One or more commands have invalid structure!');
+                    console.error('Check the command structure above for issues.');
+                }
+                throw error;
+            }
+        }, 3, 10000); // 3 retries, starting with 10 second delay
         
         const duration = ((Date.now() - startTime) / 1000).toFixed(2);
         console.log(`✅ Global slash commands were registered successfully! (took ${duration}s)\n`);
@@ -932,20 +1209,51 @@ function withTimeout(promise, timeoutMs, errorMessage) {
         console.error('\n❌ Registration failed!\n');
         console.error('Error:', error.message);
         
-        if (error.message.includes('429') || error.status === 429) {
+        // Log full error details
+        if (error.status) {
+            console.error('HTTP Status:', error.status);
+        }
+        if (error.code) {
+            console.error('Error Code:', error.code);
+        }
+        if (error.rawError) {
+            console.error('Discord Error Response:', JSON.stringify(error.rawError, null, 2));
+        }
+        
+        if (error.status === 400) {
+            console.error('\n⚠️  BAD REQUEST (400) - Invalid command structure!');
+            console.error('One or more commands have invalid options or structure.');
+            console.error('Common issues:');
+            console.error('  - Option name/description too long');
+            console.error('  - Invalid option type');
+            console.error('  - Missing required fields');
+            console.error('  - Command name/description too long');
+            console.error('\n💡 TIP: Try registering commands in smaller batches to identify the problematic command.\n');
+        } else if (error.message.includes('429') || error.status === 429) {
             console.error('\n⚠️  RATE LIMIT EXCEEDED!');
             console.error('Discord allows 200 command updates per day per application.');
-            console.error('Please wait 5-10 minutes before trying again.\n');
+            console.error('Per-endpoint limit: 5 requests per 5 seconds');
+            console.error('\n⏰ WAIT TIME RECOMMENDATIONS:');
+            console.error('   - For 429 errors: Wait 10-15 minutes');
+            console.error('   - For timeout errors: Wait 5-10 minutes');
+            console.error('   - If you hit daily limit (200/day): Wait 24 hours\n');
         } else if (error.message.includes('401') || error.status === 401) {
             console.error('\n⚠️  AUTHENTICATION ERROR!');
             console.error('Please check your TOKEN and CLIENT_ID in .env file.\n');
         } else if (error.message.includes('timeout')) {
             console.error('\n⚠️  TIMEOUT ERROR!');
-            console.error('Discord API is slow or rate limiting. Please wait 5-10 minutes and try again.\n');
+            console.error('Discord API is slow or rate limiting.');
+            console.error('\n⏰ WAIT TIME RECOMMENDATIONS:');
+            console.error('   - Wait 15-20 minutes before trying again');
+            console.error('   - The API may be experiencing high load');
+            console.error('   - Try again during off-peak hours (late night/early morning UTC)\n');
+            console.error('💡 TIP: The script will now retry automatically with exponential backoff.');
+            console.error('   If it still fails after 3 attempts, wait 20-30 minutes.\n');
         } else {
             console.error('\nError details:', error.stack);
         }
         
         process.exit(1);
     }
-})(); 
+    })();
+} 
