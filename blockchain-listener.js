@@ -11,6 +11,16 @@ try {
   virtualAccounts = null;
 }
 
+// Import NFT virtual accounts functions
+let virtualAccountsNFT;
+try {
+  virtualAccountsNFT = require('./db/virtual-accounts-nft');
+  console.log('[BLOCKCHAIN] ✅ NFT virtual accounts module loaded successfully');
+} catch (error) {
+  console.error('[BLOCKCHAIN] ❌ Failed to load NFT virtual accounts module:', error.message);
+  virtualAccountsNFT = null;
+}
+
 // Import Supabase client
 const supabase = require('./supabase-client');
 
@@ -189,7 +199,8 @@ async function getAllCommunityFundWallets() {
 async function fetchLatestTransactions(walletAddress, fromTimestamp) {
   try {
     // Fetch transactions after the last known timestamp for this wallet
-    const url = `${API_BASE_URL}/accounts/${walletAddress}/transactions?size=1&receiver=${walletAddress}&status=success&function=ESDTTransfer&order=desc&after=${fromTimestamp}`;
+    // Removed function filter to capture both ESDTTransfer and ESDTNFTTransfer
+    const url = `${API_BASE_URL}/accounts/${walletAddress}/transactions?size=1&receiver=${walletAddress}&status=success&order=desc&after=${fromTimestamp}`;
     
     console.log(`[BLOCKCHAIN] 🔗 Fetching: ${url}`);
     
@@ -198,8 +209,8 @@ async function fetchLatestTransactions(walletAddress, fromTimestamp) {
     
     if (!response.ok) {
       if (response.status === 404) {
-        // 404 means no ESDT transfers found - this is normal for empty wallets
-        console.log(`[BLOCKCHAIN] 📭 404 - No ESDT transfers found for ${walletAddress} after timestamp ${fromTimestamp}`);
+        // 404 means no transfers found - this is normal for empty wallets
+        console.log(`[BLOCKCHAIN] 📭 404 - No transfers found for ${walletAddress} after timestamp ${fromTimestamp}`);
         return [];
       }
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -297,6 +308,73 @@ async function processTransaction(transaction, guildId, projectName) {
             error: errorMsg
           });
         }
+      } else if (transfer.type === 'NonFungibleESDT' || transfer.type === 'SemiFungibleESDT') {
+        // Process NFT transfer
+        const collection = transfer.collection || transfer.ticker;
+        const identifier = transfer.identifier;
+        
+        // Extract nonce from identifier (format: COLLECTION-NONCE where nonce is hex)
+        // Example: BASTURDS-2a4c51-0318 -> nonce is 0318 (hex) = 792 (decimal)
+        let nonce = null;
+        if (identifier && identifier.includes('-')) {
+          const parts = identifier.split('-');
+          if (parts.length >= 2) {
+            // Nonce is the last part after the last hyphen
+            const nonceHex = parts[parts.length - 1];
+            // Convert hex to decimal
+            nonce = parseInt(nonceHex, 16);
+          }
+        }
+        
+        // Fallback: try to get nonce from transfer object if available
+        if (!nonce && transfer.nonce !== undefined) {
+          nonce = typeof transfer.nonce === 'string' ? parseInt(transfer.nonce, 16) : transfer.nonce;
+        }
+        
+        if (!nonce || !identifier || !collection) {
+          console.error(`[BLOCKCHAIN] Invalid NFT transfer data:`, {
+            collection,
+            identifier,
+            nonce,
+            transfer
+          });
+          continue;
+        }
+        
+        console.log(`[BLOCKCHAIN] Processing NFT transfer: ${identifier} (${collection}#${nonce}) to ${projectName} in guild ${guildId}`);
+        console.log(`[BLOCKCHAIN] Sender: ${transaction.sender}, Receiver: ${transaction.receiver}`);
+        
+        // Process NFT deposit
+        const nftDepositResult = await processNFTDeposit(
+          guildId,
+          transaction.sender,
+          transaction.receiver,
+          collection,
+          identifier,
+          nonce,
+          transaction.txHash,
+          projectName
+        );
+        
+        if (nftDepositResult && nftDepositResult.success) {
+          console.log(`[BLOCKCHAIN] Successfully processed NFT deposit: ${identifier} for user in guild ${guildId}`);
+          
+          results.push({
+            nft: identifier,
+            collection: collection,
+            nonce: nonce,
+            success: true,
+            txHash: transaction.txHash
+          });
+        } else {
+          const errorMsg = nftDepositResult?.error || 'Unknown error';
+          console.error(`[BLOCKCHAIN] Failed to process NFT deposit:`, errorMsg);
+          results.push({
+            nft: identifier,
+            success: false,
+            error: errorMsg
+          });
+        }
       }
     }
     
@@ -314,6 +392,134 @@ async function processTransaction(transaction, guildId, projectName) {
   } catch (error) {
     console.error('[BLOCKCHAIN] Error processing transaction:', error.message);
     return { processed: false, error: error.message };
+  }
+}
+
+// Process NFT deposit from blockchain
+async function processNFTDeposit(guildId, senderWallet, receiverWallet, collection, identifier, nonce, txHash, projectName) {
+  try {
+    if (!virtualAccountsNFT) {
+      console.error('[BLOCKCHAIN] NFT virtual accounts module not loaded');
+      return { success: false, error: 'NFT module not available' };
+    }
+    
+    // Load server data to find user by wallet address
+    const dbServerData = require('./db/server-data');
+    const userWallets = await dbServerData.getUserWallets(guildId);
+    
+    if (!userWallets || Object.keys(userWallets).length === 0) {
+      console.log(`[BLOCKCHAIN] No user wallets found for guild ${guildId}`);
+      return {
+        success: false,
+        error: 'Guild not found or no user wallets configured'
+      };
+    }
+    
+    // Find user by wallet address
+    let userId = null;
+    for (const [uid, wallet] of Object.entries(userWallets)) {
+      if (wallet.toLowerCase() === senderWallet.toLowerCase()) {
+        userId = uid;
+        break;
+      }
+    }
+    
+    if (!userId) {
+      console.log(`[BLOCKCHAIN] No user found for wallet ${senderWallet} in guild ${guildId}`);
+      return {
+        success: false,
+        error: 'User not found for wallet address'
+      };
+    }
+    
+    console.log(`[BLOCKCHAIN] Found user ${userId} for wallet ${senderWallet} in guild ${guildId}`);
+    
+    // Fetch NFT metadata from MultiversX API
+    let nftMetadata = {
+      nft_name: null,
+      nft_image_url: null,
+      metadata: {}
+    };
+    
+    try {
+      const nftUrl = `https://api.multiversx.com/nfts/${identifier}`;
+      const nftResponse = await fetch(nftUrl);
+      
+      if (nftResponse.ok) {
+        const nftData = await nftResponse.json();
+        nftMetadata.nft_name = nftData.name || null;
+        
+        // Extract image URL
+        if (nftData.url) {
+          nftMetadata.nft_image_url = nftData.url;
+        } else if (nftData.media && nftData.media.length > 0) {
+          nftMetadata.nft_image_url = nftData.media[0].url || nftData.media[0].thumbnailUrl || null;
+        }
+        
+        // Store additional metadata
+        nftMetadata.metadata = {
+          collection: nftData.collection || collection,
+          creator: nftData.creator || null,
+          royalties: nftData.royalties || null,
+          attributes: nftData.attributes || []
+        };
+      }
+    } catch (fetchError) {
+      console.error(`[BLOCKCHAIN] Error fetching NFT metadata for ${identifier}:`, fetchError.message);
+      // Continue without metadata - we'll use basic info
+    }
+    
+    // Add NFT to user's virtual account
+    await virtualAccountsNFT.addNFTToAccount(
+      guildId,
+      userId,
+      collection,
+      identifier,
+      nonce,
+      nftMetadata
+    );
+    
+    // Track NFT top-up to house balance
+    await virtualAccountsNFT.trackNFTTopup(
+      guildId,
+      collection,
+      identifier,
+      nonce,
+      userId,
+      txHash,
+      nftMetadata
+    );
+    
+    // Create transaction record
+    await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
+      id: `nft_deposit_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      type: 'deposit',
+      collection: collection,
+      identifier: identifier,
+      nonce: nonce,
+      nft_name: nftMetadata.nft_name,
+      tx_hash: txHash,
+      source: 'blockchain_deposit',
+      timestamp: Date.now(),
+      description: `NFT deposit: ${nftMetadata.nft_name || identifier}`
+    });
+    
+    console.log(`[BLOCKCHAIN] Successfully added NFT ${identifier} to user ${userId}'s virtual account`);
+    
+    return {
+      success: true,
+      userId: userId,
+      nft: identifier,
+      collection: collection,
+      nonce: nonce
+    };
+    
+  } catch (error) {
+    console.error('[BLOCKCHAIN] Error processing NFT deposit:', error.message);
+    return {
+      success: false,
+      error: error.message
+    };
   }
 }
 

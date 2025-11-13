@@ -417,3 +417,124 @@ CREATE TABLE IF NOT EXISTS wallet_timestamps (
 CREATE INDEX IF NOT EXISTS idx_wallet_timestamps_address ON wallet_timestamps(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_wallet_timestamps_updated ON wallet_timestamps(last_updated DESC);
 
+-- ============================================
+-- NFT VIRTUAL ACCOUNTS TABLES
+-- ============================================
+
+-- NFT balances in virtual accounts (one row per NFT per user)
+CREATE TABLE IF NOT EXISTS virtual_account_nft_balances (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    nonce INTEGER NOT NULL,
+    nft_name TEXT,
+    nft_image_url TEXT,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(guild_id, user_id, collection, nonce)
+);
+
+CREATE INDEX IF NOT EXISTS idx_va_nft_balances_guild_user ON virtual_account_nft_balances(guild_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_va_nft_balances_collection ON virtual_account_nft_balances(guild_id, collection);
+CREATE INDEX IF NOT EXISTS idx_va_nft_balances_identifier ON virtual_account_nft_balances(identifier);
+
+-- NFT transaction history
+CREATE TABLE IF NOT EXISTS virtual_account_nft_transactions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    transaction_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    nonce INTEGER NOT NULL,
+    nft_name TEXT,
+    from_user_id TEXT,
+    to_user_id TEXT,
+    price_token_identifier TEXT,
+    price_amount TEXT,
+    tx_hash TEXT,
+    source TEXT,
+    timestamp BIGINT NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(guild_id, user_id, transaction_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_va_nft_trans_guild_user ON virtual_account_nft_transactions(guild_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_va_nft_trans_timestamp ON virtual_account_nft_transactions(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_va_nft_trans_collection ON virtual_account_nft_transactions(guild_id, collection);
+
+-- NFT marketplace listings
+CREATE TABLE IF NOT EXISTS nft_listings (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    listing_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    seller_id TEXT NOT NULL,
+    seller_tag TEXT,
+    collection TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    nonce INTEGER NOT NULL,
+    nft_name TEXT,
+    nft_image_url TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    price_token_identifier TEXT NOT NULL,
+    price_amount TEXT NOT NULL,
+    listing_type TEXT NOT NULL DEFAULT 'fixed_price',
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    message_id TEXT,
+    thread_id TEXT,
+    channel_id TEXT,
+    created_at BIGINT NOT NULL,
+    sold_at BIGINT,
+    expires_at BIGINT,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(listing_id, guild_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_nft_listings_guild ON nft_listings(guild_id);
+CREATE INDEX IF NOT EXISTS idx_nft_listings_status ON nft_listings(status);
+CREATE INDEX IF NOT EXISTS idx_nft_listings_seller ON nft_listings(guild_id, seller_id);
+CREATE INDEX IF NOT EXISTS idx_nft_listings_collection ON nft_listings(guild_id, collection);
+CREATE INDEX IF NOT EXISTS idx_nft_listings_expires_at ON nft_listings(expires_at) WHERE expires_at IS NOT NULL;
+
+-- NFT offers on listings
+CREATE TABLE IF NOT EXISTS nft_offers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    offer_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    listing_id TEXT NOT NULL,
+    offerer_id TEXT NOT NULL,
+    offerer_tag TEXT,
+    price_token_identifier TEXT NOT NULL,
+    price_amount TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    created_at BIGINT NOT NULL,
+    accepted_at BIGINT,
+    expires_at BIGINT,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(offer_id, guild_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_nft_offers_listing ON nft_offers(listing_id, guild_id);
+CREATE INDEX IF NOT EXISTS idx_nft_offers_offerer ON nft_offers(guild_id, offerer_id);
+CREATE INDEX IF NOT EXISTS idx_nft_offers_status ON nft_offers(status);
+CREATE INDEX IF NOT EXISTS idx_nft_offers_expires_at ON nft_offers(expires_at) WHERE expires_at IS NOT NULL;
+
+-- House NFT balance (tracks NFTs in Community Fund)
+CREATE TABLE IF NOT EXISTS house_nft_balance (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guild_id TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    nft_count INTEGER DEFAULT 0,
+    nft_list JSONB DEFAULT '[]',
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(guild_id, collection)
+);
+
+CREATE INDEX IF NOT EXISTS idx_house_nft_balance_guild ON house_nft_balance(guild_id);
+

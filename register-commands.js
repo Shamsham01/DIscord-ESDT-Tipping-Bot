@@ -119,11 +119,14 @@ const commands = [
         description: 'Create an NFT auction (Admin only)',
         options: [
             {
-                name: 'project-name',
-                description: 'The project owning the NFT',
+                name: 'source',
+                description: 'NFT source: Project Wallet or Virtual Account',
                 type: ApplicationCommandOptionType.String,
                 required: true,
-                autocomplete: true
+                choices: [
+                    { name: 'Project Wallet', value: 'project_wallet' },
+                    { name: 'Virtual Account', value: 'virtual_account' }
+                ]
             },
             {
                 name: 'collection',
@@ -177,6 +180,19 @@ const commands = [
                 description: 'Minimum bid increase amount',
                 type: ApplicationCommandOptionType.String,
                 required: true,
+            },
+            {
+                name: 'project-name',
+                description: 'The project owning the NFT (required for Project Wallet source)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                autocomplete: true
+            },
+            {
+                name: 'seller-id',
+                description: 'Discord user ID of NFT owner (required for Virtual Account source)',
+                type: ApplicationCommandOptionType.String,
+                required: false
             },
         ],
         default_member_permissions: null, // Permissions are checked in code
@@ -419,20 +435,6 @@ const commands = [
         default_member_permissions: null, // Permissions are checked in code
     },
     {
-        name: 'join-rps',
-        description: 'Join a Rock, Paper, Scissors challenge using your virtual balance',
-        options: [
-            {
-                name: 'challenge-id',
-                description: 'The challenge ID to join',
-                type: ApplicationCommandOptionType.String,
-                required: true,
-                autocomplete: true
-            },
-        ],
-        default_member_permissions: null, // Permissions are checked in code
-    },
-    {
         name: 'list-rps-challenges',
         description: 'List active Rock, Paper, Scissors challenges',
         options: [
@@ -441,31 +443,6 @@ const commands = [
                 description: 'Whether to make the response visible to everyone',
                 type: ApplicationCommandOptionType.Boolean,
                 required: false,
-            }
-        ],
-        default_member_permissions: null, // Permissions are checked in code
-    },
-    {
-        name: 'play-rps',
-        description: 'Play your move in an active Rock, Paper, Scissors challenge',
-        options: [
-            {
-                name: 'challenge-id',
-                type: ApplicationCommandOptionType.String,
-                description: 'The ID of the RPS challenge',
-                required: true,
-                autocomplete: true
-            },
-            {
-                name: 'move',
-                type: ApplicationCommandOptionType.String,
-                description: 'Your move (rock, paper, or scissors)',
-                required: true,
-                choices: [
-                    { name: 'Rock', value: 'rock' },
-                    { name: 'Paper', value: 'paper' },
-                    { name: 'Scissors', value: 'scissors' }
-                ]
             }
         ],
         default_member_permissions: null, // Permissions are checked in code
@@ -481,10 +458,11 @@ const commands = [
         description: 'Debug information for a specific user (Admin only)',
         options: [
             {
-                name: 'user-id',
-                description: 'The Discord user ID to debug',
+                name: 'user-tag',
+                description: 'The Discord user tag to debug',
                 type: ApplicationCommandOptionType.String,
                 required: true,
+                autocomplete: true
             },
         ],
         default_member_permissions: null, // Permissions are checked in code
@@ -525,19 +503,6 @@ const commands = [
         default_member_permissions: null, // Permissions are checked in code
     },
     {
-        name: 'current-bets',
-        description: 'Show current active football bets for today',
-        options: [
-            {
-                name: 'public',
-                description: 'Whether to make the response visible to everyone',
-                type: ApplicationCommandOptionType.Boolean,
-                required: false,
-            }
-        ],
-        default_member_permissions: null, // Permissions are checked in code
-    },
-    {
         name: 'leaderboard',
         description: 'Show football betting leaderboard',
         options: [
@@ -551,7 +516,7 @@ const commands = [
         default_member_permissions: null, // Permissions are checked in code
     },
     {
-        name: 'my-stats',
+        name: 'my-football-stats',
         description: 'View your personal football betting statistics and PNL',
         options: [
             {
@@ -596,19 +561,6 @@ const commands = [
         default_member_permissions: null,
     },
     {
-        name: 'leaderboard-reset',
-        description: 'Reset football betting leaderboard (Admin only)',
-        options: [
-            {
-                name: 'confirm',
-                description: 'Type "RESET" to confirm leaderboard reset',
-                type: ApplicationCommandOptionType.String,
-                required: true,
-            }
-        ],
-        default_member_permissions: null, // Permissions are checked in code
-    },
-    {
         name: 'update-token-metadata',
         description: 'Update token metadata for all supported tokens (Admin only)',
         options: [],
@@ -650,7 +602,7 @@ const commands = [
                 required: true,
             },
             {
-                name: 'source',
+                name: 'house-type',
                 description: 'Source of house balance to tip from',
                 type: ApplicationCommandOptionType.String,
                 required: true,
@@ -746,7 +698,7 @@ const commands = [
         default_member_permissions: null, // Permissions are checked in code
     },
     {
-        name: 'check-balance',
+        name: 'check-balance-esdt',
         description: 'Check your virtual account balance for all supported tokens',
         options: [
             {
@@ -773,6 +725,136 @@ const commands = [
                 description: 'Show history publicly (default: private)',
                 type: ApplicationCommandOptionType.Boolean,
                 required: false
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
+        name: 'check-balance-nft',
+        description: 'Check your NFT virtual account balance',
+        options: [
+            {
+                name: 'collection',
+                description: 'Filter by collection (optional)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                autocomplete: true
+            },
+            {
+                name: 'public',
+                description: 'Show balance publicly (default: private)',
+                type: ApplicationCommandOptionType.Boolean,
+                required: false
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
+        name: 'balance-history-nft',
+        description: 'View your NFT transaction history',
+        options: [
+            {
+                name: 'collection',
+                description: 'Filter by collection (optional)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                autocomplete: true
+            },
+            {
+                name: 'limit',
+                description: 'Number of transactions to show (default: 10, max: 50)',
+                type: ApplicationCommandOptionType.Integer,
+                required: false
+            },
+            {
+                name: 'public',
+                description: 'Show history publicly (default: private)',
+                type: ApplicationCommandOptionType.Boolean,
+                required: false
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
+        name: 'withdraw-nft',
+        description: 'Withdraw an NFT from your Virtual Account to your registered wallet',
+        options: [
+            {
+                name: 'collection',
+                description: 'NFT collection',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'nft-name',
+                description: 'NFT name or identifier',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
+        name: 'sell-nft',
+        description: 'List an NFT for sale on the marketplace',
+        options: [
+            {
+                name: 'collection',
+                description: 'NFT collection',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'nft-name',
+                description: 'NFT name or identifier',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'title',
+                description: 'Listing title',
+                type: ApplicationCommandOptionType.String,
+                required: true
+            },
+            {
+                name: 'price-token',
+                description: 'Token for payment',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'price-amount',
+                description: 'Fixed price amount',
+                type: ApplicationCommandOptionType.String,
+                required: true
+            },
+            {
+                name: 'listing-type',
+                description: 'Listing type',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                choices: [
+                    { name: 'Fixed Price', value: 'fixed_price' },
+                    { name: 'Accept Offers', value: 'accept_offers' }
+                ]
+            },
+            {
+                name: 'description',
+                description: 'Listing description',
+                type: ApplicationCommandOptionType.String,
+                required: false
+            },
+            {
+                name: 'expires-in',
+                description: 'Hours until expiration (optional)',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 1
             }
         ],
         default_member_permissions: null,
@@ -817,8 +899,8 @@ const commands = [
         default_member_permissions: null,
     },
     {
-        name: 'tip-virtual',
-        description: 'Tip another user using your virtual account balance',
+        name: 'tip-virtual-esdt',
+        description: 'Tip another user using your virtual account ESDT balance',
         options: [
             {
                 name: 'user-tag',
@@ -850,7 +932,87 @@ const commands = [
         default_member_permissions: null,
     },
     {
-        name: 'withdraw',
+        name: 'tip-virtual-nft',
+        description: 'Tip another user an NFT from your virtual account',
+        options: [
+            {
+                name: 'user-tag',
+                description: 'User to tip (use @mention or username)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'collection',
+                description: 'NFT collection',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'nft-name',
+                description: 'NFT name or identifier',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'memo',
+                description: 'Optional memo for the tip',
+                type: ApplicationCommandOptionType.String,
+                required: false
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
+        name: 'virtual-house-topup',
+        description: 'Transfer funds from your Virtual Account to House Balance',
+        options: [
+            {
+                name: 'token',
+                description: 'Token identifier (Community Fund supported tokens)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'amount',
+                description: 'Amount to transfer to house',
+                type: ApplicationCommandOptionType.String,
+                required: true
+            },
+            {
+                name: 'house-type',
+                description: 'Which house type to allocate funds to',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                choices: [
+                    {
+                        name: '⚽ Betting House Balance',
+                        value: 'betting'
+                    },
+                    {
+                        name: '🎨 Auction House Balance',
+                        value: 'auction'
+                    },
+                    {
+                        name: '🎲 Lottery House Balance',
+                        value: 'lottery'
+                    }
+                ]
+            },
+            {
+                name: 'memo',
+                description: 'Optional memo/note for this transaction',
+                type: ApplicationCommandOptionType.String,
+                required: false
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
+        name: 'withdraw-esdt',
         description: 'Withdraw funds from your virtual account to your wallet',
         options: [
             {
@@ -874,37 +1036,6 @@ const commands = [
             }
         ],
         default_member_permissions: null,
-    },
-    {
-        name: 'bet-virtual',
-        description: 'Place a bet on a football match using your virtual balance',
-        options: [
-            {
-                name: 'match-id',
-                description: 'ID of the match to bet on',
-                type: ApplicationCommandOptionType.String,
-                required: true,
-                autocomplete: true
-            },
-            {
-                name: 'outcome',
-                description: 'Betting outcome (H for Home, A for Away, D for Draw)',
-                type: ApplicationCommandOptionType.String,
-                required: true,
-                choices: [
-                    { name: 'Home Win', value: 'H' },
-                    { name: 'Away Win', value: 'A' },
-                    { name: 'Draw', value: 'D' }
-                ]
-            }
-        ],
-        default_member_permissions: null,
-    },
-    {
-        name: 'force-close-games',
-        description: 'Force close stuck football games that have scores but are still scheduled (Admin only)',
-        options: [],
-        default_member_permissions: null, // Permissions are checked in code
     },
     {
         name: 'help',
