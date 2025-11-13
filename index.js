@@ -14,6 +14,7 @@ const BigNumber = require('bignumber.js');
 
 // Import virtual accounts and blockchain listener
 const virtualAccounts = require('./virtual-accounts.js');
+const virtualAccountsNFT = require('./db/virtual-accounts-nft');
 const blockchainListener = require('./blockchain-listener.js');
 
 // Import database modules
@@ -1512,6 +1513,154 @@ async function transferNFT(recipientWallet, tokenIdentifier, tokenNonce, project
   }
 }
 
+// Transfer NFT from Community Fund to user wallet
+async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, tokenNonce, projectName, guildId) {
+  try {
+    if (!API_BASE_URL || !API_TOKEN) {
+      throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
+    }
+
+    const projects = await getProjects(guildId);
+    const project = projects[projectName];
+    
+    if (!project) {
+      throw new Error(`Project "${projectName}" not found. Use /register-project to add it.`);
+    }
+
+    if (!project.walletPem || project.walletPem.trim().length === 0) {
+      console.error(`[WITHDRAW-NFT] Project "${projectName}" has empty PEM. Wallet address: ${project.walletAddress}`);
+      throw new Error(`Project "${projectName}" has no wallet configured or PEM is empty. Please reconfigure the Community Fund using /set-community-fund.`);
+    }
+    
+    // Validate PEM format
+    if (!project.walletPem.includes('BEGIN') || !project.walletPem.includes('END')) {
+      console.error(`[WITHDRAW-NFT] Project "${projectName}" has invalid PEM format. PEM length: ${project.walletPem.length} characters`);
+      throw new Error(`Project "${projectName}" has an invalid PEM format. Please reconfigure the Community Fund using /set-community-fund.`);
+    }
+    
+    // Log PEM info for debugging (no sensitive content)
+    console.log(`[WITHDRAW-NFT] Using PEM for project "${projectName}". PEM length: ${project.walletPem.length} characters`);
+    
+    // Restore PEM line breaks if needed
+    let pemToSend = project.walletPem;
+    if (!pemToSend.includes('\n')) {
+      // Replace the spaces between the header/footer and base64 with line breaks
+      pemToSend = pemToSend
+        .replace(/-----BEGIN ([A-Z ]+)-----\s*/, '-----BEGIN $1-----\n')
+        .replace(/\s*-----END ([A-Z ]+)-----/, '\n-----END $1-----')
+        .replace(/ ([A-Za-z0-9+/=]{64})/g, '\n$1') // Break base64 into lines of 64 chars
+        .replace(/ ([A-Za-z0-9+/=]+)-----END/, '\n$1-----END'); // Final line before footer
+    }
+    
+    // Validate PEM after processing
+    if (!pemToSend || pemToSend.trim().length === 0) {
+      console.error(`[WITHDRAW-NFT] PEM became empty after processing for project "${projectName}"`);
+      throw new Error(`PEM processing failed for project "${projectName}". Please reconfigure the Community Fund.`);
+    }
+
+    const requestBody = {
+      walletPem: pemToSend,
+      recipient: recipientWallet,
+      tokenIdentifier: tokenIdentifier,
+      tokenNonce: Number(tokenNonce), // Ensure it's a number, not a string
+    };
+    
+    const fullEndpoint = API_BASE_URL.endsWith('/') 
+      ? `${API_BASE_URL}execute/nftTransfer` 
+      : `${API_BASE_URL}/execute/nftTransfer`;
+    
+    console.log(`[WITHDRAW-NFT] Transferring NFT ${tokenIdentifier}#${tokenNonce} to: ${recipientWallet} using Community Fund: ${projectName}`);
+    console.log(`[WITHDRAW-NFT] API endpoint: ${fullEndpoint}`);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    
+    try {
+      const response = await fetch(fullEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${API_TOKEN}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      const responseText = await response.text();
+      console.log(`[WITHDRAW-NFT] API response status: ${response.status}`);
+      console.log(`[WITHDRAW-NFT] API response for NFT transfer: ${responseText}`);
+      
+      let parsedResponse;
+      try {
+        parsedResponse = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error('[WITHDRAW-NFT] Error parsing API response:', parseError.message);
+        parsedResponse = { success: response.ok, message: responseText };
+      }
+      
+      let txHash = null;
+      let txStatus = null;
+      
+      if (parsedResponse.txHash) {
+        txHash = parsedResponse.txHash;
+      } else if (parsedResponse.result && parsedResponse.result.txHash) {
+        txHash = parsedResponse.result.txHash;
+      } else if (parsedResponse.data && parsedResponse.data.txHash) {
+        txHash = parsedResponse.data.txHash;
+      } else if (parsedResponse.transaction && parsedResponse.transaction.txHash) {
+        txHash = parsedResponse.transaction.txHash;
+      }
+      
+      // Check for transaction status in the response
+      if (parsedResponse.result && parsedResponse.result.status) {
+        txStatus = parsedResponse.result.status;
+      } else if (parsedResponse.status) {
+        txStatus = parsedResponse.status;
+      }
+      
+      const errorMessage = parsedResponse.error || 
+                          (parsedResponse.result && parsedResponse.result.error) ||
+                          (parsedResponse.data && parsedResponse.data.error) ||
+                          (!response.ok ? `API error (${response.status})` : null);
+      
+      // Only treat as success if status is 'success', HTTP is OK, and txHash exists
+      const isApiSuccess = (response.ok || parsedResponse.success === true) && txStatus === 'success' && !!txHash;
+      
+      const result = {
+        success: isApiSuccess,
+        txHash: txHash,
+        errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
+        rawResponse: parsedResponse,
+        httpStatus: response.status
+      };
+      
+      if (result.success) {
+        console.log(`[WITHDRAW-NFT] Successfully sent NFT ${tokenIdentifier}#${tokenNonce} to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
+      } else {
+        console.error(`[WITHDRAW-NFT] API reported failure for NFT transfer: ${errorMessage || 'Unknown error'}`);
+        if (txHash) {
+          console.log(`[WITHDRAW-NFT] Transaction hash was returned (${txHash}), but transaction failed (status: ${txStatus}).`);
+        }
+      }
+      
+      return result;
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      
+      if (fetchError.name === 'AbortError') {
+        console.error('[WITHDRAW-NFT] NFT transfer API request timed out after 60 seconds');
+        throw new Error('API request timed out after 60 seconds');
+      }
+      throw fetchError;
+    }
+  } catch (error) {
+    console.error(`[WITHDRAW-NFT] Error transferring NFT:`, error.message);
+    throw error;
+  }
+}
+
 // Handle bot interactions
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isCommand()) return;
@@ -1541,6 +1690,7 @@ client.on('interactionCreate', async (interaction) => {
         // Get Community Fund wallet address and QR code
         let communityFundAddress = null;
         let qrCodeUrl = null;
+        let supportedTokens = [];
         try {
           const projects = await getProjects(guildId);
           const communityFundProjectName = getCommunityFundProjectName();
@@ -1552,6 +1702,15 @@ client.on('interactionCreate', async (interaction) => {
             // Get QR code if available
             const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
             qrCodeUrl = communityFundQRData?.[communityFundProjectName] || null;
+            
+            // Extract supported tokens
+            if (communityFundProject.supportedTokens) {
+              if (Array.isArray(communityFundProject.supportedTokens)) {
+                supportedTokens = communityFundProject.supportedTokens;
+              } else if (typeof communityFundProject.supportedTokens === 'string') {
+                supportedTokens = communityFundProject.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+              }
+            }
           }
         } catch (error) {
           console.error(`[SET-WALLET] Error getting Community Fund info:`, error.message);
@@ -1575,6 +1734,18 @@ client.on('interactionCreate', async (interaction) => {
           ]);
         }
         
+        // Add supported tokens if available
+        if (supportedTokens.length > 0) {
+          embed.addFields([
+            { name: 'Supported ESDT Tokens', value: supportedTokens.join(', '), inline: false }
+          ]);
+        }
+        
+        // Add NFT support information
+        embed.addFields([
+          { name: '📦 NFT Support', value: '**NFTs can also be added to your Virtual Account!**\n\nSimply send NFTs to the community fund wallet address above, and they will be automatically added to your virtual account balance. Use `/check-balance-nft` to view your NFT collection.', inline: false }
+        ]);
+        
         // Add QR code as thumbnail if available
         if (qrCodeUrl) {
           embed.setThumbnail(qrCodeUrl);
@@ -1582,8 +1753,8 @@ client.on('interactionCreate', async (interaction) => {
         
         // Add Next Steps field
         const nextStepsValue = communityFundAddress 
-          ? `1. Send tokens to the Community Fund address above\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance\` to view your balance`
-          : `1. Send tokens to the Community Fund address\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance\` to view your balance`;
+          ? `1. Send **ESDT tokens or NFTs** to the Community Fund address above\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance-esdt\` to view ESDT balances\n4. Use \`/check-balance-nft\` to view NFT collection`
+          : `1. Send **ESDT tokens or NFTs** to the Community Fund address\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance-esdt\` to view ESDT balances\n4. Use \`/check-balance-nft\` to view NFT collection`;
         
         embed.addFields([
           { name: 'Next Steps', value: nextStepsValue, inline: false }
@@ -2556,12 +2727,20 @@ client.on('interactionCreate', async (interaction) => {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       
-      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        await interaction.editReply({ content: 'Only administrators can create auctions.', flags: [MessageFlags.Ephemeral] });
-        return;
+      const source = interaction.options.getString('source');
+      
+      // Only admins can create auctions from Project Wallet
+      // Regular users can create auctions from their Virtual Account
+      if (source === 'project_wallet') {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          await interaction.editReply({ 
+            content: '❌ **Admin Only!**\n\nOnly administrators can create auctions from Project Wallet.\n\nTo auction your own NFTs, select "Virtual Account" as the source.', 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
       }
 
-      const projectName = interaction.options.getString('project-name');
       const collection = interaction.options.getString('collection');
       const nftName = interaction.options.getString('nft-name');
       const title = interaction.options.getString('title');
@@ -2570,56 +2749,146 @@ client.on('interactionCreate', async (interaction) => {
       const tokenTicker = interaction.options.getString('token-ticker');
       const startingAmount = interaction.options.getString('starting-amount');
       const minBidIncrease = interaction.options.getString('min-bid-increase');
-
-      // Get available projects for this server
-      const projects = await getProjects(guildId);
-      const communityFundProjectName = getCommunityFundProjectName(); // Always "Community Fund"
       
-      if (!projects[projectName]) {
-        await interaction.editReply({ 
-          content: `Project "${projectName}" not found. Use /list-projects to see available projects.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-
-      // Prevent using community fund project for auctions
-      // Check by internal project name "Community Fund" to ensure it's always blocked
-      if (projectName === communityFundProjectName) {
-        await interaction.editReply({ 
-          content: `❌ **Cannot use Community Fund project for auctions!**\n\nThe project "${projectName}" is configured as the Community Fund and is used for virtual account deposits.\n\nPlease select a different project for auctions.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-
-      const project = projects[projectName];
-      const walletAddress = project.walletAddress;
-
-      if (!walletAddress) {
-        await interaction.editReply({ 
-          content: `Project "${projectName}" has no wallet address configured.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-
-      // Validate token is in project's supported tokens
-      let supportedTokens = [];
-      if (project.supportedTokens) {
-        if (Array.isArray(project.supportedTokens)) {
-          supportedTokens = project.supportedTokens;
-        } else if (typeof project.supportedTokens === 'string') {
-          supportedTokens = project.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      let projectName = null;
+      let walletAddress = null;
+      let sellerId = null;
+      let nftDetails = null;
+      
+      // Handle different sources
+      if (source === 'virtual_account') {
+        // Virtual Account source: Get seller ID (use command user if not specified)
+        sellerId = interaction.options.getString('seller-id') || userId;
+        
+        // Verify seller owns the NFT
+        const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, sellerId, collection);
+        
+        if (!userNFTs || userNFTs.length === 0) {
+          await interaction.editReply({ 
+            content: `❌ **NFT not found!**\n\nYou don't own any NFTs in collection "${collection}" in your virtual account.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
         }
-      }
-      
-      if (!supportedTokens.some(t => t.toLowerCase() === tokenTicker.toLowerCase())) {
-        await interaction.editReply({ 
-          content: `Token "${tokenTicker}" is not supported by project "${projectName}". Supported tokens: ${supportedTokens.join(', ') || 'None configured'}`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
+        
+        // Find the specific NFT by name
+        const nft = userNFTs.find(n => 
+          (n.nft_name && n.nft_name.toLowerCase() === nftName.toLowerCase()) ||
+          `${collection}#${n.nonce}` === nftName ||
+          (n.nft_name && `${collection}#${n.nonce}`.toLowerCase() === nftName.toLowerCase())
+        );
+        
+        if (!nft) {
+          await interaction.editReply({ 
+            content: `❌ **NFT not found!**\n\nNFT "${nftName}" not found in your collection "${collection}".`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        // Use NFT data from virtual account
+        nftDetails = {
+          nonce: nft.nonce,
+          identifier: nft.identifier || `${collection}-${nft.nonce}`,
+          collection: collection,
+          name: nft.nft_name || `${collection}#${nft.nonce}`
+        };
+        
+        // Validate token is in Community Fund's supported tokens
+        const projects = await getProjects(guildId);
+        const communityFundProjectName = getCommunityFundProjectName();
+        const communityFundProject = projects[communityFundProjectName];
+        
+        if (!communityFundProject) {
+          await interaction.editReply({ 
+            content: `❌ **Community Fund not configured!**\n\nPlease contact an administrator to set up the Community Fund.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        let supportedTokens = [];
+        if (communityFundProject.supportedTokens) {
+          if (Array.isArray(communityFundProject.supportedTokens)) {
+            supportedTokens = communityFundProject.supportedTokens;
+          } else if (typeof communityFundProject.supportedTokens === 'string') {
+            supportedTokens = communityFundProject.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+          }
+        }
+        
+        if (!supportedTokens.some(t => t.toLowerCase() === tokenTicker.toLowerCase())) {
+          await interaction.editReply({ 
+            content: `❌ **Token not supported!**\n\nToken "${tokenTicker}" is not supported by the Community Fund.\n\nSupported tokens: ${supportedTokens.join(', ') || 'None configured'}`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+      } else {
+        // Project Wallet source: Get project name
+        projectName = interaction.options.getString('project-name');
+        
+        if (!projectName) {
+          await interaction.editReply({ 
+            content: `❌ **Project required!**\n\nPlease select a project when using "Project Wallet" as the source.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        // Get available projects for this server
+        const projects = await getProjects(guildId);
+        const communityFundProjectName = getCommunityFundProjectName(); // Always "Community Fund"
+        
+        if (!projects[projectName]) {
+          await interaction.editReply({ 
+            content: `Project "${projectName}" not found. Use /list-projects to see available projects.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+
+        // Prevent using community fund project for auctions
+        // Check by internal project name "Community Fund" to ensure it's always blocked
+        if (projectName === communityFundProjectName) {
+          await interaction.editReply({ 
+            content: `❌ **Cannot use Community Fund project for auctions!**\n\nThe project "${projectName}" is configured as the Community Fund and is used for virtual account deposits.\n\nPlease select a different project for auctions.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+
+        const project = projects[projectName];
+        walletAddress = project.walletAddress;
+
+        if (!walletAddress) {
+          await interaction.editReply({ 
+            content: `Project "${projectName}" has no wallet address configured.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+
+        // Validate token is in project's supported tokens
+        let supportedTokens = [];
+        if (project.supportedTokens) {
+          if (Array.isArray(project.supportedTokens)) {
+            supportedTokens = project.supportedTokens;
+          } else if (typeof project.supportedTokens === 'string') {
+            supportedTokens = project.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+          }
+        }
+        
+        if (!supportedTokens.some(t => t.toLowerCase() === tokenTicker.toLowerCase())) {
+          await interaction.editReply({ 
+            content: `Token "${tokenTicker}" is not supported by project "${projectName}". Supported tokens: ${supportedTokens.join(', ') || 'None configured'}`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
       }
 
       // Resolve token identifier from ticker/identifier
@@ -2651,53 +2920,67 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // Fetch NFT details to get nonce and image
-      await interaction.editReply({ 
-        content: `Fetching NFT details for ${nftName}...`, 
-        flags: [MessageFlags.Ephemeral] 
-      });
-
-      const encodedNftName = encodeURIComponent(nftName);
-      const nftDetailsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts?search=${encodeURIComponent(collection)}&name=${encodedNftName}`;
-      
-      let nftDetails;
-      try {
-        const nftResponse = await fetch(nftDetailsUrl);
-        if (!nftResponse.ok) {
-          throw new Error(`Failed to fetch NFT details: ${nftResponse.status}`);
-        }
-        const nftData = await nftResponse.json();
-        
-        if (!Array.isArray(nftData) || nftData.length === 0) {
-          throw new Error(`NFT "${nftName}" not found in collection "${collection}"`);
-        }
-        
-        // Find the exact NFT match by name
-        nftDetails = nftData.find(nft => nft.name === nftName) || nftData[0];
-        
-        if (!nftDetails || nftDetails.collection !== collection) {
-          throw new Error(`NFT "${nftName}" not found in collection "${collection}"`);
-        }
-
-        if (!nftDetails.nonce && nftDetails.nonce !== 0) {
-          throw new Error(`NFT "${nftName}" does not have a valid nonce`);
-        }
-      } catch (fetchError) {
+      // Fetch NFT details based on source
+      if (source === 'project_wallet') {
+        // Fetch NFT details from project wallet
         await interaction.editReply({ 
-          content: `Error fetching NFT details: ${fetchError.message}`, 
+          content: `Fetching NFT details for ${nftName}...`, 
           flags: [MessageFlags.Ephemeral] 
         });
-        return;
+
+        const encodedNftName = encodeURIComponent(nftName);
+        const nftDetailsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts?search=${encodeURIComponent(collection)}&name=${encodedNftName}`;
+        
+        try {
+          const nftResponse = await fetch(nftDetailsUrl);
+          if (!nftResponse.ok) {
+            throw new Error(`Failed to fetch NFT details: ${nftResponse.status}`);
+          }
+          const nftData = await nftResponse.json();
+          
+          if (!Array.isArray(nftData) || nftData.length === 0) {
+            throw new Error(`NFT "${nftName}" not found in collection "${collection}"`);
+          }
+          
+          // Find the exact NFT match by name
+          const fetchedNftDetails = nftData.find(nft => nft.name === nftName) || nftData[0];
+          
+          if (!fetchedNftDetails || fetchedNftDetails.collection !== collection) {
+            throw new Error(`NFT "${nftName}" not found in collection "${collection}"`);
+          }
+
+          if (!fetchedNftDetails.nonce && fetchedNftDetails.nonce !== 0) {
+            throw new Error(`NFT "${nftName}" does not have a valid nonce`);
+          }
+          
+          nftDetails = fetchedNftDetails;
+        } catch (fetchError) {
+          await interaction.editReply({ 
+            content: `Error fetching NFT details: ${fetchError.message}`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
       }
+      // For virtual_account, nftDetails is already set above
 
       // Extract NFT image URL
       let nftImageUrl = null;
-      if (nftDetails.url) {
-        nftImageUrl = nftDetails.url;
-      } else if (nftDetails.media && nftDetails.media.length > 0 && nftDetails.media[0].url) {
-        nftImageUrl = nftDetails.media[0].url;
-      } else if (nftDetails.media && nftDetails.media.length > 0 && nftDetails.media[0].thumbnailUrl) {
-        nftImageUrl = nftDetails.media[0].thumbnailUrl;
+      if (source === 'virtual_account') {
+        // Get image from virtual account NFT data
+        const nft = await virtualAccountsNFT.getUserNFTBalance(guildId, sellerId, collection, nftDetails.nonce);
+        if (nft && nft.nft_image_url) {
+          nftImageUrl = nft.nft_image_url;
+        }
+      } else {
+        // Get image from API response
+        if (nftDetails.url) {
+          nftImageUrl = nftDetails.url;
+        } else if (nftDetails.media && nftDetails.media.length > 0 && nftDetails.media[0].url) {
+          nftImageUrl = nftDetails.media[0].url;
+        } else if (nftDetails.media && nftDetails.media.length > 0 && nftDetails.media[0].thumbnailUrl) {
+          nftImageUrl = nftDetails.media[0].thumbnailUrl;
+        }
       }
 
       // Generate unique auction ID
@@ -2770,7 +3053,9 @@ client.on('interactionCreate', async (interaction) => {
       await dbAuctions.createAuction(guildId, auctionId, {
         creatorId: interaction.user.id,
         creatorTag: interaction.user.tag,
-        projectName,
+        source: source, // Store source: 'virtual_account' or 'project_wallet'
+        sellerId: sellerId, // Store seller ID for virtual account auctions
+        projectName: projectName, // null for virtual_account, project name for project_wallet
         collection,
         nftName,
         nftIdentifier: nftDetails.identifier || `${collection}-${nftDetails.nonce}`,
@@ -3459,7 +3744,7 @@ client.on('interactionCreate', async (interaction) => {
               { name: 'Prize Amount', value: `${amountNum} ${tokenTicker}`, inline: true },
               { name: 'Total Prize', value: `${amountNum * 2} ${tokenTicker}`, inline: true },
               { name: 'Expires', value: '<t:' + Math.floor((Date.now() + (30 * 60 * 1000)) / 1000) + ':R>', inline: true },
-              { name: 'To Join', value: `Click the "Join Challenge" button in the challenge post or use \`/join-rps challenge-id:${challengeId}\``, inline: false },
+              { name: 'To Join', value: `Click the "Join Challenge" button in the challenge post`, inline: false },
               { name: 'Memo', value: memo, inline: false }
             ])
             .setColor('#FF6B35')
@@ -3482,187 +3767,6 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ content: `Error creating challenge: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       } else {
         await interaction.reply({ content: `Error creating challenge: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      }
-    }
-  } else if (commandName === 'join-rps') {
-    try {
-      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-      console.log('[RPS DEBUG] join-rps guildId:', guildId);
-      
-      const challengeId = interaction.options.getString('challenge-id');
-      
-      // Check if community fund is set
-      const fundProject = await getCommunityFundProject(guildId);
-      if (!fundProject) {
-        await interaction.editReply({ content: 'No Community Tip Fund is set for this server. Please ask an admin to run /set-community-fund.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      
-      const projects = await getProjects(guildId);
-      const projectName = getCommunityFundProjectName();
-      if (!projects[projectName]) {
-        await interaction.editReply({ content: `The Community Tip Fund project no longer exists. Please ask an admin to set it again.`, flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      
-      // Get the challenge
-      const challenge = await dbRpsGames.getGame(guildId, challengeId);
-      
-      if (!challenge) {
-        await interaction.editReply({ content: `Challenge ID "${challengeId}" not found or has expired.`, flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      
-      if (challenge.status !== 'waiting') {
-        await interaction.editReply({ content: `Challenge "${challengeId}" is no longer accepting participants. Status: ${challenge.status}`, flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      
-      // Check if user is the challenged person
-      if (challenge.challengedId !== interaction.user.id) {
-        await interaction.editReply({ content: `This challenge is for ${challenge.challengedTag}, not you.`, flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      
-      // Check if challenge has expired
-      if (Date.now() > challenge.expiresAt) {
-        await dbRpsGames.updateGame(guildId, challengeId, { status: 'expired' });
-        await interaction.editReply({ content: `Challenge "${challengeId}" has expired.`, flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      
-      // Check if user has sufficient virtual balance
-      let currentBalance;
-      try {
-        console.log(`[RPS JOIN DEBUG] Getting balance for user ${interaction.user.id}, token: ${challenge.token}`);
-        currentBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, challenge.token);
-        console.log(`[RPS JOIN DEBUG] Retrieved balance: ${currentBalance} (type: ${typeof currentBalance})`);
-        
-        // Ensure balance is always a valid string
-        if (currentBalance === null || currentBalance === undefined) {
-          console.log(`[RPS JOIN DEBUG] Balance was null/undefined, setting to '0'`);
-          currentBalance = '0';
-        }
-        currentBalance = currentBalance.toString();
-      } catch (balanceError) {
-        console.error('[RPS] Error getting balance:', balanceError.message);
-        currentBalance = '0';
-      }
-      
-      // Use humanAmount (display value) or amount (stored value) - prefer humanAmount for consistency
-      const amountToCheck = challenge.humanAmount || challenge.amount;
-      console.log(`[RPS JOIN DEBUG] Challenge amount check - humanAmount: ${challenge.humanAmount}, amount: ${challenge.amount}, amountToCheck: ${amountToCheck}`);
-      const requiredAmount = parseFloat(amountToCheck);
-      
-      if (isNaN(requiredAmount) || requiredAmount <= 0) {
-        await interaction.editReply({ 
-          content: `❌ **Invalid challenge amount!** The challenge amount could not be determined.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      // Validate balance value
-      const balanceBN = new BigNumber(currentBalance);
-      if (balanceBN.isNaN()) {
-        console.error(`[RPS] Invalid balance value: ${currentBalance}, resetting to 0`);
-        currentBalance = '0';
-      }
-      
-      console.log(`[RPS JOIN DEBUG] Final balance check - Balance: ${currentBalance}, Required: ${requiredAmount}, Comparison: ${new BigNumber(currentBalance).isLessThan(requiredAmount)}`);
-      
-      if (new BigNumber(currentBalance).isLessThan(requiredAmount)) {
-        await interaction.editReply({ 
-          content: `❌ **Insufficient virtual balance!**\n\nYou have: **${currentBalance}** ${challenge.token}\nRequired: **${requiredAmount}** ${challenge.token}\n\nTop up your account by making a transfer to any Community Fund wallet!`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      // Deduct funds from virtual account
-      const deductionResult = await virtualAccounts.deductFundsFromAccount(
-        guildId, 
-        interaction.user.id, 
-        challenge.token, 
-        requiredAmount.toString(), 
-        `RPS challenge join: ${challengeId}`
-      );
-      
-      console.log(`[RPS DEBUG] Joining challenge - User: ${interaction.user.id}, Token: ${challenge.token}, Amount: ${requiredAmount}`);
-      console.log(`[RPS DEBUG] Deduction result:`, deductionResult);
-      
-      if (!deductionResult.success) {
-        await interaction.editReply({ 
-          content: `❌ **Failed to deduct funds!** ${deductionResult.error}`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-        
-      // Update challenge status
-      await dbRpsGames.updateGame(guildId, challengeId, {
-        status: 'active',
-        joinedAt: Date.now(),
-        joinerTransactionHash: null // No blockchain transaction needed
-      });
-
-        // Create the embed first
-        const embed = new EmbedBuilder()
-          .setTitle('🎮 Rock, Paper, Scissors Challenge Joined!')
-          .setDescription(`${interaction.user.tag} has joined the challenge!`)
-          .addFields([
-            { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-            { name: 'Prize Amount', value: `${challenge.humanAmount} ${challenge.token}`, inline: true },
-            { name: 'Total Prize', value: `${Number(challenge.humanAmount) * 2} ${challenge.token}`, inline: true },
-            { name: 'Challenger', value: `<@${challenge.challengerId}>`, inline: true },
-            { name: 'Challenged', value: `<@${challenge.challengedId}>`, inline: true },
-            { name: 'Status', value: '🎯 Game Active', inline: true },
-            { name: 'Memo', value: challenge.memo, inline: false }
-          ])
-          .setColor('#00FF00')
-          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-          .setTimestamp();
-        
-        // Use RPS GIF as thumbnail
-        embed.setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif');
-        
-        await interaction.editReply({ 
-          content: `✅ Successfully joined the challenge!`, 
-          embeds: [embed],
-          flags: [MessageFlags.Ephemeral] 
-        });
-        
-        // Post public announcement
-        await interaction.channel.send({ 
-          content: `🎮 **Rock, Paper, Scissors Challenge Started!** 🎮`,
-          embeds: [embed],
-          components: [
-            new ActionRowBuilder()
-              .addComponents(
-                new ButtonBuilder()
-                  .setCustomId(`rps-move:${challengeId}:rock`)
-                  .setLabel('🪨 Rock')
-                  .setStyle(ButtonStyle.Primary),
-                new ButtonBuilder()
-                  .setCustomId(`rps-move:${challengeId}:paper`)
-                  .setLabel('📄 Paper')
-                  .setStyle(ButtonStyle.Primary),
-                new ButtonBuilder()
-                  .setCustomId(`rps-move:${challengeId}:scissors`)
-                  .setLabel('✂️ Scissors')
-                  .setStyle(ButtonStyle.Primary)
-              )
-          ]
-        });
-        
-      console.log(`RPS challenge joined: ${challengeId} by ${interaction.user.tag}`);
-      
-    } catch (error) {
-      console.error('Error joining RPS challenge:', error);
-      if (interaction.deferred) {
-        await interaction.editReply({ content: `Error joining challenge: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `Error joining challenge: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
   } else if (commandName === 'list-rps-challenges') {
@@ -3846,6 +3950,21 @@ client.on('interactionCreate', async (interaction) => {
       const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
       const qrCodeUrl = communityFundQRData?.[projectName] || null;
       
+      // Extract supported tokens from project
+      let supportedTokens = [];
+      if (project.supportedTokens) {
+        if (Array.isArray(project.supportedTokens)) {
+          supportedTokens = project.supportedTokens;
+        } else if (typeof project.supportedTokens === 'string') {
+          supportedTokens = project.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+        }
+      }
+      
+      // Build supported tokens display
+      const supportedTokensDisplay = supportedTokens.length > 0 
+        ? supportedTokens.join(', ') 
+        : 'None configured';
+      
       const embed = new EmbedBuilder()
         .setTitle('💰 Community Fund Deposit Address')
         .setDescription(`Send tokens to the community fund to participate in games and activities!`)
@@ -3853,7 +3972,9 @@ client.on('interactionCreate', async (interaction) => {
           { name: '⚠️ Important: Register First!', value: '**You must register your wallet BEFORE sending tokens!**\n\nIf you send tokens without registering your wallet first, the bot cannot track your deposits and you may lose your funds.\n\n**Click the "Register My Wallet" button below to register your wallet address.**', inline: false },
           { name: 'Fund Name', value: `**${communityFundProject || 'Community Fund'}**`, inline: true },
           { name: 'Wallet Address', value: `\`${project.walletAddress}\``, inline: false },
-          { name: 'How to Deposit', value: '1. **First:** Click "Register My Wallet" button below\n2. Enter your wallet address in the form\n3. Copy the wallet address above\n4. Send your tokens to this address\n5. Your virtual account will be automatically updated\n6. Use `/check-balance` to verify your deposit', inline: false }
+          { name: 'Supported ESDT Tokens', value: supportedTokensDisplay, inline: false },
+          { name: '📦 NFT Support', value: '**NFTs can also be added to your Virtual Account!**\n\nSimply send NFTs to the community fund wallet address above, and they will be automatically added to your virtual account balance. Use `/check-balance-nft` to view your NFT collection.', inline: false },
+          { name: 'How to Deposit', value: '1. **First:** Click "Register My Wallet" button below\n2. Enter your wallet address in the form\n3. Copy the wallet address above\n4. Send your **ESDT tokens or NFTs** to this address\n5. Your virtual account will be automatically updated\n6. Use `/check-balance-esdt` to verify ESDT deposits\n7. Use `/check-balance-nft` to verify NFT deposits', inline: false }
         ])
         .setColor('#FF9900')
         .setTimestamp()
@@ -4248,220 +4369,6 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
-  } else if (commandName === 'play-rps') {
-    try {
-      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-      const challengeId = interaction.options.getString('challenge-id');
-      const move = interaction.options.getString('move');
-      const guildId = interaction.guildId;
-      const challenges = await getRPSChallenges(guildId);
-      const challenge = challenges[challengeId];
-      if (!challenge || challenge.status !== 'active') {
-        await interaction.editReply({ content: 'This challenge is not active or does not exist.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      if (![challenge.challengerId, challenge.challengedId].includes(interaction.user.id)) {
-        await interaction.editReply({ content: 'You are not a participant in this game.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      const isChallenger = challenge.challengerId === interaction.user.id;
-      const playerChoiceKey = isChallenger ? 'challengerChoice' : 'challengedChoice';
-      if (!challenge.rounds[challenge.currentRound - 1]) {
-        challenge.rounds[challenge.currentRound - 1] = {
-          round: challenge.currentRound,
-          challengerChoice: null,
-          challengedChoice: null,
-          winner: null,
-          result: null
-        };
-      }
-      const currentRound = challenge.rounds[challenge.currentRound - 1];
-      if (currentRound[playerChoiceKey]) {
-        await interaction.editReply({ content: 'You have already made your choice for this round.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      if (!['rock', 'paper', 'scissors'].includes(move)) {
-        await interaction.editReply({ content: 'Invalid move. Please choose rock, paper, or scissors.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      currentRound[playerChoiceKey] = move;
-      // Update game in database
-      await dbRpsGames.updateGame(guildId, challengeId, { rounds: challenge.rounds });
-      // Send game state embed to user after their move
-      const moveEmbed = new EmbedBuilder()
-        .setTitle('🎮 RPS Move Submitted')
-        .setDescription(`You played **${move.charAt(0).toUpperCase() + move.slice(1)}** for round ${challenge.currentRound}.`)
-        .addFields([
-          { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-          { name: 'Round', value: `${challenge.currentRound}`, inline: true },
-          { name: 'Your Choice', value: move, inline: true },
-          { name: 'Opponent', value: isChallenger ? `<@${challenge.challengedId}>` : `<@${challenge.challengerId}>`, inline: true },
-          { name: 'Opponent Choice', value: currentRound[isChallenger ? 'challengedChoice' : 'challengerChoice'] ? currentRound[isChallenger ? 'challengedChoice' : 'challengerChoice'] : 'Not picked yet', inline: true },
-          { name: 'Status', value: 'Waiting for both players to pick', inline: false }
-        ])
-        .setColor('#4d55dc')
-        .setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif')
-        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-        .setTimestamp();
-      await interaction.editReply({ embeds: [moveEmbed], flags: [MessageFlags.Ephemeral] });
-      if (currentRound.challengerChoice && currentRound.challengedChoice) {
-        const winner = determineRPSWinner(currentRound.challengerChoice, currentRound.challengedChoice);
-        currentRound.winner = winner;
-        if (winner === 'draw') {
-          currentRound.result = 'draw';
-          challenge.currentRound++;
-          challenge.rounds[challenge.currentRound - 1] = {
-            round: challenge.currentRound,
-            challengerChoice: null,
-            challengedChoice: null,
-            winner: null,
-            result: null
-          };
-          // Update game in database
-          await dbRpsGames.updateGame(guildId, challengeId, { 
-            currentRound: challenge.currentRound,
-            rounds: challenge.rounds 
-          });
-          const roundEmbed = new EmbedBuilder()
-            .setTitle('🎮 RPS Round Draw!')
-            .setDescription(`Round ${currentRound.round} ended in a draw! Both players, choose again for round ${challenge.currentRound}.`)
-            .addFields([
-              { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-              { name: 'Round', value: `${challenge.currentRound}`, inline: true },
-              { name: 'Challenger', value: `<@${challenge.challengerId}>`, inline: true },
-              { name: 'Challenged', value: `<@${challenge.challengedId}>`, inline: true }
-            ])
-            .setColor('#FFD700')
-            .setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif')
-            .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-            .setTimestamp();
-          await interaction.channel.send({ 
-            embeds: [roundEmbed],
-            components: [
-              new ActionRowBuilder()
-                .addComponents(
-                  new ButtonBuilder()
-                    .setCustomId(`rps-move:${challengeId}:rock`)
-                    .setLabel('🪨 Rock')
-                    .setStyle(ButtonStyle.Primary),
-                  new ButtonBuilder()
-                    .setCustomId(`rps-move:${challengeId}:paper`)
-                    .setLabel('📄 Paper')
-                    .setStyle(ButtonStyle.Primary),
-                  new ButtonBuilder()
-                    .setCustomId(`rps-move:${challengeId}:scissors`)
-                    .setLabel('✂️ Scissors')
-                    .setStyle(ButtonStyle.Primary)
-                )
-            ]
-          });
-        } else {
-          currentRound.result = 'winner';
-          challenge.status = 'completed';
-          // Determine winner/loser IDs and tags
-          const winnerId = winner === 'player1' ? challenge.challengerId : challenge.challengedId;
-          const winnerTag = winner === 'player1' ? challenge.challengerTag : challenge.challengedTag;
-          const winnerWallet = winner === 'player1' ? challenge.challengerWallet : challenge.challengedWallet;
-          const loserId = winner === 'player1' ? challenge.challengedId : challenge.challengerId;
-          const loserTag = winner === 'player1' ? challenge.challengedTag : challenge.challengerTag;
-          challenge.winner = winner;
-          challenge.winnerId = winnerId;
-          challenge.winnerTag = winnerTag;
-          challenge.loserId = loserId;
-          challenge.loserTag = loserTag;
-          challenge.completedAt = Date.now();
-          // Update game in database
-          await dbRpsGames.updateGame(guildId, challengeId, {
-            status: 'completed',
-            winner: winner,
-            winnerId: winnerId,
-            winnerTag: winnerTag,
-            loserId: loserId,
-            loserTag: loserTag,
-            completedAt: Date.now(),
-            rounds: challenge.rounds
-          });
-          
-          // Get balances BEFORE adding prize to ensure we have correct loser balance
-          virtualAccounts.forceReloadData();
-          const loserBalance = await virtualAccounts.getUserBalance(guildId, loserId, challenge.token);
-          const winnerBalanceBeforePrize = await virtualAccounts.getUserBalance(guildId, winnerId, challenge.token);
-          
-          console.log(`[RPS DEBUG] Before prize - Winner: ${winnerId}, Loser: ${loserId}, Token: ${challenge.token}`);
-          console.log(`[RPS DEBUG] Winner balance before prize: ${winnerBalanceBeforePrize}, Loser balance: ${loserBalance}`);
-          
-          // Prize transfer to virtual account
-          const totalPrizeHuman = Number(challenge.humanAmount) * 2;
-          let prizeResult = null;
-          if (challenge.humanAmount && challenge.token) {
-            try {
-              prizeResult = await virtualAccounts.addFundsToAccount(
-                guildId,
-                winnerId,
-                challenge.token,
-                totalPrizeHuman.toString(),
-                null, // No transaction hash for virtual prize
-                'rps_prize',
-                null // Username will be updated when user runs commands
-              );
-            } catch (err) {
-              console.error('[RPS] Error adding prize to virtual account:', err.message);
-            }
-          }
-          
-          // Get winner's final balance after prize
-          const winnerBalance = await virtualAccounts.getUserBalance(guildId, winnerId, challenge.token);
-          
-          console.log(`[RPS DEBUG] After prize - Winner final balance: ${winnerBalance}, Loser balance: ${loserBalance}`);
-          
-          // Winner embed for channel
-          const winnerEmbed = new EmbedBuilder()
-            .setTitle('🎉 RPS Game Complete!')
-            .setDescription(`**${winnerTag} wins the game!**`)
-            .addFields([
-              { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-              { name: 'Winner', value: `<@${winnerId}>`, inline: true },
-              { name: 'Loser', value: `<@${loserId}>`, inline: true },
-              { name: 'Prize Won', value: `${totalPrizeHuman} ${challenge.token}`, inline: true },
-              { name: 'Winner New Balance', value: `${winnerBalance} ${challenge.token}`, inline: true },
-              { name: 'Loser New Balance', value: `${loserBalance} ${challenge.token}`, inline: true }
-            ])
-            .setColor('#00FF00')
-            .setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif')
-            .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-            .setTimestamp();
-          await interaction.channel.send({ embeds: [winnerEmbed] });
-          // DM winner
-          try {
-            const winnerUser = await client.users.fetch(winnerId);
-            if (winnerUser) {
-              // Get Community Fund project logo for RPS winner notification
-              const communityFundProjectName = getCommunityFundProjectName();
-              const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
-              
-              const winnerDMEmbed = new EmbedBuilder()
-                .setTitle('🎉 You Won Rock, Paper, Scissors!')
-                .setDescription(`Congratulations! You won the RPS game and received **${totalPrizeHuman} ${challenge.token}** in your virtual account.`)
-                .addFields([
-                  { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-                  { name: 'Prize Won', value: `${totalPrizeHuman} ${challenge.token}`, inline: true },
-                  { name: 'Your New Balance', value: `${winnerBalance} ${challenge.token}`, inline: true }
-                ])
-                .setColor('#00FF00')
-                .setThumbnail(projectLogoUrl)
-                .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-                .setTimestamp();
-              await winnerUser.send({ embeds: [winnerDMEmbed] });
-            }
-          } catch (dmError) {
-            console.error('[RPS] Could not send DM to winner:', dmError.message);
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Error handling /play-rps command:', err, err.stack);
-      await interaction.editReply({ content: 'An error occurred handling your move. Please try again.', flags: [MessageFlags.Ephemeral] });
-    }
   } else if (commandName === 'debug-server-config') {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
@@ -4544,41 +4451,128 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      const userId = interaction.options.getString('user-id');
+      const userTag = interaction.options.getString('user-tag');
       const guildId = interaction.guildId;
+      
+      // Find user by tag
+      let targetUserId = null;
+      let memberInfo = null;
+      let userWallet = null;
+      
+      try {
+        const guild = interaction.guild;
+        const members = await guild.members.fetch();
+        
+        const targetMember = members.find(member => 
+          member.user.tag === userTag || 
+          member.user.username === userTag ||
+          (member.nickname && member.nickname === userTag)
+        );
+        
+        if (targetMember) {
+          targetUserId = targetMember.user.id;
+          memberInfo = {
+            tag: targetMember.user.tag,
+            username: targetMember.user.username,
+            nickname: targetMember.nickname,
+            joinedAt: targetMember.joinedAt,
+            isInGuild: true
+          };
+          
+          // Get user wallets for this server
+          const userWallets = await getUserWallets(guildId);
+          userWallet = userWallets[targetUserId];
+        }
+      } catch (fetchError) {
+        console.error('Error fetching guild members:', fetchError.message);
+      }
+      
+      if (!targetUserId) {
+        await interaction.editReply({ 
+          content: `User "${userTag}" not found in this server.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
       
       // Get user wallets for this server
       const userWallets = await getUserWallets(guildId);
-      const userWallet = userWallets[userId];
+      const userWalletEntries = Object.entries(userWallets);
+      const userIndex = userWalletEntries.findIndex(([id, wallet]) => id === targetUserId);
+      const isInAutocompleteRange = userIndex !== -1 && userIndex < 100;
       
-      // Get guild member info
-      let memberInfo = null;
+      // Get ESDT balances
+      let esdtBalances = {};
+      let esdtBalancesDisplay = 'None';
       try {
-        const guild = interaction.guild;
-        const member = await guild.members.fetch(userId).catch(() => null);
-        if (member) {
-          memberInfo = {
-            tag: member.user.tag,
-            username: member.user.username,
-            nickname: member.nickname,
-            joinedAt: member.joinedAt,
-            isInGuild: true
-          };
+        esdtBalances = await virtualAccounts.getAllUserBalances(guildId, targetUserId);
+        
+        if (Object.keys(esdtBalances).length > 0) {
+          // Get token metadata to map identifiers to tickers
+          const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+          const identifierToTicker = {};
+          for (const [identifier, metadata] of Object.entries(tokenMetadata)) {
+            if (metadata.ticker) {
+              identifierToTicker[identifier] = metadata.ticker;
+            }
+          }
+          
+          // Format balances
+          const BigNumber = require('bignumber.js');
+          const balanceEntries = Object.entries(esdtBalances)
+            .map(([tokenIdentifier, balance]) => {
+              const ticker = identifierToTicker[tokenIdentifier] || tokenIdentifier.split('-')[0];
+              const balanceBN = new BigNumber(balance);
+              const formattedBalance = balanceBN.isZero() ? '0' : balanceBN.toFixed();
+              return `${ticker}: ${formattedBalance}`;
+            })
+            .filter(b => !b.endsWith(': 0'));
+          
+          esdtBalancesDisplay = balanceEntries.length > 0 
+            ? balanceEntries.join('\n') 
+            : 'None';
         }
       } catch (error) {
-        console.error(`Error fetching member ${userId}:`, error.message);
+        console.error('Error fetching ESDT balances:', error);
+        esdtBalancesDisplay = 'Error fetching balances';
       }
       
-      // Check if user is in autocomplete range
-      const userWalletEntries = Object.entries(userWallets);
-      const userIndex = userWalletEntries.findIndex(([id, wallet]) => id === userId);
-      const isInAutocompleteRange = userIndex !== -1 && userIndex < 100;
+      // Get NFT balances grouped by collection
+      let nftBalancesDisplay = 'None';
+      try {
+        const nftBalances = await virtualAccountsNFT.getUserNFTBalances(guildId, targetUserId);
+        
+        if (nftBalances && nftBalances.length > 0) {
+          // Group by collection
+          const collectionsMap = {};
+          for (const nft of nftBalances) {
+            const collection = nft.collection;
+            if (!collectionsMap[collection]) {
+              collectionsMap[collection] = 0;
+            }
+            collectionsMap[collection]++;
+          }
+          
+          // Format as "Collection: Count"
+          const collectionEntries = Object.entries(collectionsMap)
+            .map(([collection, count]) => `${collection}: ${count}`)
+            .sort();
+          
+          nftBalancesDisplay = collectionEntries.length > 0 
+            ? collectionEntries.join('\n') 
+            : 'None';
+        }
+      } catch (error) {
+        console.error('Error fetching NFT balances:', error);
+        nftBalancesDisplay = 'Error fetching balances';
+      }
       
       // Build debug embed
       const debugEmbed = new EmbedBuilder()
         .setTitle('🔍 User Debug Information')
-        .setDescription(`Debug information for user ID: \`${userId}\``)
+        .setDescription(`Debug information for user: **${memberInfo?.tag || userTag}**`)
         .addFields([
+          { name: 'User ID', value: `\`${targetUserId}\``, inline: false },
           { name: 'Wallet Registered', value: userWallet ? '✅ Yes' : '❌ No', inline: true },
           { name: 'Wallet Address', value: userWallet ? `\`${userWallet}\`` : 'Not registered', inline: false },
           { name: 'In Guild', value: memberInfo ? '✅ Yes' : '❌ No', inline: true },
@@ -4587,7 +4581,9 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Joined Server', value: memberInfo?.joinedAt ? `<t:${Math.floor(memberInfo.joinedAt.getTime() / 1000)}:R>` : 'Unknown', inline: true },
           { name: 'Total Registered Users', value: `${userWalletEntries.length}`, inline: true },
           { name: 'User Index in List', value: userIndex !== -1 ? `${userIndex + 1}` : 'Not found', inline: true },
-          { name: 'In Autocomplete Range', value: isInAutocompleteRange ? '✅ Yes (first 100)' : '❌ No (beyond first 100)', inline: true }
+          { name: 'In Autocomplete Range', value: isInAutocompleteRange ? '✅ Yes (first 100)' : '❌ No (beyond first 100)', inline: true },
+          { name: '💰 ESDT Balances', value: esdtBalancesDisplay.length > 1024 ? esdtBalancesDisplay.substring(0, 1021) + '...' : esdtBalancesDisplay, inline: false },
+          { name: '🖼️ NFT Balances', value: nftBalancesDisplay.length > 1024 ? nftBalancesDisplay.substring(0, 1021) + '...' : nftBalancesDisplay, inline: false }
         ])
         .setColor(isInAutocompleteRange ? '#00FF00' : '#FF0000')
         .setTimestamp()
@@ -4596,14 +4592,15 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.editReply({ embeds: [debugEmbed] });
       
       // Log debug info
-      console.log(`[DEBUG] User ${userId} debug info:`, {
+      console.log(`[DEBUG] User ${targetUserId} (${userTag}) debug info:`, {
         walletRegistered: !!userWallet,
         walletAddress: userWallet,
         inGuild: !!memberInfo,
         userTag: memberInfo?.tag,
         totalUsers: userWalletEntries.length,
         userIndex: userIndex,
-        inAutocompleteRange: isInAutocompleteRange
+        inAutocompleteRange: isInAutocompleteRange,
+        esdtBalancesCount: Object.keys(esdtBalances).length
       });
       
     } catch (error) {
@@ -4909,287 +4906,6 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
-  } else if (commandName === 'bet-virtual') {
-    try {
-      const matchId = interaction.options.getString('match-id');
-      const outcome = interaction.options.getString('outcome').toUpperCase();
-      const guildId = interaction.guildId;
-
-      // Validate outcome
-      if (!['H', 'A', 'D'].includes(outcome)) {
-        await interaction.reply({ content: '❌ Invalid outcome. Please use H (Home), A (Away), or D (Draw).', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-
-      // Check if match still exists and is accepting bets
-      const match = await dbFootball.getMatch(matchId);
-      if (!match || !match.guildIds || !match.guildIds.includes(guildId)) {
-        await interaction.reply({ content: '❌ Match not found or no longer available for betting.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-
-      if (match.status !== 'SCHEDULED' && match.status !== 'TIMED') {
-        await interaction.reply({ content: '❌ This match is no longer accepting bets.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-
-      const kickoffTime = new Date(match.kickoffISO);
-      if (Date.now() >= kickoffTime.getTime()) {
-        await interaction.reply({ content: '❌ Betting has closed for this match. Kickoff time has passed.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-
-      // Get guild-specific token configuration
-      const token = getMatchTokenForGuild(match, guildId);
-      if (!token) {
-        await interaction.reply({ 
-          content: '❌ **Error:** No token configuration found for this match in this guild.', 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-
-      // Check if user has sufficient virtual balance (using identifier)
-      const requiredAmountWei = getMatchStakeForGuild(match, guildId);
-      const requiredAmount = new BigNumber(requiredAmountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
-      const currentBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, token.identifier);
-      
-      if (new BigNumber(currentBalance).isLessThan(requiredAmount)) {
-        await interaction.reply({ 
-          content: `❌ **Insufficient virtual balance!**\n\nYou have: **${currentBalance}** ${token.ticker}\nRequired: **${requiredAmount}** ${token.ticker}\n\nTop up your account by making a transfer to any Community Fund wallet!`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-      await interaction.editReply({ content: '💸 Processing your virtual bet...', flags: [MessageFlags.Ephemeral] });
-      
-      // Deduct funds from virtual account (using identifier)
-      const deductionResult = await virtualAccounts.deductFundsFromAccount(
-        guildId, 
-        interaction.user.id, 
-        token.identifier, 
-        requiredAmount, 
-        `Football bet: ${match.home} vs ${match.away} (${outcome})`
-      );
-      
-      if (!deductionResult.success) {
-        await interaction.editReply({ 
-          content: `❌ **Failed to deduct funds!** ${deductionResult.error}`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-
-      // Create bet
-      const betId = generateBetId(matchId, interaction.user.id);
-      const betAmountWei = getMatchStakeForGuild(match, guildId);
-      const betData = {
-        betId: betId,
-        matchId: matchId,
-        userId: interaction.user.id,
-        outcome: outcome,
-        token: token,
-        amountWei: betAmountWei,
-        txHash: null, // No blockchain transaction needed
-        createdAtISO: new Date().toISOString(),
-        status: 'ACCEPTED',
-        virtualBet: true // Mark as virtual bet
-      };
-
-      // Save bet to database
-      await dbFootball.createBet({
-        betId: betId,
-        guildId: guildId,
-        matchId: matchId,
-        userId: interaction.user.id,
-        outcome: outcome,
-        tokenData: token,
-        amountWei: betAmountWei,
-        txHash: 'VIRTUAL_BET',
-        createdAtISO: new Date().toISOString(),
-        status: 'ACCEPTED'
-      });
-
-      // Track bet amount for PNL calculation (using identifier)
-      await trackBetAmount(guildId, interaction.user.id, betAmountWei, token.identifier, token.ticker);
-
-      // Update the main match embed with new pot size
-      try {
-        console.log(`[FOOTBALL] Updating pot size for match ${matchId} in guild ${guildId} (bet-virtual command)`);
-        const channel = interaction.channel;
-        const matchMessage = await channel.messages.fetch(match.embeds[guildId].messageId);
-        if (matchMessage && matchMessage.embeds && matchMessage.embeds.length > 0) {
-          // Calculate current pot size using utility function
-          const potSize = await calculateMatchPotSize(guildId, matchId);
-          console.log(`[FOOTBALL] Calculated pot size: ${potSize.totalPotHuman} ${token.ticker} (bet-virtual command)`);
-          
-          // Update the embed - handle both fetched message embeds and EmbedBuilder
-          let updatedEmbed;
-          if (matchMessage.embeds[0].data) {
-            // This is already an EmbedBuilder
-            updatedEmbed = matchMessage.embeds[0];
-          } else {
-            // This is a fetched message embed, convert to EmbedBuilder
-            updatedEmbed = EmbedBuilder.from(matchMessage.embeds[0]);
-          }
-          
-          // Check if fields exist and update both pot size and stake fields
-          if (updatedEmbed.data && updatedEmbed.data.fields && Array.isArray(updatedEmbed.data.fields)) {
-            const potSizeField = updatedEmbed.data.fields.find(field => field.name === '🏆 Pot Size');
-            const stakeField = updatedEmbed.data.fields.find(field => field.name === '💰 Stake');
-            
-            let needsUpdate = false;
-            
-            if (potSizeField) {
-              potSizeField.value = `${potSize.totalPotHuman} ${token.ticker}`;
-              needsUpdate = true;
-            }
-            
-            // Also update stake field to ensure it shows the correct guild-specific stake
-            if (stakeField) {
-              const stakeAmountWei = getMatchStakeForGuild(match, guildId);
-              const stakeAmountHuman = new BigNumber(stakeAmountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
-              stakeField.value = `${stakeAmountHuman} ${token.ticker}`;
-              needsUpdate = true;
-            }
-            
-            if (needsUpdate) {
-              await matchMessage.edit({ embeds: [updatedEmbed] });
-              console.log(`[FOOTBALL] Updated match embed pot size to ${potSize.totalPotHuman} ${token.ticker} and stake for match ${matchId} (bet-virtual command)`);
-            } else {
-              console.log(`[FOOTBALL] Pot size or stake field not found in embed for match ${matchId}. Available fields:`, updatedEmbed.data.fields.map(f => f.name));
-            }
-          } else {
-            console.log(`[FOOTBALL] Embed fields not accessible for match ${matchId}. Fields type:`, typeof updatedEmbed.data?.fields);
-          }
-        } else {
-          console.log(`[FOOTBALL] Match message or embed not found for match ${matchId}. Message:`, !!matchMessage, 'Embeds:', matchMessage?.embeds?.length);
-        }
-      } catch (updateError) {
-        console.error('[FOOTBALL] Error updating match embed pot size:', updateError.message);
-        console.error('[FOOTBALL] Full error details:', updateError);
-      }
-
-      // Post confirmation in match thread
-      if (match.embeds[guildId].threadId) {
-        try {
-          const thread = await interaction.guild.channels.fetch(match.embeds[guildId].threadId);
-          if (thread) {
-            const confirmationEmbed = new EmbedBuilder()
-              .setTitle('✓ Virtual Bet Accepted!')
-              .setDescription(`${interaction.user} placed a virtual bet on **${match.home} vs ${match.away}**`)
-              .addFields([
-                { name: 'Outcome', value: outcome === 'H' ? 'Home Win' : outcome === 'A' ? 'Away Win' : 'Draw', inline: true },
-                { name: 'Amount', value: `${requiredAmount} ${token.ticker}`, inline: true },
-                { name: 'Type', value: 'Virtual Balance', inline: true }
-              ])
-              .setColor('#00FF00')
-              .setTimestamp();
-            
-            await thread.send({ embeds: [confirmationEmbed] });
-          }
-        } catch (threadError) {
-          console.error('[FOOTBALL] Error posting confirmation in thread:', threadError.message);
-        }
-      }
-
-      await interaction.editReply({ 
-        content: `✅ **Virtual bet placed successfully!**\n\n**Match:** ${match.home} vs ${match.away}\n**Outcome:** ${outcome === 'H' ? 'Home Win' : outcome === 'A' ? 'Away Win' : 'Draw'}\n**Amount:** ${requiredAmount} ${token.ticker}\n\nGood luck! 🍀`, 
-        flags: [MessageFlags.Ephemeral] 
-      });
-
-    } catch (error) {
-      console.error('[FOOTBALL] Error in bet-virtual command:', error.message);
-      console.error('[FOOTBALL] Full error details:', error);
-      if (interaction.deferred) {
-        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      }
-    }
-  } else if (commandName === 'current-bets') {
-    try {
-      const isPublic = interaction.options.getBoolean('public') || false;
-      
-      if (!isPublic) {
-        await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.deferReply();
-      }
-
-      // Get matches for this guild from database
-      const guildMatchesObj = await dbFootball.getMatchesByGuild(guildId);
-      const guildMatches = Object.values(guildMatchesObj || {});
-      
-      // Get all bets for this guild
-      const allBets = [];
-      for (const match of guildMatches) {
-        const matchBets = await dbFootball.getBetsByMatch(guildId, match.matchId);
-        allBets.push(...Object.values(matchBets || {}));
-      }
-      const guildBets = {};
-      allBets.forEach(bet => {
-        guildBets[bet.betId] = bet;
-      });
-
-      if (guildMatches.length === 0) {
-        await interaction.editReply({ 
-          content: '❌ **No football matches found for this server!**\n\nUse `/create-fixtures` to create new matches first.', 
-          flags: isPublic ? [] : [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-
-      // Get current matches and their bets
-      const currentMatches = Object.values(guildMatches).filter(match => match.status === 'SCHEDULED' || match.status === 'TIMED');
-      
-      if (currentMatches.length === 0) {
-        await interaction.editReply({ 
-          content: '❌ **No active football matches found!**\n\nAll matches have either finished or been cancelled.', 
-          flags: isPublic ? [] : [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-
-      const embed = new EmbedBuilder()
-        .setTitle('⚽ Current Football Bets')
-        .setDescription(`**${currentMatches.length}** active matches found`)
-        .setColor('#00FF00')
-        .setTimestamp();
-
-      for (const match of currentMatches) {
-        const matchBets = Object.values(guildBets).filter(bet => bet.matchId === match.matchId);
-        const potSize = await calculateMatchPotSize(guildId, match.matchId);
-        const token = getMatchTokenForGuild(match, guildId);
-        
-        const kickoffTime = new Date(match.kickoffISO);
-        const timeUntilKickoff = kickoffTime.getTime() - Date.now();
-        
-        let statusText = '🟢 Active';
-        if (timeUntilKickoff < 0) {
-          statusText = '🔴 Past Kickoff';
-        } else if (timeUntilKickoff < 300000) { // 5 minutes
-          statusText = '🟡 Starting Soon';
-        }
-
-        embed.addFields({
-          name: `${match.home} vs ${match.away}`,
-          value: `**Game ID:** \`${match.matchId}\`\n**Status:** ${statusText}\n**Pot Size:** ${potSize.totalPotHuman} ${token?.ticker || 'N/A'}\n**Bets:** ${matchBets.length}\n**Kickoff:** <t:${Math.floor(kickoffTime.getTime() / 1000)}:R>`,
-          inline: true
-        });
-      }
-
-      await interaction.editReply({ embeds: [embed] });
-    } catch (error) {
-      console.error('[FOOTBALL] Error in current-bets command:', error.message);
-      if (interaction.deferred) {
-        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      }
-    }
   } else if (commandName === 'get-competition') {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
@@ -5227,32 +4943,39 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle('📚 Bot Commands Library')
         .setDescription('All available commands organized by category')
         .setColor('#4d55dc')
-        .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
+        .setThumbnail('https://i.ibb.co/60PgqNc5/checklist-logo.png')
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
         .setTimestamp();
 
       // Define command categories
       const categories = {
-        '👛 Virtual Accounts': [
-          '`/check-balance` - View your virtual account balance',
+        '👛 Virtual Accounts (ESDT)': [
+          '`/check-balance-esdt` - View your virtual account balance',
           '`/balance-history` - View your transaction history',
-          '`/tip-virtual` - Tip another user with virtual balance',
-          '`/withdraw` - Withdraw funds to your wallet'
+          '`/tip-virtual-esdt` - Tip another user with virtual balance',
+          '`/virtual-house-topup` - Transfer from Virtual Account to House Balance',
+          '`/withdraw-esdt` - Withdraw funds to your wallet'
+        ],
+        '🖼️ Virtual Accounts (NFT)': [
+          '`/check-balance-nft` - View your NFT virtual account balance',
+          '`/balance-history-nft` - View your NFT transaction history',
+          '`/tip-virtual-nft` - Tip another user an NFT from your virtual account',
+          '`/sell-nft` - List an NFT for sale on the marketplace',
+          '`/withdraw-nft` - Withdraw an NFT to your registered wallet'
         ],
         '⚽ Football Betting': [
           '`/create-fixtures` 🔴 Admin - Create football matches for betting',
-          '`/bet-virtual` - Place a bet on a football match',
-          '`/current-bets` - View active betting matches',
           '`/leaderboard` - View betting leaderboard',
           '`/leaderboard-filtered` - View leaderboard for date range',
-          '`/my-stats` - View your betting statistics & PNL',
-          '`/leaderboard-reset` 🔴 Admin - Reset the leaderboard'
+          '`/my-football-stats` - View your betting statistics & PNL'
         ],
         '🎮 Rock Paper Scissors': [
           '`/challenge-rps` - Challenge someone to RPS',
-          '`/join-rps` - Join an RPS challenge',
-          '`/play-rps` - Play your move',
           '`/list-rps-challenges` - List active challenges'
+        ],
+        '🎰 Lottery & Auctions': [
+          '`/create-lottery` 🔴 Admin - Create a new lottery game',
+          '`/create-auction` 🔴 Admin - Create an NFT auction'
         ],
         '💼 Wallet & Project Management': [
           '`/set-wallet` - Register your MultiversX wallet',
@@ -5262,8 +4985,9 @@ client.on('interactionCreate', async (interaction) => {
           '`/delete-project` 🔴 Admin - Delete a project',
           '`/set-community-fund` 🔴 Admin - Set community fund project'
         ],
-        '💰 Token Transfers': [
+        '💰 Token & NFT Transfers': [
           '`/send-esdt` 🔴 Admin - Send tokens to a user',
+          '`/send-nft` 🔴 Admin - Send NFT to a user',
           '`/house-tip` 🔴 Admin - Tip from house balance',
           '`/list-wallets` - List registered wallets (verify your registration)',
           '`/show-community-fund-address` - View community fund address'
@@ -5276,7 +5000,6 @@ client.on('interactionCreate', async (interaction) => {
           '`/update-usernames` 🔴 Admin - Update Discord usernames',
           '`/get-competition` - View last used competition',
           '`/test-football-api` 🔴 Admin - Test API connectivity',
-          '`/force-close-games` 🔴 Admin - Fix stuck games',
           '`/debug-server-config` 🔴 Admin - Debug server config',
           '`/debug-user` 🔴 Admin - Debug user info'
         ]
@@ -5474,7 +5197,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
-  } else if (commandName === 'my-stats') {
+  } else if (commandName === 'my-football-stats') {
     try {
       const isPublic = interaction.options.getBoolean('public') || false;
       
@@ -5956,7 +5679,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       const targetUser = interaction.options.getUser('user');
-      const source = interaction.options.getString('source') || 'betting'; // Default to betting for backward compatibility
+      const houseType = interaction.options.getString('house-type') || 'betting'; // Default to betting for backward compatibility
       const tokenTicker = interaction.options.getString('token');
       const amount = interaction.options.getNumber('amount');
       const memo = interaction.options.getString('memo') || 'House prize';
@@ -6063,7 +5786,7 @@ client.on('interactionCreate', async (interaction) => {
       // Get balance based on source - check both identifier and ticker (for backward compatibility)
       let houseBalance;
       let sourceName;
-      if (source === 'auction') {
+      if (houseType === 'auction') {
         sourceName = 'Auction House Balance';
         const auctionEarningsId = aggregatedBalances.auctionEarnings[tokenIdentifier] || '0';
         const auctionEarningsTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.auctionEarnings[tokenTickerOnly] || '0') : '0';
@@ -6078,7 +5801,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply({ content: '❌ Auction house has no balance for this token yet. No auctions have completed successfully.', flags: [MessageFlags.Ephemeral] });
           return;
         }
-      } else if (source === 'lottery') {
+      } else if (houseType === 'lottery') {
         sourceName = 'Lottery House Balance';
         // Check both identifier and ticker (for backward compatibility with old data stored by ticker)
         const lotteryEarningsId = aggregatedBalances.lotteryEarnings[tokenIdentifier] || '0';
@@ -6131,7 +5854,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Track house spending FIRST (before virtual transfer) - using identifier
-      await trackHouseSpending(guildId, amountWei, tokenIdentifier, memo, source);
+      await trackHouseSpending(guildId, amountWei, tokenIdentifier, memo, houseType);
       
       // Add to recipient's virtual account (virtual transfer, no on-chain transaction)
       const addResult = await virtualAccounts.addFundsToAccount(
@@ -6154,7 +5877,7 @@ client.on('interactionCreate', async (interaction) => {
             .addFields([
               { name: 'Recipient', value: `<@${targetUser.id}>`, inline: true },
               { name: 'Amount', value: `${amount} ${tokenTicker}`, inline: true },
-              { name: 'Source', value: source === 'auction' ? '🎨 Auction House' : source === 'lottery' ? '🎲 Lottery House' : '⚽ Betting House', inline: true },
+              { name: 'Source', value: houseType === 'auction' ? '🎨 Auction House' : houseType === 'lottery' ? '🎲 Lottery House' : '⚽ Betting House', inline: true },
               { name: 'New Balance', value: `${addResult.newBalance} ${tokenTicker}`, inline: true },
               { name: 'Memo', value: memo, inline: false },
               { name: 'Sent By', value: `<@${interaction.user.id}>`, inline: true }
@@ -6191,7 +5914,7 @@ client.on('interactionCreate', async (interaction) => {
               .addFields([
                 { name: 'Recipient', value: `<@${targetUser.id}>`, inline: true },
                 { name: 'Amount', value: `${amount} ${tokenTicker}`, inline: true },
-                { name: 'Source', value: source === 'auction' ? '🎨 Auction House' : source === 'lottery' ? '🎲 Lottery House' : '⚽ Betting House', inline: true },
+                { name: 'Source', value: houseType === 'auction' ? '🎨 Auction House' : houseType === 'lottery' ? '🎲 Lottery House' : '⚽ Betting House', inline: true },
                 { name: 'Memo', value: memo, inline: false }
               ])
               .setColor('#8B5CF6')
@@ -6213,11 +5936,11 @@ client.on('interactionCreate', async (interaction) => {
         // Use tokenIdentifier (not tokenTicker) for house balance operations
         const tokenBalance = await getHouseBalance(guildId, tokenIdentifier);
         if (tokenBalance) {
-          if (source === 'auction') {
+          if (houseType === 'auction') {
             const currentSpending = new BigNumber(tokenBalance.auctionSpending?.[tokenIdentifier] || '0');
             tokenBalance.auctionSpending[tokenIdentifier] = currentSpending.minus(amountWei).toString();
             tokenBalance.auctionPNL[tokenIdentifier] = new BigNumber(tokenBalance.auctionPNL[tokenIdentifier] || '0').plus(amountWei).toString();
-          } else if (source === 'lottery') {
+          } else if (houseType === 'lottery') {
             const currentSpending = new BigNumber(tokenBalance.lotterySpending?.[tokenIdentifier] || '0');
             tokenBalance.lotterySpending[tokenIdentifier] = currentSpending.minus(amountWei).toString();
             tokenBalance.lotteryPNL[tokenIdentifier] = new BigNumber(tokenBalance.lotteryPNL[tokenIdentifier] || '0').plus(amountWei).toString();
@@ -6406,7 +6129,7 @@ client.on('interactionCreate', async (interaction) => {
       // Get balance based on source - check both identifier and ticker (for backward compatibility)
       let houseBalance;
       let sourceName;
-      if (source === 'auction') {
+      if (houseType === 'auction') {
         sourceName = 'Auction House Balance';
         const auctionEarningsId = aggregatedBalances.auctionEarnings[tokenIdentifier] || '0';
         const auctionEarningsTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.auctionEarnings[tokenTickerOnly] || '0') : '0';
@@ -6422,7 +6145,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply({ content: '❌ Auction house has no balance for this token yet. No auctions have completed successfully.', flags: [MessageFlags.Ephemeral] });
           return;
         }
-      } else if (source === 'lottery') {
+      } else if (houseType === 'lottery') {
         sourceName = 'Lottery House Balance';
         // Check both identifier and ticker (for backward compatibility with old data stored by ticker)
         const lotteryEarningsId = aggregatedBalances.lotteryEarnings[tokenIdentifier] || '0';
@@ -6846,45 +6569,6 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
-  } else if (commandName === 'leaderboard-reset') {
-    try {
-      // Check if user is admin
-      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-        await interaction.reply({ content: '❌ **Admin Only!** This command is restricted to server administrators.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-
-      const confirmText = interaction.options.getString('confirm');
-      
-      if (confirmText !== 'RESET') {
-        await interaction.reply({ 
-          content: '❌ **Confirmation Required!**\n\nTo reset the leaderboard, type `/leaderboard-reset confirm:RESET`', 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-
-      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-
-      // Reset leaderboard for this guild
-      await dbLeaderboard.deleteAllLeaderboardEntries(interaction.guildId);
-      console.log(`[FOOTBALL] Leaderboard reset for guild ${interaction.guildId}`);
-
-      const embed = new EmbedBuilder()
-        .setTitle('🔄 Leaderboard Reset')
-        .setDescription('✅ **Football betting leaderboard has been reset successfully!**\n\nAll player points, wins, and earnings have been cleared. The leaderboard is now empty and ready for new data.')
-        .setColor('#00FF00')
-        .setTimestamp();
-
-      await interaction.editReply({ embeds: [embed] });
-    } catch (error) {
-      console.error('[FOOTBALL] Error in leaderboard-reset command:', error.message);
-      if (interaction.deferred) {
-        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      }
-    }
   } else if (commandName === 'update-token-metadata') {
     try {
       // Check if user is admin
@@ -6966,7 +6650,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
-  } else if (commandName === 'check-balance') {
+  } else if (commandName === 'check-balance-esdt') {
     try {
       const isPublic = interaction.options.getBoolean('public') || false;
       await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
@@ -6993,6 +6677,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: '🔍 Debug Info', value: `Guild ID: ${guildId}\nUser ID: ${userId}`, inline: false }
           ])
           .setColor('#FF9900')
+          .setThumbnail('https://i.ibb.co/bTmZbDK/Crypto-Wallet-Logo.png')
           .setTimestamp()
           .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
         
@@ -7056,6 +6741,7 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle('💰 Virtual Account Balance')
         .setDescription(`Balance for ${interaction.user.tag}`)
         .setColor('#00FF00')
+        .setThumbnail('https://i.ibb.co/bTmZbDK/Crypto-Wallet-Logo.png')
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
       
@@ -7133,7 +6819,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.editReply({ embeds: [embed] });
       
     } catch (error) {
-      console.error('Error in check-balance command:', error.message);
+      console.error('Error in check-balance-esdt command:', error.message);
       if (interaction.deferred) {
         await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       } else {
@@ -7186,6 +6872,574 @@ client.on('interactionCreate', async (interaction) => {
       
     } catch (error) {
       console.error('Error in balance-history command:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'check-balance-nft') {
+    try {
+      const collection = interaction.options.getString('collection');
+      const isPublic = interaction.options.getBoolean('public') || false;
+      await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      // Get user's NFT balances
+      const nftBalances = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collection || null);
+      
+      if (!nftBalances || nftBalances.length === 0) {
+        const embed = new EmbedBuilder()
+          .setTitle('🖼️ NFT Virtual Account Balance')
+          .setDescription(collection 
+            ? `You have no NFTs in collection "${collection}" yet.`
+            : 'You have no NFTs in your virtual account yet.')
+          .addFields([
+            { name: '💡 How to get started', value: 'Send NFTs to any Community Fund wallet address to add them to your virtual account!', inline: false }
+          ])
+          .setColor('#FF9900')
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+      
+      // Group NFTs by collection
+      const collectionsMap = {};
+      for (const nft of nftBalances) {
+        const coll = nft.collection;
+        if (!collectionsMap[coll]) {
+          collectionsMap[coll] = [];
+        }
+        collectionsMap[coll].push(nft);
+      }
+      
+      const embed = new EmbedBuilder()
+        .setTitle('🖼️ NFT Virtual Account Balance')
+        .setDescription(`NFTs owned by ${interaction.user.tag}`)
+        .setColor('#00FF00')
+        .setThumbnail('https://i.ibb.co/FkZdFMPz/NFT-Wallet-Logo.png')
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      // Add fields for each collection
+      const collections = Object.keys(collectionsMap).sort();
+      let fieldCount = 0;
+      
+      for (const coll of collections) {
+        if (fieldCount >= 25) break; // Discord embed limit
+        
+        const nfts = collectionsMap[coll];
+        const nftNames = nfts.map(nft => nft.nft_name || `${coll}#${nft.nonce}`).slice(0, 10);
+        const remainingCount = nfts.length > 10 ? `\n... and ${nfts.length - 10} more` : '';
+        
+        let fieldValue = `**Count:** ${nfts.length}\n**NFTs:**\n${nftNames.join('\n')}${remainingCount}`;
+        
+        embed.addFields({
+          name: `📦 ${coll}`,
+          value: fieldValue,
+          inline: false
+        });
+        
+        fieldCount++;
+      }
+      
+      // Add total count
+      const totalNFTs = nftBalances.length;
+      embed.addFields({
+        name: '📊 Summary',
+        value: `**Total NFTs:** ${totalNFTs}\n**Collections:** ${collections.length}`,
+        inline: false
+      });
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (error) {
+      console.error('Error in check-balance-nft command:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'balance-history-nft') {
+    try {
+      const collection = interaction.options.getString('collection');
+      const limit = Math.min(interaction.options.getInteger('limit') || 10, 50);
+      const isPublic = interaction.options.getBoolean('public') || false;
+      await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      // Get user's NFT transaction history
+      const transactions = await virtualAccountsNFT.getNFTTransactionHistory(guildId, userId, collection || null, limit);
+      
+      if (!transactions || transactions.length === 0) {
+        const embed = new EmbedBuilder()
+          .setTitle('📊 NFT Transaction History')
+          .setDescription(collection 
+            ? `No NFT transactions found for collection "${collection}".`
+            : 'No NFT transactions found for your account.')
+          .setColor('#FF9900')
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+      
+      const embed = new EmbedBuilder()
+        .setTitle('📊 NFT Transaction History')
+        .setDescription(`Last ${transactions.length} NFT transactions for ${interaction.user.tag}`)
+        .setColor('#0099FF')
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      for (const tx of transactions) {
+        const emoji = tx.type === 'deposit' ? '💰' : 
+                     tx.type === 'transfer_in' || tx.type === 'purchase' ? '✅' :
+                     tx.type === 'transfer_out' || tx.type === 'sale' ? '📤' :
+                     tx.type === 'offer' ? '💼' : '🔄';
+        
+        const timestamp = `<t:${Math.floor(tx.timestamp / 1000)}:R>`;
+        const nftDisplay = tx.nftName || `${tx.collection}#${tx.nonce}`;
+        
+        let value = `**NFT:** ${nftDisplay}\n**Collection:** ${tx.collection}\n**Type:** ${tx.type}`;
+        
+        if (tx.priceAmount && tx.priceTokenIdentifier) {
+          value += `\n**Price:** ${tx.priceAmount} ${tx.priceTokenIdentifier}`;
+        }
+        
+        if (tx.fromUserId || tx.toUserId) {
+          const otherParty = tx.fromUserId ? `from <@${tx.fromUserId}>` : `to <@${tx.toUserId}>`;
+          value += `\n**${tx.fromUserId ? 'From' : 'To'}:** ${otherParty}`;
+        }
+        
+        value += `\n**Time:** ${timestamp}`;
+        
+        embed.addFields({
+          name: `${emoji} ${tx.description || tx.type}`,
+          value: value,
+          inline: false
+        });
+      }
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (error) {
+      console.error('Error in balance-history-nft command:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'sell-nft') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const collection = interaction.options.getString('collection');
+      const nftName = interaction.options.getString('nft-name');
+      const title = interaction.options.getString('title');
+      const description = interaction.options.getString('description') || '';
+      const priceTokenTicker = interaction.options.getString('price-token');
+      const priceAmount = interaction.options.getString('price-amount');
+      const listingType = interaction.options.getString('listing-type') || 'fixed_price';
+      const expiresInHours = interaction.options.getNumber('expires-in');
+      
+      // Validate user owns the NFT
+      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collection);
+      
+      if (!userNFTs || userNFTs.length === 0) {
+        await interaction.editReply({ 
+          content: `❌ You don't own any NFTs in collection "${collection}".`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Find the specific NFT by name
+      const nft = userNFTs.find(n => 
+        (n.nft_name && n.nft_name.toLowerCase() === nftName.toLowerCase()) ||
+        `${collection}#${n.nonce}` === nftName
+      );
+      
+      if (!nft) {
+        await interaction.editReply({ 
+          content: `❌ NFT "${nftName}" not found in your collection "${collection}".`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Verify NFT still exists in user's balance
+      const verifyNFT = await virtualAccountsNFT.getUserNFTBalance(guildId, userId, collection, nft.nonce);
+      if (!verifyNFT) {
+        await interaction.editReply({ 
+          content: `❌ NFT "${nftName}" is no longer in your balance. It may have been transferred.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Check if this NFT is already listed for sale
+      const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
+      const alreadyListed = activeListings.find(listing => 
+        listing.collection === collection && listing.nonce === nft.nonce
+      );
+      
+      if (alreadyListed) {
+        await interaction.editReply({ 
+          content: `❌ **NFT already listed!**\n\nThis NFT "${nftName}" (${collection}#${nft.nonce}) is already listed for sale.\n\nYou can only list each NFT once. Please cancel the existing listing first if you want to create a new one.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Get Community Fund project for token validation
+      const fundProject = await getCommunityFundProject(guildId);
+      if (!fundProject) {
+        await interaction.editReply({ 
+          content: `❌ No Community Fund configured. Please ask an admin to set it up.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      const fundProjectData = projects[projectName];
+      
+      if (!fundProjectData) {
+        await interaction.editReply({ 
+          content: `❌ Community Fund project not found.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Validate token is supported by Community Fund
+      // Get supported tokens from database (should be full identifiers)
+      const supportedTokensRaw = fundProjectData.supportedTokens || [];
+      const supportedTokens = Array.isArray(supportedTokensRaw)
+        ? supportedTokensRaw
+        : (supportedTokensRaw || '').split(',').map(t => t.trim()).filter(t => t.length > 0);
+      
+      // Compare identifiers directly (case-insensitive)
+      const priceTokenIdentifier = priceTokenTicker.trim();
+      const isSupported = supportedTokens.some(token => 
+        token.toLowerCase() === priceTokenIdentifier.toLowerCase()
+      );
+      
+      if (!isSupported) {
+        // Display original supported tokens for error message
+        const displayTokens = supportedTokens.join(', ');
+        await interaction.editReply({ 
+          content: `❌ Token "${priceTokenIdentifier}" is not supported by Community Fund. Supported: ${displayTokens}`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Use the identifier directly (already validated)
+      const tokenIdentifier = priceTokenIdentifier;
+      
+      // Get ticker for display purposes
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      let displayTicker = tokenIdentifier;
+      for (const [id, metadata] of Object.entries(tokenMetadata)) {
+        if (id.toLowerCase() === tokenIdentifier.toLowerCase()) {
+          displayTicker = metadata.ticker || tokenIdentifier.split('-')[0];
+          break;
+        }
+      }
+      // Fallback: extract ticker from identifier if metadata not found
+      if (displayTicker === tokenIdentifier && tokenIdentifier.includes('-')) {
+        displayTicker = tokenIdentifier.split('-')[0];
+      }
+      
+      // Validate price amount
+      try {
+        const priceBN = new BigNumber(priceAmount);
+        if (priceBN.isLessThanOrEqualTo(0) || !priceBN.isFinite()) {
+          throw new Error('Invalid price amount');
+        }
+      } catch (amountError) {
+        await interaction.editReply({ 
+          content: `❌ Invalid price amount: ${priceAmount}`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Generate listing ID
+      const listingId = `nft_listing_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Calculate expiration
+      let expiresAt = null;
+      if (expiresInHours && expiresInHours > 0) {
+        expiresAt = Date.now() + (expiresInHours * 60 * 60 * 1000);
+      }
+      
+      // Create listing embed
+      const listingEmbed = new EmbedBuilder()
+        .setTitle(title)
+        .setDescription(`${description}\n\n**NFT:** ${nft.nft_name || `${collection}#${nft.nonce}`}\n**Collection:** ${collection}\n**Nonce:** ${nft.nonce}`)
+        .addFields([
+          { name: '💰 Price', value: `${priceAmount} ${displayTicker}`, inline: true },
+          { name: '📋 Listing Type', value: listingType === 'fixed_price' ? 'Fixed Price' : 'Accept Offers', inline: true },
+          { name: '👤 Seller', value: `<@${userId}>`, inline: true },
+          { name: '📊 Status', value: '🟢 Active', inline: true }
+        ])
+        .setColor(0x00FF00)
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      if (expiresAt) {
+        listingEmbed.addFields([
+          { name: '⏰ Expires', value: `<t:${Math.floor(expiresAt / 1000)}:R>`, inline: true }
+        ]);
+      }
+      
+      if (nft.nft_image_url) {
+        listingEmbed.setThumbnail(nft.nft_image_url);
+      }
+      
+      // Create buttons
+      const buttons = [];
+      
+      // Always show Buy button - for fixed_price it's "Buy Now", for accept_offers it's "Buy at Listed Price"
+      const buyButton = new ButtonBuilder()
+        .setCustomId(`nft-buy:${listingId}`)
+        .setLabel(listingType === 'fixed_price' ? 'Buy Now' : 'Buy at Listed Price')
+        .setStyle(ButtonStyle.Success);
+      buttons.push(buyButton);
+      
+      const offerButton = new ButtonBuilder()
+        .setCustomId(`nft-offer:${listingId}`)
+        .setLabel('Make Offer')
+        .setStyle(ButtonStyle.Primary);
+      buttons.push(offerButton);
+      
+      const cancelButton = new ButtonBuilder()
+        .setCustomId(`nft-listing-cancel:${listingId}`)
+        .setLabel('Cancel Listing')
+        .setStyle(ButtonStyle.Danger);
+      buttons.push(cancelButton);
+      
+      const buttonRow = new ActionRowBuilder().addComponents(buttons);
+      
+      // Post listing message
+      const listingMessage = await interaction.channel.send({ 
+        embeds: [listingEmbed], 
+        components: [buttonRow] 
+      });
+      
+      // Create thread
+      let thread = null;
+      let threadId = null;
+      try {
+        thread = await listingMessage.startThread({
+          name: `Listing: ${nft.nft_name || `${collection}#${nft.nonce}`}`,
+          autoArchiveDuration: 60
+        });
+        threadId = thread.id;
+      } catch (threadError) {
+        console.error(`[NFT-LISTING] Error creating thread:`, threadError.message);
+      }
+      
+      // Create listing in database
+      await virtualAccountsNFT.createListing(guildId, listingId, {
+        sellerId: userId,
+        sellerTag: interaction.user.tag,
+        collection: collection,
+        identifier: nft.identifier,
+        nonce: nft.nonce,
+        nftName: nft.nft_name,
+        nftImageUrl: nft.nft_image_url,
+        title: title,
+        description: description,
+        priceTokenIdentifier: tokenIdentifier,
+        priceAmount: priceAmount,
+        listingType: listingType,
+        status: 'ACTIVE',
+        messageId: listingMessage.id,
+        threadId: threadId,
+        channelId: interaction.channel.id,
+        createdAt: Date.now(),
+        expiresAt: expiresAt
+      });
+      
+      // Post initial message in thread
+      if (thread) {
+        await thread.send(`📢 **Listing created!**\n\nThis NFT is now available for purchase. Use the buttons above to buy or make an offer.`);
+      }
+      
+      await interaction.editReply({ 
+        content: `✅ **Listing created successfully!**\n\nYour NFT "${nft.nft_name || `${collection}#${nft.nonce}`}" is now listed for ${priceAmount} ${displayTicker}.`, 
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+    } catch (error) {
+      console.error('Error in sell-nft command:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'withdraw-nft') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const collection = interaction.options.getString('collection');
+      const nftName = interaction.options.getString('nft-name');
+      
+      // Get user's registered wallet
+      const userWallet = await getUserWallet(userId, guildId);
+      if (!userWallet) {
+        await interaction.editReply({ 
+          content: `❌ **No wallet registered!**\n\nPlease register your wallet using \`/set-wallet\` before withdrawing NFTs.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      if (!userWallet.startsWith('erd1') || userWallet.length !== 62) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid wallet address!**\n\nYour registered wallet address is invalid. Please update it using \`/set-wallet\`.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Validate user owns the NFT
+      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collection);
+      
+      if (!userNFTs || userNFTs.length === 0) {
+        await interaction.editReply({ 
+          content: `❌ You don't own any NFTs in collection "${collection}".`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Find the specific NFT by name
+      const nft = userNFTs.find(n => 
+        (n.nft_name && n.nft_name.toLowerCase() === nftName.toLowerCase()) ||
+        `${collection}#${n.nonce}` === nftName
+      );
+      
+      if (!nft) {
+        await interaction.editReply({ 
+          content: `❌ NFT "${nftName}" not found in your collection "${collection}".`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Get Community Fund project
+      const communityFundProjectName = getCommunityFundProjectName();
+      const projects = await getProjects(guildId);
+      const communityFundProject = projects[communityFundProjectName];
+      
+      if (!communityFundProject) {
+        await interaction.editReply({ 
+          content: `❌ Community Fund project not configured. Please contact an administrator.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Check Community Fund balances (1 transfer for NFT withdraw)
+      const balanceCheck = await checkCommunityFundBalances(guildId, 1);
+      if (!balanceCheck.sufficient) {
+        const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/withdraw-nft');
+        await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const nftDisplayName = nft.nft_name || `${collection}#${nft.nonce}`;
+      
+      await interaction.editReply({ 
+        content: `🔄 **Processing withdrawal...**\n\n**NFT:** ${nftDisplayName}\n**Collection:** ${collection}\n**Nonce:** ${nft.nonce}\n**Recipient:** \`${userWallet}\``, 
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+      console.log(`[WITHDRAW-NFT] User ${interaction.user.tag} (${userId}) withdrawing NFT ${nftDisplayName} (${collection}#${nft.nonce}) to ${userWallet}`);
+      
+      // Transfer NFT from Community Fund to user wallet
+      const transferResult = await transferNFTFromCommunityFund(
+        userWallet,
+        collection,
+        nft.nonce,
+        communityFundProjectName,
+        guildId
+      );
+      
+      if (transferResult.success) {
+        // Remove NFT from virtual account
+        await virtualAccountsNFT.removeNFTFromAccount(guildId, userId, collection, nft.nonce);
+        
+        // Create transaction record
+        await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
+          id: `withdraw_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          type: 'withdraw',
+          collection: collection,
+          identifier: collection,
+          nonce: nft.nonce,
+          nft_name: nftDisplayName,
+          price_token_identifier: null,
+          price_amount: null,
+          timestamp: Date.now(),
+          description: `Withdrew ${nftDisplayName} to wallet ${userWallet}`,
+          tx_hash: transferResult.txHash
+        });
+        
+        const explorerUrl = transferResult.txHash
+          ? `https://explorer.multiversx.com/transactions/${transferResult.txHash}`
+          : null;
+        
+        const txHashFieldValue = transferResult.txHash
+          ? `[View on Explorer](${explorerUrl})`
+          : 'Transaction hash not available';
+        
+        const successEmbed = new EmbedBuilder()
+          .setTitle('✅ NFT Withdrawal Successful!')
+          .setDescription(`Your NFT has been successfully withdrawn to your registered wallet.`)
+          .addFields([
+            { name: 'NFT', value: nftDisplayName, inline: true },
+            { name: 'Collection', value: collection, inline: true },
+            { name: 'Nonce', value: String(nft.nonce), inline: true },
+            { name: 'Recipient Wallet', value: `\`${userWallet}\``, inline: false },
+            { name: 'Transaction Hash', value: txHashFieldValue, inline: false }
+          ])
+          .setColor(0x00FF00)
+          .setThumbnail(nft.nft_image_url || 'https://i.ibb.co/FkZdFMPz/NFT-Wallet-Logo.png')
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+          .setTimestamp();
+        
+        await interaction.editReply({ embeds: [successEmbed], flags: [MessageFlags.Ephemeral] });
+        
+        console.log(`[WITHDRAW-NFT] Successfully withdrew NFT ${nftDisplayName} (${collection}#${nft.nonce}) for user ${interaction.user.tag} (${userId})`);
+      } else {
+        await interaction.editReply({ 
+          content: `❌ **Withdrawal failed!**\n\n**Error:** ${transferResult.errorMessage || 'Unknown error'}\n\nPlease try again or contact an administrator if the issue persists.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        console.error(`[WITHDRAW-NFT] Failed to withdraw NFT for user ${interaction.user.tag} (${userId}): ${transferResult.errorMessage}`);
+      }
+      
+    } catch (error) {
+      console.error('Error in withdraw-nft command:', error.message);
       if (interaction.deferred) {
         await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       } else {
@@ -7433,7 +7687,163 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
-  } else if (commandName === 'withdraw') {
+  } else if (commandName === 'virtual-house-topup') {
+    try {
+      await interaction.deferReply();
+      
+      const tokenTicker = interaction.options.getString('token');
+      const amount = interaction.options.getString('amount');
+      const houseType = interaction.options.getString('house-type');
+      const memo = interaction.options.getString('memo') || 'House top-up';
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const userTag = interaction.user.tag;
+      
+      // Validate amount
+      const amountNum = parseFloat(amount);
+      if (isNaN(amountNum) || amountNum <= 0) {
+        await interaction.editReply({ content: '❌ Invalid amount. Please provide a positive number.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Validate house type
+      const validHouseTypes = ['betting', 'auction', 'lottery'];
+      if (!validHouseTypes.includes(houseType)) {
+        await interaction.editReply({ 
+          content: `❌ Invalid house type: "${houseType}". Must be one of: ${validHouseTypes.join(', ')}`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Force reload virtual accounts data
+      virtualAccounts.forceReloadData();
+      
+      // Update username
+      await virtualAccounts.updateUserUsername(guildId, userId, userTag);
+      
+      // Resolve token identifier from ticker/identifier
+      const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
+      
+      // Validate identifier format
+      const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+      if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid token identifier!**\n\nCould not resolve full token identifier for "${tokenTicker}". Please ensure token metadata is registered using /update-token-metadata.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Get token metadata for display
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      const tokenData = tokenMetadata[tokenIdentifier];
+      if (!tokenData) {
+        await interaction.editReply({ 
+          content: `❌ Token "${tokenTicker}" not found in metadata. Please register it first.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      const tokenTickerDisplay = tokenData.ticker;
+      const decimals = tokenData.decimals || 8;
+      
+      // Check if user has sufficient balance (using identifier - migration handled automatically)
+      const currentBalance = await virtualAccounts.getUserBalance(guildId, userId, tokenIdentifier);
+      
+      if (new BigNumber(currentBalance).isLessThan(amountNum)) {
+        await interaction.editReply({ 
+          content: `❌ **Insufficient balance!**\n\nYou have: **${currentBalance}** ${tokenTickerDisplay}\nRequired: **${amountNum}** ${tokenTickerDisplay}\n\nTop up your account by making a transfer to any Community Fund wallet!`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Deduct from user's virtual account
+      const deductResult = await virtualAccounts.deductFundsFromAccount(
+        guildId,
+        userId,
+        tokenIdentifier,
+        amountNum.toString(),
+        `House top-up to ${houseType}`,
+        'house_topup'
+      );
+      
+      if (!deductResult.success) {
+        await interaction.editReply({ 
+          content: `❌ **Failed to deduct funds!**\n\nError: ${deductResult.error}`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Convert amount to Wei for house balance tracking
+      const amountWei = toBlockchainAmount(amountNum, decimals);
+      
+      // Add to house balance (allocate to specified house type)
+      const topupResult = await trackHouseTopup(
+        guildId,
+        amountWei,
+        tokenIdentifier,
+        houseType,
+        userId,
+        userTag,
+        memo
+      );
+      
+      if (!topupResult.success) {
+        // Refund if house update fails
+        await virtualAccounts.addFundsToAccount(
+          guildId,
+          userId,
+          tokenIdentifier,
+          amountNum.toString(),
+          null,
+          'refund',
+          userTag
+        );
+        await interaction.editReply({ 
+          content: `❌ **Failed to update house balance!**\n\nError: ${topupResult.error}\n\nFunds have been refunded to your Virtual Account.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Success response
+      const houseTypeName = houseType === 'betting' ? '⚽ Betting House' : houseType === 'auction' ? '🎨 Auction House' : '🎲 Lottery House';
+      const newHouseBalance = topupResult.newBalances[houseType];
+      const newHouseBalanceHuman = new BigNumber(newHouseBalance).dividedBy(new BigNumber(10).pow(decimals)).toString();
+      
+      const successEmbed = new EmbedBuilder()
+        .setTitle('✅ House Top-Up Successful')
+        .setDescription(`Successfully transferred funds from your Virtual Account to House Balance.`)
+        .setColor('#00FF00')
+        .addFields([
+          { name: 'Token', value: tokenTickerDisplay, inline: true },
+          { name: 'Amount', value: `${amountNum} ${tokenTickerDisplay}`, inline: true },
+          { name: 'House Type', value: houseTypeName, inline: true },
+          { name: 'Your New Balance', value: `${deductResult.newBalance} ${tokenTickerDisplay}`, inline: true },
+          { name: `New ${houseTypeName} Balance`, value: `${newHouseBalanceHuman} ${tokenTickerDisplay}`, inline: true },
+          { name: 'Memo', value: memo || 'N/A', inline: false }
+        ])
+        .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      await interaction.editReply({ embeds: [successEmbed] });
+      
+      console.log(`[HOUSE-TOPUP] User ${userTag} (${userId}) topped up ${amountNum} ${tokenTickerDisplay} to ${houseTypeName} in guild ${guildId}`);
+      
+    } catch (error) {
+      console.error('Error in virtual-house-topup command:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'withdraw-esdt') {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       
@@ -7632,7 +8042,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
-  } else if (commandName === 'tip-virtual') {
+  } else if (commandName === 'tip-virtual-esdt') {
     try {
       await interaction.deferReply();
       
@@ -7779,7 +8189,166 @@ client.on('interactionCreate', async (interaction) => {
       }
       
     } catch (error) {
-      console.error('Error in tip-virtual command:', error.message);
+      console.error('Error in tip-virtual-esdt command:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'tip-virtual-nft') {
+    try {
+      await interaction.deferReply();
+      
+      const userTag = interaction.options.getString('user-tag');
+      const collection = interaction.options.getString('collection');
+      const nftName = interaction.options.getString('nft-name');
+      const memo = interaction.options.getString('memo') || 'No memo provided';
+      
+      const guildId = interaction.guildId;
+      const fromUserId = interaction.user.id;
+      
+      // Find target user
+      let targetUserId = null;
+      let targetUser = null;
+      
+      try {
+        const guild = interaction.guild;
+        const members = await guild.members.fetch();
+        
+        const targetMember = members.find(member => 
+          member.user.tag === userTag || 
+          member.user.username === userTag ||
+          (member.nickname && member.nickname === userTag)
+        );
+        
+        if (targetMember) {
+          targetUserId = targetMember.user.id;
+          targetUser = targetMember.user;
+        }
+      } catch (fetchError) {
+        console.error('Error fetching guild members:', fetchError.message);
+      }
+      
+      if (!targetUserId) {
+        await interaction.editReply({ content: `❌ User ${userTag} not found.`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Prevent self-tipping
+      if (targetUserId === fromUserId) {
+        await interaction.editReply({ content: '❌ **Self-tipping is not allowed!**', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Parse NFT identifier from nft-name (could be name or collection#nonce format)
+      let nonce = null;
+      
+      // Check if it's in format "collection#nonce"
+      if (nftName.includes('#')) {
+        const parts = nftName.split('#');
+        if (parts.length === 2 && parts[0] === collection) {
+          nonce = parseInt(parts[1]);
+          if (isNaN(nonce)) {
+            await interaction.editReply({ content: '❌ Invalid NFT identifier format. Expected: "Collection#Nonce" or NFT name.', flags: [MessageFlags.Ephemeral] });
+            return;
+          }
+        }
+      }
+      
+      // If nonce not found, try to find NFT by name
+      if (nonce === null) {
+        const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, fromUserId, collection);
+        const matchingNFT = userNFTs.find(nft => {
+          const nftDisplayName = nft.nft_name || `${collection}#${nft.nonce}`;
+          return nftDisplayName.toLowerCase() === nftName.toLowerCase() || 
+                 `${collection}#${nft.nonce}`.toLowerCase() === nftName.toLowerCase();
+        });
+        
+        if (!matchingNFT) {
+          await interaction.editReply({ 
+            content: `❌ **NFT not found!**\n\nCould not find "${nftName}" in collection "${collection}" in your account.\n\nUse \`/check-balance-nft\` to view your NFTs.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        nonce = matchingNFT.nonce;
+      }
+      
+      // Verify user owns the NFT
+      const nftBalance = await virtualAccountsNFT.getUserNFTBalance(guildId, fromUserId, collection, nonce);
+      if (!nftBalance) {
+        await interaction.editReply({ 
+          content: `❌ **You don't own this NFT!**\n\nNFT ${collection}#${nonce} not found in your account.\n\nUse \`/check-balance-nft\` to view your NFTs.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Transfer NFT between users
+      const transferResult = await virtualAccountsNFT.transferNFTBetweenUsers(
+        guildId,
+        fromUserId,
+        targetUserId,
+        collection,
+        nonce,
+        null // No price data for tips
+      );
+      
+      if (transferResult.success) {
+        const nftDisplayName = nftBalance.nft_name || `${collection}#${nonce}`;
+        const communityFundProjectName = getCommunityFundProjectName();
+        const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
+        
+        const embed = new EmbedBuilder()
+          .setTitle('🖼️ NFT Tip Sent!')
+          .setDescription(`Successfully tipped **${nftDisplayName}** (${collection}#${nonce}) to ${targetUser ? `<@${targetUserId}>` : userTag}`)
+          .addFields([
+            { name: '🖼️ NFT', value: nftDisplayName, inline: true },
+            { name: '📦 Collection', value: collection, inline: true },
+            { name: '🔢 Nonce', value: String(nonce), inline: true },
+            { name: '📝 Memo', value: memo, inline: false }
+          ])
+          .setColor('#00FF00')
+          .setThumbnail(nftBalance.nft_image_url || projectLogoUrl)
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        await interaction.editReply({ embeds: [embed] });
+        
+        // Send DM to recipient
+        try {
+          if (targetUser) {
+            const recipientEmbed = new EmbedBuilder()
+              .setTitle('🖼️ You Received an NFT Tip!')
+              .setDescription(`You received **${nftDisplayName}** (${collection}#${nonce}) from ${interaction.user.tag}`)
+              .addFields([
+                { name: '🖼️ NFT', value: nftDisplayName, inline: true },
+                { name: '📦 Collection', value: collection, inline: true },
+                { name: '🔢 Nonce', value: String(nonce), inline: true },
+                { name: '📝 Memo', value: memo, inline: false }
+              ])
+              .setColor('#00FF00')
+              .setThumbnail(nftBalance.nft_image_url || projectLogoUrl)
+              .setTimestamp()
+              .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+            
+            await targetUser.send({ embeds: [recipientEmbed] });
+          }
+        } catch (dmError) {
+          console.error(`Could not send DM to ${userTag}:`, dmError.message);
+        }
+        
+      } else {
+        await interaction.editReply({ 
+          content: `❌ **NFT tip failed!** ${transferResult.error || 'Unknown error'}`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+      }
+      
+    } catch (error) {
+      console.error('Error in tip-virtual-nft command:', error.message);
       if (interaction.deferred) {
         await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       } else {
@@ -7987,6 +8556,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '👥 Participants', value: '0', inline: true }
         ])
         .setColor(0x00FF00)
+        .setThumbnail('https://i.ibb.co/20MLJZNH/lottery-logo.png')
         .setTimestamp(new Date(endTime))
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
       
@@ -8370,73 +8940,6 @@ client.on('interactionCreate', async (interaction) => {
       } else {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
-    }
-  }
-
-  // FORCE CLOSE STUCK GAMES COMMAND
-  if (commandName === 'force-close-games') {
-    try {
-      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-      
-      const guildId = interaction.guildId;
-      
-      // Get matches for this guild from database
-      const guildMatchesObj = await dbFootball.getMatchesByGuild(guildId);
-      const guildMatches = Object.entries(guildMatchesObj || {});
-      const stuckMatches = guildMatches.filter(([matchId, match]) => 
-        (match.status === 'SCHEDULED' || match.status === 'TIMED') && 
-        match.ftScore && 
-        match.ftScore.home !== undefined && 
-        match.ftScore.away !== undefined
-      );
-      
-      if (stuckMatches.length === 0) {
-        await interaction.editReply({ 
-          content: '✅ No stuck games found. All scheduled games either have no scores or are properly finished.', 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      let processedCount = 0;
-      let errorCount = 0;
-      
-      for (const [matchId, match] of stuckMatches) {
-        try {
-          console.log(`[FORCE-CLOSE] Processing stuck match ${matchId}: ${match.home} vs ${match.away}`);
-          
-          // Mark match as finished
-          match.status = 'FINISHED';
-          
-          // Update the embed to show finished status
-          await updateMatchEmbed(guildId, matchId);
-          
-          // Process prizes
-          await processMatchPrizes(guildId, matchId);
-          
-          processedCount++;
-          console.log(`[FORCE-CLOSE] Successfully processed match ${matchId}`);
-          
-        } catch (error) {
-          console.error(`[FORCE-CLOSE] Error processing match ${matchId}:`, error.message);
-          errorCount++;
-        }
-      }
-      
-      // Save the updated data
-      // Removed - using database
-      
-      await interaction.editReply({ 
-        content: `✅ **Force Close Complete!**\n\n**Processed:** ${processedCount} games\n**Errors:** ${errorCount} games\n\nAll stuck games have been marked as finished and prizes distributed to virtual accounts.`, 
-        flags: [MessageFlags.Ephemeral] 
-      });
-      
-    } catch (error) {
-      console.error('[FORCE-CLOSE] Error in force-close-games command:', error.message);
-      await interaction.editReply({ 
-        content: `❌ Error processing force close: ${error.message}`, 
-        flags: [MessageFlags.Ephemeral] 
-      });
     }
   }
 });
@@ -8849,6 +9352,48 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
+      const source = interaction.options.getString('source');
+      
+      console.log('[AUTOCOMPLETE] create-auction collection: Source value:', source);
+      
+      // If source is Virtual Account, fetch from user's virtual account NFT balances
+      if (source === 'virtual_account') {
+        try {
+          const userId = interaction.user.id;
+          console.log('[AUTOCOMPLETE] create-auction collection: Fetching from Virtual Account for user:', userId);
+          
+          // Get user's collections
+          const collections = await virtualAccountsNFT.getUserCollections(guildId, userId);
+          console.log('[AUTOCOMPLETE] create-auction collection: Found collections from VA:', collections);
+          console.log('[AUTOCOMPLETE] create-auction collection: Collections type:', typeof collections, 'Is array:', Array.isArray(collections));
+          
+          if (!collections || !Array.isArray(collections) || collections.length === 0) {
+            console.log('[AUTOCOMPLETE] create-auction collection: No collections found for user');
+            await safeRespond(interaction, []);
+            return;
+          }
+          
+          // Filter by focused value
+          const filtered = collections.filter(collection =>
+            collection && collection.toLowerCase().includes(focusedValue.toLowerCase())
+          );
+          
+          const choices = filtered.slice(0, 25).map(collection => ({ 
+            name: collection, 
+            value: collection 
+          }));
+          
+          console.log('[AUTOCOMPLETE] create-auction collection: Returning', choices.length, 'filtered choices');
+          await safeRespond(interaction, choices);
+          return;
+        } catch (vaError) {
+          console.error('[AUTOCOMPLETE] create-auction collection: Error fetching from Virtual Account:', vaError.message, vaError.stack);
+          await safeRespond(interaction, []);
+          return;
+        }
+      }
+      
+      // Otherwise, use project wallet logic
       const projects = await getProjects(guildId);
       const selectedProject = interaction.options.getString('project-name');
       
@@ -8956,12 +9501,47 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
-      const projects = await getProjects(guildId);
-      const selectedProject = interaction.options.getString('project-name');
+      const source = interaction.options.getString('source');
       const selectedCollection = interaction.options.getString('collection');
       
-      if (!selectedProject || !projects[selectedProject] || !selectedCollection) {
-        console.log('[AUTOCOMPLETE] create-auction nft-name: Missing project or collection');
+      if (!selectedCollection) {
+        console.log('[AUTOCOMPLETE] create-auction nft-name: Missing collection');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // If source is Virtual Account, fetch from user's virtual account NFT balances
+      if (source === 'virtual_account') {
+        const userId = interaction.user.id;
+        console.log('[AUTOCOMPLETE] create-auction nft-name: Fetching from Virtual Account for user:', userId, 'collection:', selectedCollection);
+        
+        // Get user's NFTs in selected collection
+        const nfts = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, selectedCollection);
+        console.log('[AUTOCOMPLETE] create-auction nft-name: Found NFTs from VA:', nfts.length);
+        
+        // Filter by focused value (match by name or identifier)
+        const filtered = nfts.filter(nft => {
+          const name = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
+          const identifier = `${selectedCollection}#${nft.nonce}`;
+          return name.toLowerCase().includes(focusedValue.toLowerCase()) ||
+                 identifier.toLowerCase().includes(focusedValue.toLowerCase());
+        });
+        
+        await safeRespond(interaction,
+          filtered.slice(0, 25).map(nft => ({
+            name: `${nft.nft_name || `${selectedCollection}#${nft.nonce}`} (${selectedCollection}#${nft.nonce})`,
+            value: nft.nft_name || `${selectedCollection}#${nft.nonce}`
+          }))
+        );
+        return;
+      }
+      
+      // Otherwise, use project wallet logic
+      const projects = await getProjects(guildId);
+      const selectedProject = interaction.options.getString('project-name');
+      
+      if (!selectedProject || !projects[selectedProject]) {
+        console.log('[AUTOCOMPLETE] create-auction nft-name: Missing project');
         await safeRespond(interaction, []);
         return;
       }
@@ -9056,48 +9636,74 @@ client.on('interactionCreate', async (interaction) => {
       try {
         const focusedValue = interaction.options.getFocused();
         const guildId = interaction.guildId;
+        const source = interaction.options.getString('source');
         
         console.log('[AUTOCOMPLETE] create-auction token-ticker autocomplete triggered');
         console.log('[AUTOCOMPLETE] Guild ID:', guildId);
         console.log('[AUTOCOMPLETE] Focused value:', focusedValue);
-        
-        const projects = await getProjects(guildId);
-        console.log('[AUTOCOMPLETE] Available projects:', Object.keys(projects));
-        
-        const selectedProject = interaction.options.getString('project-name');
-        console.log('[AUTOCOMPLETE] Selected project:', selectedProject);
-        
-        if (!selectedProject || !projects[selectedProject]) {
-          console.log('[AUTOCOMPLETE] No project selected or project not found');
-          console.log('[AUTOCOMPLETE] Selected project value:', selectedProject);
-          console.log('[AUTOCOMPLETE] Available project names:', Object.keys(projects));
-          await safeRespond(interaction, []);
-          return;
-        }
-        
-        const project = projects[selectedProject];
-        console.log('[AUTOCOMPLETE] Project data:', {
-          name: selectedProject,
-          hasSupportedTokens: !!project.supportedTokens,
-          supportedTokensType: typeof project.supportedTokens,
-          supportedTokensValue: project.supportedTokens
-        });
+        console.log('[AUTOCOMPLETE] Source:', source);
         
         let supportedTokens = [];
         
-        // Handle both string (comma-separated) and array formats
-        if (project.supportedTokens) {
-          if (Array.isArray(project.supportedTokens)) {
-            supportedTokens = project.supportedTokens;
-          } else if (typeof project.supportedTokens === 'string') {
-            supportedTokens = project.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+        // If source is Virtual Account, use Community Fund supported tokens
+        if (source === 'virtual_account') {
+          console.log('[AUTOCOMPLETE] create-auction token-ticker: Using Community Fund tokens for Virtual Account source');
+          const fundProject = await getCommunityFundProject(guildId);
+          const projects = await getProjects(guildId);
+          const projectName = getCommunityFundProjectName();
+          
+          if (fundProject && projects[projectName]) {
+            const communityFundProject = projects[projectName];
+            // Handle both string (comma-separated) and array formats
+            if (communityFundProject.supportedTokens) {
+              if (Array.isArray(communityFundProject.supportedTokens)) {
+                supportedTokens = communityFundProject.supportedTokens;
+              } else if (typeof communityFundProject.supportedTokens === 'string') {
+                supportedTokens = communityFundProject.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+              }
+            }
+            console.log('[AUTOCOMPLETE] Community Fund supported tokens:', supportedTokens);
+          } else {
+            console.log('[AUTOCOMPLETE] Community Fund project not found');
+          }
+        } else {
+          // Otherwise, use project wallet logic
+          const projects = await getProjects(guildId);
+          console.log('[AUTOCOMPLETE] Available projects:', Object.keys(projects));
+          
+          const selectedProject = interaction.options.getString('project-name');
+          console.log('[AUTOCOMPLETE] Selected project:', selectedProject);
+          
+          if (!selectedProject || !projects[selectedProject]) {
+            console.log('[AUTOCOMPLETE] No project selected or project not found');
+            console.log('[AUTOCOMPLETE] Selected project value:', selectedProject);
+            console.log('[AUTOCOMPLETE] Available project names:', Object.keys(projects));
+            await safeRespond(interaction, []);
+            return;
+          }
+          
+          const project = projects[selectedProject];
+          console.log('[AUTOCOMPLETE] Project data:', {
+            name: selectedProject,
+            hasSupportedTokens: !!project.supportedTokens,
+            supportedTokensType: typeof project.supportedTokens,
+            supportedTokensValue: project.supportedTokens
+          });
+          
+          // Handle both string (comma-separated) and array formats
+          if (project.supportedTokens) {
+            if (Array.isArray(project.supportedTokens)) {
+              supportedTokens = project.supportedTokens;
+            } else if (typeof project.supportedTokens === 'string') {
+              supportedTokens = project.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+            }
           }
         }
         
         console.log('[AUTOCOMPLETE] Supported tokens after processing:', supportedTokens);
         
         if (supportedTokens.length === 0) {
-          console.log('[AUTOCOMPLETE] No supported tokens found for project:', selectedProject);
+          console.log('[AUTOCOMPLETE] No supported tokens found');
           await safeRespond(interaction, []);
           return;
         }
@@ -9412,12 +10018,12 @@ client.on('interactionCreate', async (interaction) => {
       for (const token of allTokens) {
         let balance = new BigNumber(0);
         
-        if (source === 'auction') {
+        if (houseType === 'auction') {
           // Calculate auction PNL: earnings - spending
           const auctionEarnings = new BigNumber(aggregatedBalances.auctionEarnings[token] || '0');
           const auctionSpending = new BigNumber(aggregatedBalances.auctionSpending[token] || '0');
           balance = auctionEarnings.minus(auctionSpending);
-        } else if (source === 'lottery') {
+        } else if (houseType === 'lottery') {
           // Calculate lottery PNL: earnings - spending
           const lotteryEarnings = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
           const lotterySpending = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
@@ -9473,6 +10079,56 @@ client.on('interactionCreate', async (interaction) => {
       const userWalletEntries = Object.entries(userWallets).slice(0, 100);
       if (userWalletEntries.length > 0) {
         console.log(`[AUTOCOMPLETE] Processing ${userWalletEntries.length} users for tip user-tag autocomplete`);
+        const walletUserPromises = userWalletEntries.map(async ([userId, wallet]) => {
+          try {
+            let member = guild.members.cache.get(userId);
+            if (!member) {
+              console.log(`[AUTOCOMPLETE] Fetching member ${userId} from Discord API`);
+              member = await guild.members.fetch(userId).catch((error) => {
+                console.log(`[AUTOCOMPLETE] Failed to fetch member ${userId}:`, error.message);
+                return null;
+              });
+            }
+            if (member) {
+              return {
+                name: member.user.tag,
+                value: member.user.tag
+              };
+            }
+            return null;
+          } catch (error) {
+            console.log(`[AUTOCOMPLETE] Error processing user ${userId}:`, error.message);
+            return null;
+          }
+        });
+        const walletUsers = (await Promise.all(walletUserPromises)).filter(Boolean);
+        console.log(`[AUTOCOMPLETE] Successfully processed ${walletUsers.length} users out of ${userWalletEntries.length}`);
+        choices = walletUsers;
+      }
+      // Filter by user input
+      const filtered = choices.filter(choice =>
+        choice.name.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      await safeRespond(interaction, filtered.slice(0, 25));
+    } catch (error) {
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // USER AUTOCOMPLETE FOR DEBUG-USER
+  if (interaction.commandName === 'debug-user' && interaction.options.getFocused(true).name === 'user-tag') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guild = interaction.guild;
+      const guildId = interaction.guildId;
+      
+      let choices = [];
+      const userWallets = await getUserWallets(guildId);
+      // Increase limit to 100 users to ensure more users are available for autocomplete
+      const userWalletEntries = Object.entries(userWallets).slice(0, 100);
+      if (userWalletEntries.length > 0) {
+        console.log(`[AUTOCOMPLETE] Processing ${userWalletEntries.length} users for debug-user user-tag autocomplete`);
         const walletUserPromises = userWalletEntries.map(async ([userId, wallet]) => {
           try {
             let member = guild.members.cache.get(userId);
@@ -9637,12 +10293,12 @@ client.on('interactionCreate', async (interaction) => {
       for (const token of allTokens) {
         let balance = new BigNumber(0);
         
-        if (source === 'auction') {
+        if (houseType === 'auction') {
           // Calculate auction PNL: earnings - spending
           const auctionEarnings = new BigNumber(aggregatedBalances.auctionEarnings[token] || '0');
           const auctionSpending = new BigNumber(aggregatedBalances.auctionSpending[token] || '0');
           balance = auctionEarnings.minus(auctionSpending);
-        } else if (source === 'lottery') {
+        } else if (houseType === 'lottery') {
           // Calculate lottery PNL: earnings - spending
           const lotteryEarnings = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
           const lotterySpending = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
@@ -9743,7 +10399,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   // USER AUTOCOMPLETE FOR TIP-VIRTUAL
-  if (interaction.commandName === 'tip-virtual' && interaction.options.getFocused(true).name === 'user-tag') {
+  if ((interaction.commandName === 'tip-virtual-esdt' || interaction.commandName === 'tip-virtual-nft') && interaction.options.getFocused(true).name === 'user-tag') {
     try {
       const focusedValue = interaction.options.getFocused();
       const guild = interaction.guild;
@@ -9785,8 +10441,8 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // TOKEN AUTOCOMPLETE FOR TIP-VIRTUAL
-  if (interaction.commandName === 'tip-virtual' && interaction.options.getFocused(true).name === 'token-ticker') {
+  // TOKEN AUTOCOMPLETE FOR TIP-VIRTUAL-ESDT
+  if (interaction.commandName === 'tip-virtual-esdt' && interaction.options.getFocused(true).name === 'token-ticker') {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
@@ -9812,8 +10468,8 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // TOKEN AUTOCOMPLETE FOR WITHDRAW (based on user's actual holdings)
-  if (interaction.commandName === 'withdraw' && interaction.options.getFocused(true).name === 'token-ticker') {
+  // TOKEN AUTOCOMPLETE FOR WITHDRAW-ESDT (based on user's actual holdings)
+  if (interaction.commandName === 'withdraw-esdt' && interaction.options.getFocused(true).name === 'token-ticker') {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
@@ -9854,31 +10510,6 @@ client.on('interactionCreate', async (interaction) => {
       await safeRespond(interaction, options);
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in withdraw token autocomplete:', error);
-      await safeRespond(interaction, []);
-    }
-    return;
-  }
-
-  // MATCH ID AUTOCOMPLETE FOR BET-VIRTUAL
-  if (interaction.commandName === 'bet-virtual' && interaction.options.getFocused(true).name === 'match-id') {
-    try {
-      const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
-      
-      // Get matches for this guild from database
-      const guildMatchesObj = await dbFootball.getMatchesByGuild(guildId);
-      const guildMatches = Object.values(guildMatchesObj || {});
-      const currentMatches = guildMatches.filter(match => match.status === 'SCHEDULED' || match.status === 'TIMED');
-      
-      const matchChoices = currentMatches.map(match => ({
-        name: `${match.home} vs ${match.away} (${match.matchId})`,
-        value: match.matchId
-      })).filter(choice => 
-        choice.name.toLowerCase().includes(focusedValue.toLowerCase())
-      ).slice(0, 25);
-
-      await safeRespond(interaction, matchChoices);
-    } catch (error) {
       await safeRespond(interaction, []);
     }
     return;
@@ -9931,54 +10562,6 @@ client.on('interactionCreate', async (interaction) => {
         choice.name.toLowerCase().includes(focusedValue.toLowerCase())
       );
       await safeRespond(interaction, filtered.slice(0, 25));
-    } catch (error) {
-      await safeRespond(interaction, []);
-    }
-    return;
-  }
-
-  // CHALLENGE ID AUTOCOMPLETE FOR JOIN-RPS
-  if (interaction.commandName === 'join-rps') {
-    const focusedOption = interaction.options.getFocused(true);
-    if (!focusedOption || focusedOption.name !== 'challenge-id') return;
-    try {
-      const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
-      const challenges = await getRPSChallenges(guildId);
-      const waitingChallenges = Object.entries(challenges)
-        .filter(([id, challenge]) => challenge.status === 'waiting')
-        .map(([id, challenge]) => ({
-          name: `${id} - ${challenge.challengerTag} vs ${challenge.challengedTag} (${challenge.amount} ${challenge.token})`,
-          value: id
-        }))
-        .filter(choice => choice.name.toLowerCase().includes(focusedValue.toLowerCase()))
-        .slice(0, 25);
-
-      await safeRespond(interaction, waitingChallenges);
-    } catch (error) {
-      await safeRespond(interaction, []);
-    }
-    return;
-  }
-
-  // CHALLENGE ID AUTOCOMPLETE FOR PLAY-RPS
-  if (interaction.commandName === 'play-rps') {
-    const focusedOption = interaction.options.getFocused(true);
-    if (!focusedOption || focusedOption.name !== 'challenge-id') return;
-    try {
-      const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
-      const challenges = await getRPSChallenges(guildId);
-      const activeChallenges = Object.entries(challenges)
-        .filter(([id, challenge]) => challenge.status === 'active')
-        .map(([id, challenge]) => ({
-          name: `${id} - ${challenge.challengerTag} vs ${challenge.challengedTag} (${challenge.amount} ${challenge.token})`,
-          value: id
-        }))
-        .filter(choice => choice.name.toLowerCase().includes(focusedValue.toLowerCase()))
-        .slice(0, 25);
-
-      await safeRespond(interaction, activeChallenges);
     } catch (error) {
       await safeRespond(interaction, []);
     }
@@ -10101,6 +10684,329 @@ client.on('interactionCreate', async (interaction) => {
       }
       return;
     }
+  }
+
+  // COLLECTION AUTOCOMPLETE FOR CHECK-BALANCE-NFT, BALANCE-HISTORY-NFT, SELL-NFT, AND WITHDRAW-NFT
+  if ((interaction.commandName === 'check-balance-nft' || 
+       interaction.commandName === 'balance-history-nft' || 
+       interaction.commandName === 'sell-nft' ||
+       interaction.commandName === 'withdraw-nft' ||
+       interaction.commandName === 'tip-virtual-nft') && 
+      interaction.options.getFocused(true).name === 'collection') {
+    try {
+      console.log('[AUTOCOMPLETE] Collection autocomplete for command:', interaction.commandName);
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      console.log('[AUTOCOMPLETE] Getting collections for user:', userId, 'guild:', guildId);
+      // Get user's collections
+      const collections = await virtualAccountsNFT.getUserCollections(guildId, userId);
+      console.log('[AUTOCOMPLETE] Found collections:', collections);
+      
+      // Filter by focused value
+      const filtered = collections.filter(collection =>
+        collection.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      
+      console.log('[AUTOCOMPLETE] Filtered collections:', filtered);
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(collection => ({ name: collection, value: collection }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in collection autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // NFT NAME AUTOCOMPLETE FOR SELL-NFT
+  if (interaction.commandName === 'sell-nft' && interaction.options.getFocused(true).name === 'nft-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const selectedCollection = interaction.options.getString('collection');
+      
+      if (!selectedCollection) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Get user's NFTs in selected collection
+      const nfts = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, selectedCollection);
+      
+      // Get user's active listings to filter out already-listed NFTs
+      let activeListings = [];
+      try {
+        activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
+      } catch (error) {
+        console.error('[AUTOCOMPLETE] Error fetching active listings:', error);
+        // Continue without filtering if there's an error
+      }
+      
+      // Create a set of (collection, nonce) pairs from active listings for quick lookup
+      const listedNFTs = new Set();
+      for (const listing of activeListings) {
+        listedNFTs.add(`${listing.collection}:${listing.nonce}`);
+      }
+      
+      // Filter out NFTs that are already listed and match the focused value
+      const filtered = nfts.filter(nft => {
+        // Check if this NFT is already listed
+        const nftKey = `${nft.collection}:${nft.nonce}`;
+        if (listedNFTs.has(nftKey)) {
+          return false; // Skip NFTs that are already listed
+        }
+        
+        // Filter by focused value (match by name or identifier)
+        const name = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
+        const identifier = `${selectedCollection}#${nft.nonce}`;
+        return name.toLowerCase().includes(focusedValue.toLowerCase()) ||
+               identifier.toLowerCase().includes(focusedValue.toLowerCase());
+      });
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(nft => ({
+          name: `${nft.nft_name || `${selectedCollection}#${nft.nonce}`} (${selectedCollection}#${nft.nonce})`,
+          value: nft.nft_name || `${selectedCollection}#${nft.nonce}`
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in nft-name autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // COLLECTION AUTOCOMPLETE FOR TIP-VIRTUAL-NFT
+  if (interaction.commandName === 'tip-virtual-nft' && interaction.options.getFocused(true).name === 'collection') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      // Get user's collections
+      const collections = await virtualAccountsNFT.getUserCollections(guildId, userId);
+      
+      // Filter by focused value
+      const filtered = collections.filter(collection =>
+        collection.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(collection => ({ name: collection, value: collection }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in tip-virtual-nft collection autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // NFT NAME AUTOCOMPLETE FOR TIP-VIRTUAL-NFT
+  if (interaction.commandName === 'tip-virtual-nft' && interaction.options.getFocused(true).name === 'nft-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const selectedCollection = interaction.options.getString('collection');
+      
+      if (!selectedCollection) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Get user's NFTs in selected collection
+      const nfts = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, selectedCollection);
+      
+      // Filter by focused value (match by name or identifier)
+      const filtered = nfts.filter(nft => {
+        const name = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
+        const identifier = `${selectedCollection}#${nft.nonce}`;
+        return name.toLowerCase().includes(focusedValue.toLowerCase()) ||
+               identifier.toLowerCase().includes(focusedValue.toLowerCase());
+      });
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(nft => ({
+          name: `${nft.nft_name || `${selectedCollection}#${nft.nonce}`} (${selectedCollection}#${nft.nonce})`,
+          value: nft.nft_name || `${selectedCollection}#${nft.nonce}`
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in tip-virtual-nft nft-name autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // NFT NAME AUTOCOMPLETE FOR WITHDRAW-NFT
+  if (interaction.commandName === 'withdraw-nft' && interaction.options.getFocused(true).name === 'nft-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const selectedCollection = interaction.options.getString('collection');
+      
+      if (!selectedCollection) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Get user's NFTs in selected collection
+      const nfts = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, selectedCollection);
+      
+      // Filter by focused value (match by name or identifier)
+      const filtered = nfts.filter(nft => {
+        const name = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
+        const identifier = `${selectedCollection}#${nft.nonce}`;
+        return name.toLowerCase().includes(focusedValue.toLowerCase()) ||
+               identifier.toLowerCase().includes(focusedValue.toLowerCase());
+      });
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(nft => ({
+          name: `${nft.nft_name || `${selectedCollection}#${nft.nonce}`} (${selectedCollection}#${nft.nonce})`,
+          value: nft.nft_name || `${selectedCollection}#${nft.nonce}`
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in withdraw-nft nft-name autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // PRICE TOKEN AUTOCOMPLETE FOR SELL-NFT
+  if (interaction.commandName === 'sell-nft' && interaction.options.getFocused(true).name === 'price-token') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      
+      // Get Community Fund project and its supported tokens
+      const fundProject = await getCommunityFundProject(guildId);
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      
+      let supportedTokens = [];
+      if (fundProject && projects[projectName]) {
+        const tokensRaw = projects[projectName].supportedTokens || [];
+        supportedTokens = Array.isArray(tokensRaw)
+          ? tokensRaw
+          : (tokensRaw || '').split(',').map(t => t.trim()).filter(t => t.length > 0);
+      }
+      
+      if (supportedTokens.length === 0) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Get token metadata for display names
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      
+      // Filter tokens that match focused value and return full identifiers
+      const filtered = supportedTokens
+        .filter(identifier => {
+          const lowerIdentifier = identifier.toLowerCase();
+          const lowerFocused = focusedValue.toLowerCase();
+          // Match if identifier contains focused value
+          if (lowerIdentifier.includes(lowerFocused)) {
+            return true;
+          }
+          // Also check ticker from metadata
+          const metadata = tokenMetadata[identifier];
+          if (metadata && metadata.ticker && metadata.ticker.toLowerCase().includes(lowerFocused)) {
+            return true;
+          }
+          return false;
+        })
+        .map(identifier => {
+          // Find display name from metadata (ticker or identifier)
+          const metadata = tokenMetadata[identifier];
+          const displayName = metadata && metadata.ticker 
+            ? `${metadata.ticker} (${identifier})` 
+            : identifier;
+          return { identifier, displayName };
+        })
+        .slice(0, 25);
+      
+      await safeRespond(interaction,
+        filtered.map(({ identifier, displayName }) => ({ 
+          name: displayName, 
+          value: identifier 
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in price-token autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // TOKEN AUTOCOMPLETE FOR VIRTUAL-HOUSE-TOPUP
+  if (interaction.commandName === 'virtual-house-topup') {
+    const focusedOption = interaction.options.getFocused(true);
+    if (!focusedOption || focusedOption.name !== 'token') return;
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      
+      console.log('[AUTOCOMPLETE] virtual-house-topup token autocomplete for guild:', guildId);
+      console.log('[AUTOCOMPLETE] Focused value:', focusedValue);
+      
+      // Get Community Fund project and its supported tokens
+      const fundProject = await getCommunityFundProject(guildId);
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      
+      let supportedTokens = [];
+      if (fundProject && projects[projectName]) {
+        supportedTokens = projects[projectName].supportedTokens || [];
+        console.log('[AUTOCOMPLETE] Supported tokens from Community Fund project:', supportedTokens);
+      } else {
+        console.log('[AUTOCOMPLETE] No Community Fund project found');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      if (supportedTokens.length === 0) {
+        console.log('[AUTOCOMPLETE] No supported tokens found for Community Fund project');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Get token metadata for display
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      
+      // Filter tokens that are in Community Fund supported tokens list and match focused value
+      const choices = supportedTokens
+        .filter(tokenIdentifier => {
+          // Check if token matches focused value (case-insensitive)
+          const matches = tokenIdentifier.toLowerCase().includes(focusedValue.toLowerCase());
+          if (!matches) return false;
+          
+          // Get token metadata for display name
+          const metadata = tokenMetadata[tokenIdentifier];
+          return metadata !== undefined; // Only include tokens with metadata
+        })
+        .map(tokenIdentifier => {
+          const metadata = tokenMetadata[tokenIdentifier];
+          const displayName = metadata?.ticker || tokenIdentifier.split('-')[0];
+          return {
+            name: `${displayName} (${tokenIdentifier})`,
+            value: tokenIdentifier
+          };
+        })
+        .slice(0, 25);
+      
+      console.log('[AUTOCOMPLETE] Sending', choices.length, 'token choices for virtual-house-topup');
+      await safeRespond(interaction, choices);
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in virtual-house-topup token autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
   }
 });
 
@@ -10598,17 +11504,66 @@ client.on('interactionCreate', async (interaction) => {
       await processTicketPurchase(guildId, lotteryId, interaction.user.id, interaction.user.tag, randomNumbers, lottery);
       
       const numbersDisplay = lotteryHelpers.formatNumbersForDisplay(randomNumbers);
-      await interaction.editReply({
-        content: `✅ **Lucky Dip Ticket Purchased!**\n\n**Your Numbers:** ${numbersDisplay}\n**Lottery:** \`${lotteryId.substring(0, 16)}...\``,
-        flags: [MessageFlags.Ephemeral]
-      });
+      try {
+        await interaction.editReply({
+          content: `✅ **Lucky Dip Ticket Purchased!**\n\n**Your Numbers:** ${numbersDisplay}\n**Lottery:** \`${lotteryId.substring(0, 16)}...\``,
+          flags: [MessageFlags.Ephemeral]
+        });
+      } catch (replyError) {
+        // If reply fails due to connection error, log it but don't fail the purchase
+        const isConnectionError = replyError.message.includes('other side closed') || 
+                                  replyError.message.includes('ECONNRESET') ||
+                                  replyError.message.includes('WebSocket') ||
+                                  replyError.code === 'ECONNRESET';
+        if (isConnectionError) {
+          console.error('[LOTTERY] Connection error when sending success message (ticket was purchased):', replyError.message);
+          // Try to send a follow-up message if possible
+          try {
+            await interaction.followUp({ 
+              content: `✅ **Ticket Purchased Successfully!**\n\n**Your Numbers:** ${numbersDisplay}\n**Lottery:** \`${lotteryId.substring(0, 16)}...\``, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+          } catch (followUpError) {
+            console.error('[LOTTERY] Failed to send follow-up message:', followUpError.message);
+          }
+        } else {
+          throw replyError; // Re-throw if it's not a connection error
+        }
+      }
       
     } catch (error) {
       console.error('[LOTTERY] Error processing lucky dip:', error.message);
-      if (interaction.deferred) {
-        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      console.error('[LOTTERY] Error stack:', error.stack);
+      
+      // Handle connection errors gracefully
+      const isConnectionError = error.message.includes('other side closed') || 
+                                error.message.includes('ECONNRESET') ||
+                                error.message.includes('WebSocket') ||
+                                error.code === 'ECONNRESET';
+      
+      try {
+        if (interaction.deferred) {
+          if (isConnectionError) {
+            await interaction.editReply({ 
+              content: `⚠️ **Connection Error**\n\nThe purchase may have succeeded, but Discord connection was interrupted. Please check your tickets with \`/lottery my-tickets\` to confirm.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+          } else {
+            await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+          }
+        } else {
+          if (isConnectionError) {
+            await interaction.reply({ 
+              content: `⚠️ **Connection Error**\n\nThe purchase may have succeeded, but Discord connection was interrupted. Please check your tickets with \`/lottery my-tickets\` to confirm.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+          } else {
+            await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+          }
+        }
+      } catch (replyError) {
+        // If even the error reply fails, log it but don't crash
+        console.error('[LOTTERY] Failed to send error message to user:', replyError.message);
       }
     }
   } else if (customId.startsWith('lottery-my-active:')) {
@@ -10804,6 +11759,16 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      // Prevent auction owner from bidding on their own auction
+      const isOwner = interaction.user.id === auction.creatorId || interaction.user.id === auction.sellerId;
+      if (isOwner) {
+        await interaction.reply({ 
+          content: '❌ **You cannot bid on your own auction!**\n\nAs the auction creator, you are not allowed to place bids on your own auction.', 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+
       // Create bidding modal
       const modal = new ModalBuilder()
         .setCustomId(`bid-modal:${auctionId}`)
@@ -10867,6 +11832,16 @@ client.on('interactionCreate', async (interaction) => {
       if (isAuctionExpired(auction)) {
         await processAuctionClosure(guildId, auctionId);
         await interaction.editReply({ content: '❌ This auction has ended.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      // Prevent auction owner from bidding on their own auction
+      const isOwner = interaction.user.id === auction.creatorId || interaction.user.id === auction.sellerId;
+      if (isOwner) {
+        await interaction.editReply({ 
+          content: '❌ **You cannot bid on your own auction!**\n\nAs the auction creator, you are not allowed to place bids on your own auction.', 
+          flags: [MessageFlags.Ephemeral] 
+        });
         return;
       }
 
@@ -10985,6 +11960,421 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error placing bid: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (customId.startsWith('nft-buy:')) {
+    // NFT Buy button
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const listingId = customId.split(':')[1];
+      const listing = await virtualAccountsNFT.getListing(guildId, listingId);
+      
+      if (!listing) {
+        await interaction.editReply({ content: '❌ Listing not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (listing.status !== 'ACTIVE') {
+        await interaction.editReply({ content: '❌ This listing is no longer active.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check if listing expired
+      if (listing.expiresAt && Date.now() > listing.expiresAt) {
+        await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'EXPIRED' });
+        await interaction.editReply({ content: '❌ This listing has expired.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check if user is trying to buy their own NFT
+      if (listing.sellerId === interaction.user.id) {
+        await interaction.editReply({ content: '❌ You cannot buy your own listing.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Verify seller still owns NFT
+      const sellerNFT = await virtualAccountsNFT.getUserNFTBalance(guildId, listing.sellerId, listing.collection, listing.nonce);
+      if (!sellerNFT) {
+        await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'CANCELLED' });
+        await interaction.editReply({ content: '❌ Seller no longer owns this NFT. Listing has been cancelled.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check buyer has sufficient balance
+      const buyerBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, listing.priceTokenIdentifier);
+      const priceBN = new BigNumber(listing.priceAmount);
+      const balanceBN = new BigNumber(buyerBalance);
+      
+      if (balanceBN.isLessThan(priceBN)) {
+        await interaction.editReply({ 
+          content: `❌ Insufficient balance. You need ${listing.priceAmount} ${listing.priceTokenIdentifier.split('-')[0]} but you have ${buyerBalance}.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Deduct ESDT from buyer
+      const deductResult = await virtualAccounts.deductFundsFromAccount(
+        guildId,
+        interaction.user.id,
+        listing.priceTokenIdentifier,
+        listing.priceAmount,
+        `NFT purchase: ${listing.nftName || `${listing.collection}#${listing.nonce}`}`,
+        'marketplace_purchase'
+      );
+      
+      if (!deductResult.success) {
+        await interaction.editReply({ content: `❌ Failed to deduct funds: ${deductResult.error}`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Add ESDT to seller
+      await virtualAccounts.addFundsToAccount(
+        guildId,
+        listing.sellerId,
+        listing.priceTokenIdentifier,
+        listing.priceAmount,
+        null,
+        'marketplace_sale',
+        null
+      );
+      
+      // Transfer NFT
+      await virtualAccountsNFT.transferNFTBetweenUsers(
+        guildId,
+        listing.sellerId,
+        interaction.user.id,
+        listing.collection,
+        listing.nonce,
+        {
+          tokenIdentifier: listing.priceTokenIdentifier,
+          amount: listing.priceAmount
+        }
+      );
+      
+      // Update listing status
+      await virtualAccountsNFT.updateListing(guildId, listingId, { 
+        status: 'SOLD',
+        soldAt: Date.now()
+      });
+      
+      // Update listing embed
+      await updateNFTListingEmbed(guildId, listingId);
+      
+      // Send notifications
+      try {
+        const seller = await client.users.fetch(listing.sellerId);
+        await seller.send(`✅ **Your NFT has been sold!**\n\n**NFT:** ${listing.nftName || `${listing.collection}#${listing.nonce}`}\n**Buyer:** ${interaction.user.tag}\n**Price:** ${listing.priceAmount} ${listing.priceTokenIdentifier.split('-')[0]}`);
+      } catch (dmError) {
+        console.error('[NFT-MARKETPLACE] Could not send DM to seller:', dmError.message);
+      }
+      
+      await interaction.editReply({ 
+        content: `✅ **Purchase successful!**\n\nYou have purchased **${listing.nftName || `${listing.collection}#${listing.nonce}`}** for ${listing.priceAmount} ${listing.priceTokenIdentifier.split('-')[0]}.`, 
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+    } catch (error) {
+      console.error('[NFT-MARKETPLACE] Error processing buy:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('nft-offer:')) {
+    // NFT Make Offer button - opens modal
+    try {
+      const listingId = customId.split(':')[1];
+      
+      if (!listingId) {
+        await interaction.reply({ content: '❌ Invalid listing ID.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const listing = await virtualAccountsNFT.getListing(guildId, listingId);
+      
+      if (!listing) {
+        await interaction.reply({ content: '❌ Listing not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (listing.status !== 'ACTIVE') {
+        await interaction.reply({ content: '❌ This listing is no longer active.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check if listing expired
+      if (listing.expiresAt && Date.now() > listing.expiresAt) {
+        await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'EXPIRED' });
+        await interaction.reply({ content: '❌ This listing has expired.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check if user is trying to offer on their own NFT
+      if (listing.sellerId === interaction.user.id) {
+        await interaction.reply({ content: '❌ You cannot make an offer on your own listing.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get token ticker for display
+      const tokenTicker = listing.priceTokenIdentifier.split('-')[0];
+      
+      // Create offer modal
+      const modal = new ModalBuilder()
+        .setCustomId(`nft-offer-modal:${listingId}`)
+        .setTitle(`Make Offer - ${listing.title.substring(0, 30)}`);
+      
+      const offerAmountInput = new TextInputBuilder()
+        .setCustomId('offer-amount')
+        .setLabel(`Offer Amount (${tokenTicker})`)
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder(`Enter your offer amount`)
+        .setRequired(true)
+        .setMaxLength(50);
+      
+      const firstActionRow = new ActionRowBuilder().addComponents(offerAmountInput);
+      modal.addComponents(firstActionRow);
+      
+      await interaction.showModal(modal);
+    } catch (error) {
+      console.error('[NFT-MARKETPLACE] Error showing offer modal:', error);
+      console.error('[NFT-MARKETPLACE] Error stack:', error.stack);
+      
+      // Try to reply if not already replied
+      try {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({ content: '❌ An error occurred. Please try again.', flags: [MessageFlags.Ephemeral] });
+        } else {
+          await interaction.reply({ content: '❌ An error occurred. Please try again.', flags: [MessageFlags.Ephemeral] });
+        }
+      } catch (replyError) {
+        console.error('[NFT-MARKETPLACE] Error sending error message:', replyError);
+      }
+    }
+  } else if (customId.startsWith('nft-listing-cancel:')) {
+    // Cancel listing button
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const listingId = customId.split(':')[1];
+      const listing = await virtualAccountsNFT.getListing(guildId, listingId);
+      
+      if (!listing) {
+        await interaction.editReply({ content: '❌ Listing not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Verify user is the seller
+      if (listing.sellerId !== interaction.user.id) {
+        await interaction.editReply({ content: '❌ Only the seller can cancel this listing.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (listing.status !== 'ACTIVE') {
+        await interaction.editReply({ content: '❌ This listing is already cancelled or sold.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Update listing status
+      await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'CANCELLED' });
+      
+      // Update embed
+      await updateNFTListingEmbed(guildId, listingId);
+      
+      await interaction.editReply({ content: '✅ Listing cancelled successfully.', flags: [MessageFlags.Ephemeral] });
+      
+    } catch (error) {
+      console.error('[NFT-MARKETPLACE] Error cancelling listing:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('nft-offer-accept:')) {
+    // Accept offer button
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const offerId = customId.split(':')[1];
+      const offer = await virtualAccountsNFT.getOffer(guildId, offerId);
+      
+      if (!offer) {
+        await interaction.editReply({ content: '❌ Offer not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const offerListing = await virtualAccountsNFT.getListing(guildId, offer.listingId);
+      
+      if (!offerListing) {
+        await interaction.editReply({ content: '❌ Listing not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Verify user is the seller
+      if (offerListing.sellerId !== interaction.user.id) {
+        await interaction.editReply({ content: '❌ Only the seller can accept offers.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (offer.status !== 'PENDING') {
+        await interaction.editReply({ content: '❌ This offer is no longer pending.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check if offer expired
+      if (offer.expiresAt && Date.now() > offer.expiresAt) {
+        await virtualAccountsNFT.updateOffer(guildId, offerId, { status: 'EXPIRED' });
+        await interaction.editReply({ content: '❌ This offer has expired.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Verify seller still owns NFT
+      const sellerNFT = await virtualAccountsNFT.getUserNFTBalance(guildId, offerListing.sellerId, offerListing.collection, offerListing.nonce);
+      if (!sellerNFT) {
+        await virtualAccountsNFT.updateListing(guildId, offerListing.listingId, { status: 'CANCELLED' });
+        await interaction.editReply({ content: '❌ You no longer own this NFT. Listing has been cancelled.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check offerer still has sufficient balance
+      const offererBalance = await virtualAccounts.getUserBalance(guildId, offer.offererId, offer.priceTokenIdentifier);
+      const offerAmountBN = new BigNumber(offer.priceAmount);
+      const balanceBN = new BigNumber(offererBalance);
+      
+      if (balanceBN.isLessThan(offerAmountBN)) {
+        await virtualAccountsNFT.updateOffer(guildId, offerId, { status: 'REJECTED' });
+        await interaction.editReply({ content: '❌ Offerer no longer has sufficient balance. Offer rejected.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Deduct ESDT from offerer
+      const deductResult = await virtualAccounts.deductFundsFromAccount(
+        guildId,
+        offer.offererId,
+        offer.priceTokenIdentifier,
+        offer.priceAmount,
+        `NFT purchase (offer accepted): ${offerListing.nftName || `${offerListing.collection}#${offerListing.nonce}`}`,
+        'marketplace_purchase'
+      );
+      
+      if (!deductResult.success) {
+        await interaction.editReply({ content: `❌ Failed to deduct funds: ${deductResult.error}`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Add ESDT to seller
+      await virtualAccounts.addFundsToAccount(
+        guildId,
+        offerListing.sellerId,
+        offer.priceTokenIdentifier,
+        offer.priceAmount,
+        null,
+        'marketplace_sale',
+        null
+      );
+      
+      // Transfer NFT
+      await virtualAccountsNFT.transferNFTBetweenUsers(
+        guildId,
+        offerListing.sellerId,
+        offer.offererId,
+        offerListing.collection,
+        offerListing.nonce,
+        {
+          tokenIdentifier: offer.priceTokenIdentifier,
+          amount: offer.priceAmount
+        }
+      );
+      
+      // Update offer status
+      await virtualAccountsNFT.updateOffer(guildId, offerId, { 
+        status: 'ACCEPTED',
+        acceptedAt: Date.now()
+      });
+      
+      // Reject/expire all other offers on this listing
+      const allOffers = await virtualAccountsNFT.getOffersForListing(guildId, offerListing.listingId);
+      for (const otherOffer of allOffers) {
+        if (otherOffer.offerId !== offerId && otherOffer.status === 'PENDING') {
+          await virtualAccountsNFT.updateOffer(guildId, otherOffer.offerId, { status: 'REJECTED' });
+        }
+      }
+      
+      // Update listing status
+      await virtualAccountsNFT.updateListing(guildId, offerListing.listingId, { 
+        status: 'SOLD',
+        soldAt: Date.now()
+      });
+      
+      // Update embeds
+      await updateNFTListingEmbed(guildId, offerListing.listingId);
+      
+      // Send notifications
+      try {
+        const offerer = await client.users.fetch(offer.offererId);
+        await offerer.send(`✅ **Your offer was accepted!**\n\n**NFT:** ${offerListing.nftName || `${offerListing.collection}#${offerListing.nonce}`}\n**Seller:** ${interaction.user.tag}\n**Price:** ${offer.priceAmount} ${offer.priceTokenIdentifier.split('-')[0]}`);
+      } catch (dmError) {
+        console.error('[NFT-MARKETPLACE] Could not send DM to offerer:', dmError.message);
+      }
+      
+      await interaction.editReply({ 
+        content: `✅ **Offer accepted!**\n\nNFT has been transferred to <@${offer.offererId}> for ${offer.priceAmount} ${offer.priceTokenIdentifier.split('-')[0]}.`, 
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+    } catch (error) {
+      console.error('[NFT-MARKETPLACE] Error accepting offer:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('nft-offer-reject:')) {
+    // Reject offer button
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const offerId = customId.split(':')[1];
+      const offer = await virtualAccountsNFT.getOffer(guildId, offerId);
+      
+      if (!offer) {
+        await interaction.editReply({ content: '❌ Offer not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const offerListing = await virtualAccountsNFT.getListing(guildId, offer.listingId);
+      
+      if (!offerListing) {
+        await interaction.editReply({ content: '❌ Listing not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Verify user is the seller
+      if (offerListing.sellerId !== interaction.user.id) {
+        await interaction.editReply({ content: '❌ Only the seller can reject offers.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (offer.status !== 'PENDING') {
+        await interaction.editReply({ content: '❌ This offer is no longer pending.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Update offer status
+      await virtualAccountsNFT.updateOffer(guildId, offerId, { status: 'REJECTED' });
+      
+      await interaction.editReply({ content: '✅ Offer rejected.', flags: [MessageFlags.Ephemeral] });
+      
+    } catch (error) {
+      console.error('[NFT-MARKETPLACE] Error rejecting offer:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
   }
 });
 
@@ -11024,6 +12414,7 @@ client.on('interactionCreate', async (interaction) => {
         // Get Community Fund wallet address and QR code
         let communityFundAddress = null;
         let qrCodeUrl = null;
+        let supportedTokens = [];
         try {
           const projects = await getProjects(guildId);
           const communityFundProjectName = getCommunityFundProjectName();
@@ -11035,6 +12426,15 @@ client.on('interactionCreate', async (interaction) => {
             // Get QR code if available
             const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
             qrCodeUrl = communityFundQRData?.[communityFundProjectName] || null;
+            
+            // Extract supported tokens
+            if (communityFundProject.supportedTokens) {
+              if (Array.isArray(communityFundProject.supportedTokens)) {
+                supportedTokens = communityFundProject.supportedTokens;
+              } else if (typeof communityFundProject.supportedTokens === 'string') {
+                supportedTokens = communityFundProject.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+              }
+            }
           }
         } catch (error) {
           console.error(`[WALLET-REGISTRATION] Error getting Community Fund info:`, error.message);
@@ -11058,6 +12458,18 @@ client.on('interactionCreate', async (interaction) => {
           ]);
         }
         
+        // Add supported tokens if available
+        if (supportedTokens.length > 0) {
+          embed.addFields([
+            { name: 'Supported ESDT Tokens', value: supportedTokens.join(', '), inline: false }
+          ]);
+        }
+        
+        // Add NFT support information
+        embed.addFields([
+          { name: '📦 NFT Support', value: '**NFTs can also be added to your Virtual Account!**\n\nSimply send NFTs to the community fund wallet address above, and they will be automatically added to your virtual account balance. Use `/check-balance-nft` to view your NFT collection.', inline: false }
+        ]);
+        
         // Add QR code as thumbnail if available
         if (qrCodeUrl) {
           embed.setThumbnail(qrCodeUrl);
@@ -11065,8 +12477,8 @@ client.on('interactionCreate', async (interaction) => {
         
         // Add Next Steps field
         const nextStepsValue = communityFundAddress 
-          ? `1. Send tokens to the Community Fund address above\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance\` to view your balance`
-          : `1. Send tokens to the Community Fund address\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance\` to view your balance`;
+          ? `1. Send **ESDT tokens or NFTs** to the Community Fund address above\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance-esdt\` to view ESDT balances\n4. Use \`/check-balance-nft\` to view NFT collection`
+          : `1. Send **ESDT tokens or NFTs** to the Community Fund address\n2. Your virtual account will be automatically updated\n3. Use \`/check-balance-esdt\` to view ESDT balances\n4. Use \`/check-balance-nft\` to view NFT collection`;
         
         embed.addFields([
           { name: 'Next Steps', value: nextStepsValue, inline: false }
@@ -11144,17 +12556,66 @@ client.on('interactionCreate', async (interaction) => {
       await processTicketPurchase(guildId, lotteryId, interaction.user.id, interaction.user.tag, numbers, lottery);
       
       const numbersDisplay = lotteryHelpers.formatNumbersForDisplay(numbers);
-      await interaction.editReply({
-        content: `✅ **Ticket Purchased!**\n\n**Your Numbers:** ${numbersDisplay}\n**Lottery:** \`${lotteryId.substring(0, 16)}...\``,
-        flags: [MessageFlags.Ephemeral]
-      });
+      try {
+        await interaction.editReply({
+          content: `✅ **Ticket Purchased!**\n\n**Your Numbers:** ${numbersDisplay}\n**Lottery:** \`${lotteryId.substring(0, 16)}...\``,
+          flags: [MessageFlags.Ephemeral]
+        });
+      } catch (replyError) {
+        // If reply fails due to connection error, log it but don't fail the purchase
+        const isConnectionError = replyError.message.includes('other side closed') || 
+                                  replyError.message.includes('ECONNRESET') ||
+                                  replyError.message.includes('WebSocket') ||
+                                  replyError.code === 'ECONNRESET';
+        if (isConnectionError) {
+          console.error('[LOTTERY] Connection error when sending success message (ticket was purchased):', replyError.message);
+          // Try to send a follow-up message if possible
+          try {
+            await interaction.followUp({ 
+              content: `✅ **Ticket Purchased Successfully!**\n\n**Your Numbers:** ${numbersDisplay}\n**Lottery:** \`${lotteryId.substring(0, 16)}...\``, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+          } catch (followUpError) {
+            console.error('[LOTTERY] Failed to send follow-up message:', followUpError.message);
+          }
+        } else {
+          throw replyError; // Re-throw if it's not a connection error
+        }
+      }
       
     } catch (error) {
       console.error('[LOTTERY] Error processing ticket purchase:', error.message);
-      if (interaction.deferred) {
-        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      console.error('[LOTTERY] Error stack:', error.stack);
+      
+      // Handle connection errors gracefully
+      const isConnectionError = error.message.includes('other side closed') || 
+                                error.message.includes('ECONNRESET') ||
+                                error.message.includes('WebSocket') ||
+                                error.code === 'ECONNRESET';
+      
+      try {
+        if (interaction.deferred) {
+          if (isConnectionError) {
+            await interaction.editReply({ 
+              content: `⚠️ **Connection Error**\n\nThe purchase may have succeeded, but Discord connection was interrupted. Please check your tickets with \`/lottery my-tickets\` to confirm.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+          } else {
+            await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+          }
+        } else {
+          if (isConnectionError) {
+            await interaction.reply({ 
+              content: `⚠️ **Connection Error**\n\nThe purchase may have succeeded, but Discord connection was interrupted. Please check your tickets with \`/lottery my-tickets\` to confirm.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+          } else {
+            await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+          }
+        }
+      } catch (replyError) {
+        // If even the error reply fails, log it but don't crash
+        console.error('[LOTTERY] Failed to send error message to user:', replyError.message);
       }
     }
   } else if (customId.startsWith('betting-modal:')) {
@@ -11510,6 +12971,164 @@ client.on('interactionCreate', async (interaction) => {
             await interaction.reply({ content: `Error joining challenge: ${error.message}`, flags: [MessageFlags.Ephemeral] });
           }
         }
+      } else if (customId.startsWith('nft-offer-modal:')) {
+        // NFT Offer modal submission
+        try {
+          await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+          
+          const listingId = customId.split(':')[1];
+          const listing = await virtualAccountsNFT.getListing(guildId, listingId);
+          
+          if (!listing) {
+            await interaction.editReply({ content: '❌ Listing not found.', flags: [MessageFlags.Ephemeral] });
+            return;
+          }
+          
+          if (listing.status !== 'ACTIVE') {
+            await interaction.editReply({ content: '❌ This listing is no longer active.', flags: [MessageFlags.Ephemeral] });
+            return;
+          }
+          
+          const offerAmountInput = interaction.fields.getTextInputValue('offer-amount');
+          
+          // Validate offer amount
+          let offerAmountBN;
+          try {
+            offerAmountBN = new BigNumber(offerAmountInput);
+            if (offerAmountBN.isLessThanOrEqualTo(0) || !offerAmountBN.isFinite()) {
+              throw new Error('Invalid offer amount');
+            }
+          } catch (amountError) {
+            await interaction.editReply({ 
+              content: `❌ Invalid offer amount. Please enter a valid number.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+            return;
+          }
+          
+          // Check buyer has sufficient balance
+          const buyerBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, listing.priceTokenIdentifier);
+          const balanceBN = new BigNumber(buyerBalance);
+          
+          if (balanceBN.isLessThan(offerAmountBN)) {
+            await interaction.editReply({ 
+              content: `❌ Insufficient balance. You need ${offerAmountBN.toString()} ${listing.priceTokenIdentifier.split('-')[0]} but you have ${buyerBalance}.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+            return;
+          }
+          
+          // Create offer
+          const offerId = `nft_offer_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          const expiresAt = Date.now() + (7 * 24 * 60 * 60 * 1000); // 7 days default
+          
+          await virtualAccountsNFT.createOffer(guildId, offerId, {
+            listingId: listingId,
+            offererId: interaction.user.id,
+            offererTag: interaction.user.tag,
+            priceTokenIdentifier: listing.priceTokenIdentifier,
+            priceAmount: offerAmountBN.toString(),
+            status: 'PENDING',
+            createdAt: Date.now(),
+            expiresAt: expiresAt
+          });
+          
+          // Create transaction record for offerer
+          await virtualAccountsNFT.addNFTTransaction(guildId, interaction.user.id, {
+            id: `nft_offer_${offerId}`,
+            type: 'offer',
+            collection: listing.collection,
+            identifier: listing.identifier,
+            nonce: listing.nonce,
+            nft_name: listing.nftName,
+            price_token_identifier: listing.priceTokenIdentifier,
+            price_amount: offerAmountBN.toString(),
+            timestamp: Date.now(),
+            description: `Made offer on ${listing.nftName || `${listing.collection}#${listing.nonce}`}`
+          });
+          
+          // Send DM notification to seller
+          try {
+            const seller = await client.users.fetch(listing.sellerId);
+            if (seller) {
+              const communityFundProjectName = getCommunityFundProjectName();
+              const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
+              
+              const tokenTicker = listing.priceTokenIdentifier.split('-')[0];
+              const nftDisplayName = listing.nftName || `${listing.collection}#${listing.nonce}`;
+              
+              const dmEmbed = new EmbedBuilder()
+                .setTitle('💼 New Offer Received')
+                .setDescription(`You have received a new offer on your NFT listing!`)
+                .addFields([
+                  { name: 'NFT', value: nftDisplayName, inline: true },
+                  { name: 'Collection', value: listing.collection, inline: true },
+                  { name: 'Nonce', value: String(listing.nonce), inline: true },
+                  { name: 'Offerer', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: false },
+                  { name: 'Offer Amount', value: `${offerAmountBN.toString()} ${tokenTicker}`, inline: true },
+                  { name: 'Status', value: 'Pending', inline: true },
+                  { name: 'Listing', value: listing.title || 'Untitled Listing', inline: false }
+                ])
+                .setColor(0x0099FF)
+                .setThumbnail(projectLogoUrl)
+                .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+                .setTimestamp();
+              
+              await seller.send({ embeds: [dmEmbed] });
+              console.log(`[NFT-MARKETPLACE] Sent DM notification to seller ${listing.sellerId} about new offer`);
+            }
+          } catch (dmError) {
+            console.error('[NFT-MARKETPLACE] Could not send DM to seller:', dmError.message);
+          }
+          
+          // Notify seller in thread
+          try {
+            const channel = await client.channels.fetch(listing.channelId);
+            if (channel && listing.threadId) {
+              const thread = await channel.threads.cache.get(listing.threadId) || await channel.threads.fetch(listing.threadId);
+              if (thread) {
+                const offerEmbed = new EmbedBuilder()
+                  .setTitle('💼 New Offer Received')
+                  .setDescription(`**Offerer:** <@${interaction.user.id}>\n**Amount:** ${offerAmountBN.toString()} ${listing.priceTokenIdentifier.split('-')[0]}\n**Status:** Pending`)
+                  .setColor(0x0099FF)
+                  .setTimestamp()
+                  .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+                
+                const acceptButton = new ButtonBuilder()
+                  .setCustomId(`nft-offer-accept:${offerId}`)
+                  .setLabel('Accept Offer')
+                  .setStyle(ButtonStyle.Success);
+                
+                const rejectButton = new ButtonBuilder()
+                  .setCustomId(`nft-offer-reject:${offerId}`)
+                  .setLabel('Reject Offer')
+                  .setStyle(ButtonStyle.Danger);
+                
+                const buttonRow = new ActionRowBuilder().addComponents(acceptButton, rejectButton);
+                
+                await thread.send({ embeds: [offerEmbed], components: [buttonRow] });
+              }
+            }
+          } catch (threadError) {
+            console.error('[NFT-MARKETPLACE] Error posting offer to thread:', threadError.message);
+          }
+          
+          // Update listing embed to show offer count
+          await updateNFTListingEmbed(guildId, listingId);
+          
+          await interaction.editReply({ 
+            content: `✅ **Offer submitted!**\n\nYour offer of **${offerAmountBN.toString()} ${listing.priceTokenIdentifier.split('-')[0]}** has been sent to the seller.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          
+        } catch (error) {
+          console.error('[NFT-MARKETPLACE] Error processing offer:', error);
+          if (interaction.deferred) {
+            await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+          } else {
+            await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+          }
+        }
       } else if (customId.startsWith('bid-modal:')) {
         // Bid modal submission
         try {
@@ -11532,6 +13151,16 @@ client.on('interactionCreate', async (interaction) => {
           if (isAuctionExpired(auction)) {
             await processAuctionClosure(guildId, auctionId);
             await interaction.editReply({ content: '❌ This auction has ended.', flags: [MessageFlags.Ephemeral] });
+            return;
+          }
+
+          // Prevent auction owner from bidding on their own auction
+          const isOwner = interaction.user.id === auction.creatorId || interaction.user.id === auction.sellerId;
+          if (isOwner) {
+            await interaction.editReply({ 
+              content: '❌ **You cannot bid on your own auction!**\n\nAs the auction creator, you are not allowed to place bids on your own auction.', 
+              flags: [MessageFlags.Ephemeral] 
+            });
             return;
           }
 
@@ -11851,6 +13480,7 @@ async function updateLotteryEmbed(guildId, lotteryId) {
         { name: '👥 Participants', value: lottery.uniqueParticipants.toString(), inline: true }
       ])
       .setColor(color)
+      .setThumbnail('https://i.ibb.co/20MLJZNH/lottery-logo.png')
       .setTimestamp(new Date(lottery.endTime))
       .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
     
@@ -12096,6 +13726,7 @@ async function processLotteryDraw(guildId, lotteryId) {
               { name: '🎟️ Winning Ticket IDs', value: winnerDetails.join('\n') || 'N/A', inline: false }
             ])
             .setColor(0x00FF00)
+            .setThumbnail('https://i.ibb.co/35ZztKrH/lottery-winner.png')
             .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
             .setTimestamp();
           
@@ -12152,7 +13783,7 @@ async function processLotteryDraw(guildId, lotteryId) {
                   ])
                   .setColor(0x00FF00)
                   .setThumbnail(projectLogoUrl)
-                  .setFooter({ text: 'Prize has been added to your virtual account! Use /check-balance to see your winnings.', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+                  .setFooter({ text: 'Prize has been added to your virtual account! Use /check-balance-esdt to see your winnings.', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
                   .setTimestamp();
                 
                 await user.send({ embeds: [dmEmbed] });
@@ -12240,6 +13871,7 @@ async function processLotteryDraw(guildId, lotteryId) {
               { name: '👥 Participants', value: '0', inline: true }
             ])
             .setColor(0x00FF00)
+            .setThumbnail('https://i.ibb.co/20MLJZNH/lottery-logo.png')
             .setTimestamp(new Date(newEndTime))
             .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
           
@@ -12443,6 +14075,25 @@ client.on('ready', async () => {
   console.log('Auction expiration check scheduled (every minute)');
   console.log('Lottery draw check scheduled (every minute)');
   console.log('Lottery embed update scheduled (every 10 minutes)');
+  
+  // Set up periodic cleanup for expired NFT offers and listings
+  setInterval(async () => {
+    try {
+      const allGuilds = await client.guilds.fetch();
+      for (const [guildId, guild] of allGuilds) {
+        try {
+          await virtualAccountsNFT.cleanupExpiredOffers();
+          await virtualAccountsNFT.cleanupExpiredListings();
+        } catch (error) {
+          console.error(`[NFT-MARKETPLACE] Error cleaning up expired items for guild ${guildId}:`, error.message);
+        }
+      }
+    } catch (error) {
+      console.error('[NFT-MARKETPLACE] Error cleaning up expired NFT offers/listings:', error.message);
+    }
+  }, 60 * 60 * 1000); // Check every hour
+  
+  console.log('NFT marketplace cleanup scheduled (every hour)');
   
   // Clean up old transaction history on startup
   (async () => {
@@ -12716,6 +14367,97 @@ function isAuctionExpired(auction) {
 }
 
 // Update auction embed
+// Update NFT listing embed
+async function updateNFTListingEmbed(guildId, listingId) {
+  try {
+    const listing = await virtualAccountsNFT.getListing(guildId, listingId);
+    if (!listing) return;
+
+    const channel = await client.channels.fetch(listing.channelId);
+    if (!channel) return;
+
+    const message = await channel.messages.fetch(listing.messageId);
+    if (!message) return;
+
+    const isExpired = listing.expiresAt && Date.now() > listing.expiresAt;
+    const isSold = listing.status === 'SOLD';
+    const isCancelled = listing.status === 'CANCELLED';
+    
+    const statusText = isSold ? '🔴 Sold' : isCancelled ? '⚫ Cancelled' : isExpired ? '⏰ Expired' : '🟢 Active';
+    const color = isSold ? 0xFF0000 : isCancelled ? 0x808080 : isExpired ? 0xFF9900 : 0x00FF00;
+    
+    const tokenTicker = listing.priceTokenIdentifier.split('-')[0];
+
+    const listingEmbed = new EmbedBuilder()
+      .setTitle(listing.title)
+      .setDescription(`${listing.description || ''}\n\n**NFT:** ${listing.nftName || `${listing.collection}#${listing.nonce}`}\n**Collection:** ${listing.collection}\n**Nonce:** ${listing.nonce}`)
+      .addFields([
+        { name: '💰 Price', value: `${listing.priceAmount} ${tokenTicker}`, inline: true },
+        { name: '📋 Listing Type', value: listing.listingType === 'fixed_price' ? 'Fixed Price' : 'Accept Offers', inline: true },
+        { name: '👤 Seller', value: `<@${listing.sellerId}>`, inline: true },
+        { name: '📊 Status', value: statusText, inline: true }
+      ])
+      .setColor(color)
+      .setTimestamp()
+      .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+
+    if (listing.expiresAt && !isExpired && !isSold && !isCancelled) {
+      listingEmbed.addFields([
+        { name: '⏰ Expires', value: `<t:${Math.floor(listing.expiresAt / 1000)}:R>`, inline: true }
+      ]);
+    }
+
+    // Get offer count if accept_offers
+    if (listing.listingType === 'accept_offers' && !isSold && !isCancelled) {
+      const offers = await virtualAccountsNFT.getOffersForListing(guildId, listingId);
+      const pendingOffers = offers.filter(o => o.status === 'PENDING');
+      if (pendingOffers.length > 0) {
+        listingEmbed.addFields([
+          { name: '💼 Pending Offers', value: `${pendingOffers.length}`, inline: true }
+        ]);
+      }
+    }
+
+    if (listing.nftImageUrl) {
+      listingEmbed.setThumbnail(listing.nftImageUrl);
+    }
+
+    // Create buttons based on status
+    const components = [];
+    if (!isSold && !isCancelled && !isExpired) {
+      const buttons = [];
+      
+      // Always show Buy button - for fixed_price it's "Buy Now", for accept_offers it's "Buy at Listed Price"
+      const buyButton = new ButtonBuilder()
+        .setCustomId(`nft-buy:${listingId}`)
+        .setLabel(listing.listingType === 'fixed_price' ? 'Buy Now' : 'Buy at Listed Price')
+        .setStyle(ButtonStyle.Success);
+      buttons.push(buyButton);
+      
+      const offerButton = new ButtonBuilder()
+        .setCustomId(`nft-offer:${listingId}`)
+        .setLabel('Make Offer')
+        .setStyle(ButtonStyle.Primary);
+      buttons.push(offerButton);
+      
+      const cancelButton = new ButtonBuilder()
+        .setCustomId(`nft-listing-cancel:${listingId}`)
+        .setLabel('Cancel Listing')
+        .setStyle(ButtonStyle.Danger);
+      buttons.push(cancelButton);
+      
+      if (buttons.length > 0) {
+        const buttonRow = new ActionRowBuilder().addComponents(buttons);
+        components.push(buttonRow);
+      }
+    }
+
+    await message.edit({ embeds: [listingEmbed], components });
+  } catch (error) {
+    console.error(`[NFT-MARKETPLACE] Error updating embed for listing ${listingId}:`, error.message);
+  }
+}
+
 async function updateAuctionEmbed(guildId, auctionId) {
   const auction = await dbAuctions.getAuction(guildId, auctionId);
   if (!auction) return;
@@ -13166,6 +14908,104 @@ async function trackAuctionEarnings(guildId, auctionId, amountWei, tokenDecimals
     
   } catch (error) {
     console.error(`[HOUSE] Error tracking auction earnings for auction ${auctionId}:`, error.message);
+  }
+}
+
+// Track house top-up (manual funding from Virtual Account)
+// tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f")
+// houseType: 'betting', 'auction', or 'lottery'
+async function trackHouseTopup(guildId, amountWei, tokenIdentifier, houseType, userId, userTag, memo = 'Manual top-up') {
+  try {
+    // Validate token identifier format
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      console.error(`[HOUSE-TOPUP] Invalid token identifier format: ${tokenIdentifier}`);
+      return { success: false, error: 'Invalid token identifier format' };
+    }
+
+    // Validate house type
+    const validHouseTypes = ['betting', 'auction', 'lottery'];
+    if (!validHouseTypes.includes(houseType)) {
+      return { success: false, error: `Invalid house type: ${houseType}. Must be one of: ${validHouseTypes.join(', ')}` };
+    }
+
+    // Get token metadata for ticker display
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    const tokenTicker = tokenMetadata[tokenIdentifier]?.ticker || tokenIdentifier.split('-')[0];
+
+    // Get current house balance
+    const currentBalance = await getHouseBalance(guildId, tokenIdentifier);
+    const houseBalance = currentBalance || {
+      bettingEarnings: {},
+      bettingSpending: {},
+      bettingPNL: {},
+      auctionEarnings: {},
+      auctionSpending: {},
+      auctionPNL: {},
+      lotteryEarnings: {},
+      lotterySpending: {},
+      lotteryPNL: {}
+    };
+
+    const amountBN = new BigNumber(amountWei);
+
+    // Update earnings based on house type
+    if (houseType === 'betting') {
+      if (!houseBalance.bettingEarnings[tokenIdentifier]) {
+        houseBalance.bettingEarnings[tokenIdentifier] = '0';
+      }
+      const currentBettingEarnings = new BigNumber(houseBalance.bettingEarnings[tokenIdentifier] || '0');
+      houseBalance.bettingEarnings[tokenIdentifier] = currentBettingEarnings.plus(amountBN).toString();
+      
+      // Recalculate betting PNL
+      const bettingSpending = new BigNumber(houseBalance.bettingSpending[tokenIdentifier] || '0');
+      houseBalance.bettingPNL[tokenIdentifier] = new BigNumber(houseBalance.bettingEarnings[tokenIdentifier]).minus(bettingSpending).toString();
+    } else if (houseType === 'auction') {
+      if (!houseBalance.auctionEarnings[tokenIdentifier]) {
+        houseBalance.auctionEarnings[tokenIdentifier] = '0';
+      }
+      const currentAuctionEarnings = new BigNumber(houseBalance.auctionEarnings[tokenIdentifier] || '0');
+      houseBalance.auctionEarnings[tokenIdentifier] = currentAuctionEarnings.plus(amountBN).toString();
+      
+      // Recalculate auction PNL
+      const auctionSpending = new BigNumber(houseBalance.auctionSpending[tokenIdentifier] || '0');
+      houseBalance.auctionPNL[tokenIdentifier] = new BigNumber(houseBalance.auctionEarnings[tokenIdentifier]).minus(auctionSpending).toString();
+    } else if (houseType === 'lottery') {
+      if (!houseBalance.lotteryEarnings[tokenIdentifier]) {
+        houseBalance.lotteryEarnings[tokenIdentifier] = '0';
+      }
+      const currentLotteryEarnings = new BigNumber(houseBalance.lotteryEarnings[tokenIdentifier] || '0');
+      houseBalance.lotteryEarnings[tokenIdentifier] = currentLotteryEarnings.plus(amountBN).toString();
+      
+      // Recalculate lottery PNL
+      const lotterySpending = new BigNumber(houseBalance.lotterySpending[tokenIdentifier] || '0');
+      houseBalance.lotteryPNL[tokenIdentifier] = new BigNumber(houseBalance.lotteryEarnings[tokenIdentifier]).minus(lotterySpending).toString();
+    }
+
+    // Save to database
+    await dbServerData.updateHouseBalance(guildId, tokenIdentifier, houseBalance);
+
+    // Log top-up
+    const tokenDecimals = tokenMetadata[tokenIdentifier]?.decimals || 8;
+    const humanAmount = amountBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    const houseTypeName = houseType === 'betting' ? 'Betting' : houseType === 'auction' ? 'Auction' : 'Lottery';
+    console.log(`[HOUSE-TOPUP] Tracked top-up: +${humanAmount} ${tokenTicker} to ${houseTypeName} house by ${userTag} (${userId})`);
+
+    return {
+      success: true,
+      newBalances: {
+        betting: houseBalance.bettingPNL[tokenIdentifier] || '0',
+        auction: houseBalance.auctionPNL[tokenIdentifier] || '0',
+        lottery: houseBalance.lotteryPNL[tokenIdentifier] || '0'
+      }
+    };
+
+  } catch (error) {
+    console.error('[HOUSE-TOPUP] Error tracking house top-up:', error.message);
+    return {
+      success: false,
+      error: error.message
+    };
   }
 }
 
@@ -13915,7 +15755,7 @@ async function sendWinnerNotification(guildId, matchId, winners, losers, winning
         { name: '❌ Losers', value: `${losers.length} player(s)`, inline: true }
       ])
       .setColor('#00FF00')
-      .setFooter({ text: 'Prizes have been added to your virtual accounts! Use /check-balance to see your winnings.', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+      .setFooter({ text: 'Prizes have been added to your virtual accounts! Use /check-balance-esdt to see your winnings.', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
       .setTimestamp();
     
     // Send the main winner announcement
