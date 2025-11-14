@@ -8,7 +8,7 @@ console.log('Environment variables:', {
   API_BASE_URL: process.env.API_BASE_URL ? 'Set' : 'Missing',
 });
 
-const { Client, IntentsBitField, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags } = require('discord.js');
+const { Client, IntentsBitField, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags, ChannelType } = require('discord.js');
 const fetch = require('node-fetch');
 const BigNumber = require('bignumber.js');
 
@@ -7889,23 +7889,81 @@ client.on('interactionCreate', async (interaction) => {
       
       const buttonRow = new ActionRowBuilder().addComponents(buttons);
       
-      // Post listing message
-      const listingMessage = await interaction.channel.send({ 
-        embeds: [listingEmbed], 
-        components: [buttonRow] 
-      });
+      // Check if channel is a forum channel
+      const channel = interaction.channel;
+      if (!channel) {
+        throw new Error('Channel not found. Please try again.');
+      }
       
-      // Create thread
+      const isForumChannel = channel.type === ChannelType.GuildForum;
+      
+      let listingMessage = null;
       let thread = null;
       let threadId = null;
-      try {
-        thread = await listingMessage.startThread({
-          name: `Listing: ${nft.nft_name || `${collection}#${nft.nonce}`}`,
-          autoArchiveDuration: 60
+      
+      if (isForumChannel) {
+        // For forum channels, create a forum post (which is a thread)
+        try {
+          thread = await channel.threads.create({
+            name: `Listing: ${nft.nft_name || `${collection}#${nft.nonce}`}`,
+            message: {
+              embeds: [listingEmbed],
+              components: [buttonRow]
+            },
+            autoArchiveDuration: 60
+          });
+          threadId = thread.id;
+          // In forum channels, the first message is the thread's starter message
+          try {
+            listingMessage = await thread.fetchStarterMessage();
+            if (!listingMessage) {
+              // Fallback: get the first message from the thread
+              const messages = await thread.messages.fetch({ limit: 1 });
+              listingMessage = messages.first();
+            }
+          } catch (msgError) {
+            console.error(`[NFT-LISTING] Error fetching starter message:`, msgError.message);
+            // Try to get first message as fallback
+            try {
+              const messages = await thread.messages.fetch({ limit: 1 });
+              listingMessage = messages.first();
+            } catch (fallbackError) {
+              console.error(`[NFT-LISTING] Error fetching fallback message:`, fallbackError.message);
+            }
+          }
+        } catch (forumError) {
+          console.error(`[NFT-LISTING] Error creating forum post:`, forumError);
+          // Provide more user-friendly error message
+          if (forumError.message && forumError.message.includes('Unknown interaction')) {
+            throw new Error('Failed to create forum post. The interaction may have expired. Please try the command again.');
+          } else if (forumError.code === 50013) {
+            throw new Error('Missing permissions to create forum posts. Please check bot permissions.');
+          } else {
+            throw new Error(`Failed to create forum post: ${forumError.message || 'Unknown error'}`);
+          }
+        }
+      } else {
+        // For regular channels, post message and create thread
+        listingMessage = await channel.send({ 
+          embeds: [listingEmbed], 
+          components: [buttonRow] 
         });
-        threadId = thread.id;
-      } catch (threadError) {
-        console.error(`[NFT-LISTING] Error creating thread:`, threadError.message);
+        
+        // Create thread
+        try {
+          thread = await listingMessage.startThread({
+            name: `Listing: ${nft.nft_name || `${collection}#${nft.nonce}`}`,
+            autoArchiveDuration: 60
+          });
+          threadId = thread.id;
+        } catch (threadError) {
+          console.error(`[NFT-LISTING] Error creating thread:`, threadError.message);
+        }
+      }
+      
+      // Ensure we have a listing message
+      if (!listingMessage) {
+        throw new Error('Failed to create listing message. Please try again.');
       }
       
       // Create listing in database
@@ -7925,7 +7983,7 @@ client.on('interactionCreate', async (interaction) => {
         status: 'ACTIVE',
         messageId: listingMessage.id,
         threadId: threadId,
-        channelId: interaction.channel.id,
+        channelId: channel.id,
         createdAt: Date.now(),
         expiresAt: expiresAt
       });
@@ -7942,10 +8000,15 @@ client.on('interactionCreate', async (interaction) => {
       
     } catch (error) {
       console.error('Error in sell-nft command:', error.message);
-      if (interaction.deferred) {
-        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      try {
+        if (interaction.deferred && !interaction.replied) {
+          await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        } else if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        }
+      } catch (replyError) {
+        // Interaction already acknowledged/replied, just log the error
+        console.error('Could not send error message to user (interaction already handled):', replyError.message);
       }
     }
   } else if (commandName === 'withdraw-nft') {
@@ -13018,10 +13081,14 @@ client.on('interactionCreate', async (interaction) => {
       
     } catch (error) {
       console.error('[NFT-MARKETPLACE] Error cancelling listing:', error);
-      if (interaction.deferred) {
-        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      try {
+        if (interaction.deferred && !interaction.replied) {
+          await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        } else if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        }
+      } catch (replyError) {
+        console.error('[NFT-MARKETPLACE] Could not send error message (interaction already handled):', replyError.message);
       }
     }
   } else if (customId.startsWith('nft-offer-accept:')) {
@@ -13030,14 +13097,27 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       
       const offerId = customId.split(':')[1];
-      const offer = await virtualAccountsNFT.getOffer(guildId, offerId);
+      // Get offer - if in DM (guildId is null), get by offerId only, otherwise use guildId
+      let offer = null;
+      if (guildId) {
+        offer = await virtualAccountsNFT.getOffer(guildId, offerId);
+      } else {
+        offer = await virtualAccountsNFT.getOfferById(offerId);
+      }
       
       if (!offer) {
         await interaction.editReply({ content: '❌ Offer not found.', flags: [MessageFlags.Ephemeral] });
         return;
       }
       
-      const offerListing = await virtualAccountsNFT.getListing(guildId, offer.listingId);
+      // Use offer's guildId for subsequent operations
+      const offerGuildId = offer.guildId || guildId;
+      if (!offerGuildId) {
+        await interaction.editReply({ content: '❌ Could not determine server. Please use this button in the server where the listing was created.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const offerListing = await virtualAccountsNFT.getListing(offerGuildId, offer.listingId);
       
       if (!offerListing) {
         await interaction.editReply({ content: '❌ Listing not found.', flags: [MessageFlags.Ephemeral] });
@@ -13057,33 +13137,33 @@ client.on('interactionCreate', async (interaction) => {
       
       // Check if offer expired
       if (offer.expiresAt && Date.now() > offer.expiresAt) {
-        await virtualAccountsNFT.updateOffer(guildId, offerId, { status: 'EXPIRED' });
+        await virtualAccountsNFT.updateOffer(offerGuildId, offerId, { status: 'EXPIRED' });
         await interaction.editReply({ content: '❌ This offer has expired.', flags: [MessageFlags.Ephemeral] });
         return;
       }
       
       // Verify seller still owns NFT
-      const sellerNFT = await virtualAccountsNFT.getUserNFTBalance(guildId, offerListing.sellerId, offerListing.collection, offerListing.nonce);
+      const sellerNFT = await virtualAccountsNFT.getUserNFTBalance(offerGuildId, offerListing.sellerId, offerListing.collection, offerListing.nonce);
       if (!sellerNFT) {
-        await virtualAccountsNFT.updateListing(guildId, offerListing.listingId, { status: 'CANCELLED' });
+        await virtualAccountsNFT.updateListing(offerGuildId, offerListing.listingId, { status: 'CANCELLED' });
         await interaction.editReply({ content: '❌ You no longer own this NFT. Listing has been cancelled.', flags: [MessageFlags.Ephemeral] });
         return;
       }
       
       // Check offerer still has sufficient balance
-      const offererBalance = await virtualAccounts.getUserBalance(guildId, offer.offererId, offer.priceTokenIdentifier);
+      const offererBalance = await virtualAccounts.getUserBalance(offerGuildId, offer.offererId, offer.priceTokenIdentifier);
       const offerAmountBN = new BigNumber(offer.priceAmount);
       const balanceBN = new BigNumber(offererBalance);
       
       if (balanceBN.isLessThan(offerAmountBN)) {
-        await virtualAccountsNFT.updateOffer(guildId, offerId, { status: 'REJECTED' });
+        await virtualAccountsNFT.updateOffer(offerGuildId, offerId, { status: 'REJECTED' });
         await interaction.editReply({ content: '❌ Offerer no longer has sufficient balance. Offer rejected.', flags: [MessageFlags.Ephemeral] });
         return;
       }
       
       // Deduct ESDT from offerer
       const deductResult = await virtualAccounts.deductFundsFromAccount(
-        guildId,
+        offerGuildId,
         offer.offererId,
         offer.priceTokenIdentifier,
         offer.priceAmount,
@@ -13098,7 +13178,7 @@ client.on('interactionCreate', async (interaction) => {
       
       // Add ESDT to seller
       await virtualAccounts.addFundsToAccount(
-        guildId,
+        offerGuildId,
         offerListing.sellerId,
         offer.priceTokenIdentifier,
         offer.priceAmount,
@@ -13109,7 +13189,7 @@ client.on('interactionCreate', async (interaction) => {
       
       // Transfer NFT
       await virtualAccountsNFT.transferNFTBetweenUsers(
-        guildId,
+        offerGuildId,
         offerListing.sellerId,
         offer.offererId,
         offerListing.collection,
@@ -13121,27 +13201,27 @@ client.on('interactionCreate', async (interaction) => {
       );
       
       // Update offer status
-      await virtualAccountsNFT.updateOffer(guildId, offerId, { 
+      await virtualAccountsNFT.updateOffer(offerGuildId, offerId, { 
         status: 'ACCEPTED',
         acceptedAt: Date.now()
       });
       
       // Reject/expire all other offers on this listing
-      const allOffers = await virtualAccountsNFT.getOffersForListing(guildId, offerListing.listingId);
+      const allOffers = await virtualAccountsNFT.getOffersForListing(offerGuildId, offerListing.listingId);
       for (const otherOffer of allOffers) {
         if (otherOffer.offerId !== offerId && otherOffer.status === 'PENDING') {
-          await virtualAccountsNFT.updateOffer(guildId, otherOffer.offerId, { status: 'REJECTED' });
+          await virtualAccountsNFT.updateOffer(offerGuildId, otherOffer.offerId, { status: 'REJECTED' });
         }
       }
       
       // Update listing status
-      await virtualAccountsNFT.updateListing(guildId, offerListing.listingId, { 
+      await virtualAccountsNFT.updateListing(offerGuildId, offerListing.listingId, { 
         status: 'SOLD',
         soldAt: Date.now()
       });
       
       // Update embeds
-      await updateNFTListingEmbed(guildId, offerListing.listingId);
+      await updateNFTListingEmbed(offerGuildId, offerListing.listingId);
       
       // Send notifications
       try {
@@ -13158,10 +13238,14 @@ client.on('interactionCreate', async (interaction) => {
       
     } catch (error) {
       console.error('[NFT-MARKETPLACE] Error accepting offer:', error);
-      if (interaction.deferred) {
-        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      try {
+        if (interaction.deferred && !interaction.replied) {
+          await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        } else if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        }
+      } catch (replyError) {
+        console.error('[NFT-MARKETPLACE] Could not send error message (interaction already handled):', replyError.message);
       }
     }
   } else if (customId.startsWith('nft-offer-reject:')) {
@@ -13170,14 +13254,27 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       
       const offerId = customId.split(':')[1];
-      const offer = await virtualAccountsNFT.getOffer(guildId, offerId);
+      // Get offer - if in DM (guildId is null), get by offerId only, otherwise use guildId
+      let offer = null;
+      if (guildId) {
+        offer = await virtualAccountsNFT.getOffer(guildId, offerId);
+      } else {
+        offer = await virtualAccountsNFT.getOfferById(offerId);
+      }
       
       if (!offer) {
         await interaction.editReply({ content: '❌ Offer not found.', flags: [MessageFlags.Ephemeral] });
         return;
       }
       
-      const offerListing = await virtualAccountsNFT.getListing(guildId, offer.listingId);
+      // Use offer's guildId for subsequent operations
+      const offerGuildId = offer.guildId || guildId;
+      if (!offerGuildId) {
+        await interaction.editReply({ content: '❌ Could not determine server. Please use this button in the server where the listing was created.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const offerListing = await virtualAccountsNFT.getListing(offerGuildId, offer.listingId);
       
       if (!offerListing) {
         await interaction.editReply({ content: '❌ Listing not found.', flags: [MessageFlags.Ephemeral] });
@@ -13196,16 +13293,33 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Update offer status
-      await virtualAccountsNFT.updateOffer(guildId, offerId, { status: 'REJECTED' });
+      await virtualAccountsNFT.updateOffer(offerGuildId, offerId, { status: 'REJECTED' });
+      
+      // Send DM notification to offerer (buyer)
+      try {
+        const offerer = await client.users.fetch(offer.offererId);
+        const tokenTicker = offer.priceTokenIdentifier.split('-')[0];
+        const nftDisplayName = offerListing.nftName || `${offerListing.collection}#${offerListing.nonce}`;
+        await offerer.send(`❌ **Your offer was rejected**\n\n**NFT:** ${nftDisplayName}\n**Collection:** ${offerListing.collection}\n**Your Offer:** ${offer.priceAmount} ${tokenTicker}\n**Seller:** ${interaction.user.tag}`);
+      } catch (dmError) {
+        console.error('[NFT-MARKETPLACE] Could not send DM to offerer:', dmError.message);
+      }
+      
+      // Update listing embed to reflect the rejected offer
+      await updateNFTListingEmbed(offerGuildId, offerListing.listingId);
       
       await interaction.editReply({ content: '✅ Offer rejected.', flags: [MessageFlags.Ephemeral] });
       
     } catch (error) {
       console.error('[NFT-MARKETPLACE] Error rejecting offer:', error);
-      if (interaction.deferred) {
-        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      try {
+        if (interaction.deferred && !interaction.replied) {
+          await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        } else if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        }
+      } catch (replyError) {
+        console.error('[NFT-MARKETPLACE] Could not send error message (interaction already handled):', replyError.message);
       }
     }
   }
@@ -13907,18 +14021,42 @@ client.on('interactionCreate', async (interaction) => {
                 .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
                 .setTimestamp();
               
-              await seller.send({ embeds: [dmEmbed] });
+              // Add Accept/Reject buttons to DM
+              const acceptButton = new ButtonBuilder()
+                .setCustomId(`nft-offer-accept:${offerId}`)
+                .setLabel('Accept Offer')
+                .setStyle(ButtonStyle.Success);
+              
+              const rejectButton = new ButtonBuilder()
+                .setCustomId(`nft-offer-reject:${offerId}`)
+                .setLabel('Reject Offer')
+                .setStyle(ButtonStyle.Danger);
+              
+              const dmButtonRow = new ActionRowBuilder().addComponents(acceptButton, rejectButton);
+              
+              await seller.send({ embeds: [dmEmbed], components: [dmButtonRow] });
               console.log(`[NFT-MARKETPLACE] Sent DM notification to seller ${listing.sellerId} about new offer`);
             }
           } catch (dmError) {
             console.error('[NFT-MARKETPLACE] Could not send DM to seller:', dmError.message);
           }
           
-          // Notify seller in thread
+          // Notify seller in thread (works for both regular threads and forum posts)
           try {
             const channel = await client.channels.fetch(listing.channelId);
             if (channel && listing.threadId) {
-              const thread = await channel.threads.cache.get(listing.threadId) || await channel.threads.fetch(listing.threadId);
+              // Try to get thread from channel's thread cache or fetch it
+              let thread = null;
+              
+              // Check if channel is a forum channel - threads are stored differently
+              if (channel.type === ChannelType.GuildForum) {
+                // For forum channels, threads are the posts themselves
+                thread = await channel.threads.fetch(listing.threadId);
+              } else {
+                // For regular channels, get thread from channel.threads
+                thread = channel.threads.cache.get(listing.threadId) || await channel.threads.fetch(listing.threadId);
+              }
+              
               if (thread) {
                 const offerEmbed = new EmbedBuilder()
                   .setTitle('💼 New Offer Received')
@@ -13944,6 +14082,7 @@ client.on('interactionCreate', async (interaction) => {
             }
           } catch (threadError) {
             console.error('[NFT-MARKETPLACE] Error posting offer to thread:', threadError.message);
+            // Don't fail the offer creation if thread posting fails - DM notification already sent with buttons
           }
           
           // Update listing embed to show offer count
@@ -14919,6 +15058,311 @@ client.on('ready', async () => {
   }, 60 * 60 * 1000); // Check every hour
   
   console.log('NFT marketplace cleanup scheduled (every hour)');
+  
+  // Set up periodic cleanup of old Discord embeds (listings and auctions)
+  // Runs once per day at 2 AM (in milliseconds: 2 hours * 60 minutes * 60 seconds * 1000)
+  const cleanupOldEmbeds = async () => {
+    try {
+      console.log('[CLEANUP] Starting cleanup of old Discord embeds...');
+      console.log('[CLEANUP] Looking for items older than 1 day with statuses:');
+      console.log('[CLEANUP]   Listings: CANCELLED, EXPIRED, SOLD');
+      console.log('[CLEANUP]   Auctions: FINISHED, CANCELLED, EXPIRED');
+      
+      const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+      const oneDayAgo = Date.now() - ONE_DAY_MS;
+      const LISTING_STATUSES = ['CANCELLED', 'EXPIRED', 'SOLD'];
+      const AUCTION_STATUSES = ['FINISHED', 'CANCELLED', 'EXPIRED'];
+      
+      console.log(`[CLEANUP] Cutoff time: ${new Date(oneDayAgo).toISOString()} (items created before this will be cleaned)`);
+      
+      let listingsDeleted = 0;
+      let auctionsDeleted = 0;
+      let errors = 0;
+      
+      // Clean up old listings
+      try {
+        const supabase = require('./supabase-client');
+        const { data: listings } = await supabase
+          .from('nft_listings')
+          .select('listing_id, guild_id, message_id, channel_id, thread_id, status, title')
+          .in('status', LISTING_STATUSES)
+          .lt('created_at', oneDayAgo)
+          .not('message_id', 'is', null)
+          .not('channel_id', 'is', null);
+        
+        if (listings && listings.length > 0) {
+          console.log(`[CLEANUP] Found ${listings.length} old listing(s) to clean up`);
+          for (const listing of listings) {
+            try {
+              const guild = await client.guilds.fetch(listing.guild_id).catch(() => null);
+              if (!guild) {
+                console.log(`[CLEANUP] Skipping listing ${listing.listing_id}: Guild not found`);
+                continue;
+              }
+              
+              const channel = await guild.channels.fetch(listing.channel_id).catch(() => null);
+              if (!channel) {
+                console.log(`[CLEANUP] Skipping listing ${listing.listing_id}: Channel not found`);
+                continue;
+              }
+              
+              // Check if it's a forum channel
+              const isForumChannel = channel.type === ChannelType.GuildForum;
+              
+              if (isForumChannel && listing.thread_id) {
+                // For forum channels, the thread IS the post - delete the thread
+                try {
+                  const thread = await channel.threads.fetch(listing.thread_id).catch(() => null);
+                  if (thread) {
+                    await thread.delete();
+                    console.log(`[CLEANUP] Deleted forum post/thread: ${listing.title} (${listing.listing_id})`);
+                    listingsDeleted++;
+                  } else {
+                    console.log(`[CLEANUP] Thread already deleted: ${listing.title} (${listing.listing_id})`);
+                  }
+                } catch (threadError) {
+                  if (threadError.code === 10003) {
+                    console.log(`[CLEANUP] Thread already deleted: ${listing.title} (${listing.listing_id})`);
+                  } else {
+                    console.error(`[CLEANUP] Error deleting thread ${listing.listing_id}:`, threadError.message);
+                    errors++;
+                  }
+                }
+              } else {
+                // For regular channels, delete the message
+                try {
+                  const message = await channel.messages.fetch(listing.message_id).catch(() => null);
+                  if (message) {
+                    await message.delete();
+                    console.log(`[CLEANUP] Deleted listing message: ${listing.title} (${listing.listing_id})`);
+                    listingsDeleted++;
+                  } else {
+                    console.log(`[CLEANUP] Message already deleted: ${listing.title} (${listing.listing_id})`);
+                  }
+                  
+                  // Also delete thread if it exists
+                  if (listing.thread_id) {
+                    const thread = await channel.threads.fetch(listing.thread_id).catch(() => null);
+                    if (thread) {
+                      await thread.delete().catch(() => {});
+                    }
+                  }
+                } catch (msgError) {
+                  if (msgError.code === 10008) {
+                    console.log(`[CLEANUP] Message already deleted: ${listing.title} (${listing.listing_id})`);
+                  } else {
+                    console.error(`[CLEANUP] Error deleting message ${listing.listing_id}:`, msgError.message);
+                    errors++;
+                  }
+                }
+              }
+              
+              await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (error) {
+              console.error(`[CLEANUP] Error processing listing ${listing.listing_id}:`, error.message);
+              errors++;
+            }
+          }
+        } else {
+          console.log('[CLEANUP] No old listings found to clean up');
+        }
+      } catch (error) {
+        console.error('[CLEANUP] Error cleaning up listings:', error.message);
+      }
+      
+      // Clean up old auctions
+      try {
+        // For finished auctions, we should check end_time (when they finished), not created_at
+        // For cancelled/expired, we can use created_at
+        // First, let's check what auctions exist with FINISHED status
+        const { data: allFinishedAuctions } = await supabase
+          .from('auctions')
+          .select('auction_id, guild_id, message_id, channel_id, thread_id, status, title, created_at, end_time')
+          .in('status', AUCTION_STATUSES)
+          .not('message_id', 'is', null)
+          .not('channel_id', 'is', null);
+        
+        console.log(`[CLEANUP] Found ${allFinishedAuctions?.length || 0} auction(s) with cleanup statuses (before age filter)`);
+        if (allFinishedAuctions && allFinishedAuctions.length > 0) {
+          console.log(`[CLEANUP] Sample auction data:`, allFinishedAuctions.slice(0, 3).map(a => ({ 
+            id: a.auction_id, 
+            status: a.status, 
+            created: a.created_at ? new Date(a.created_at).toISOString() : 'null',
+            ended: a.end_time ? new Date(a.end_time).toISOString() : 'null'
+          })));
+        }
+        
+        // Query: For FINISHED auctions, check end_time. For others, check created_at
+        // We'll filter in JavaScript to be more flexible
+        const { data: allAuctions, error: auctionError } = await supabase
+          .from('auctions')
+          .select('auction_id, guild_id, message_id, channel_id, thread_id, status, title, created_at, end_time')
+          .in('status', AUCTION_STATUSES)
+          .not('message_id', 'is', null)
+          .not('channel_id', 'is', null);
+        
+        if (auctionError) {
+          console.error('[CLEANUP] Error querying auctions:', auctionError);
+        }
+        
+        // Filter auctions: FINISHED ones use end_time, others use created_at
+        console.log(`[CLEANUP] Total auctions found with cleanup statuses: ${allAuctions?.length || 0}`);
+        
+        const auctions = (allAuctions || []).filter(auction => {
+          if (auction.status === 'FINISHED') {
+            // For finished auctions, check if they ended more than 1 day ago
+            const endedDaysAgo = auction.end_time ? Math.floor((Date.now() - auction.end_time) / (24 * 60 * 60 * 1000)) : null;
+            const shouldClean = auction.end_time && auction.end_time < oneDayAgo;
+            if (!shouldClean && auction.status === 'FINISHED') {
+              console.log(`[CLEANUP] Skipping FINISHED auction ${auction.auction_id.substring(0, 20)}... - ended ${endedDaysAgo} days ago (needs to be > 1 day)`);
+            }
+            return shouldClean;
+          } else {
+            // For cancelled/expired, check if created more than 1 day ago
+            const ageDays = auction.created_at ? Math.floor((Date.now() - auction.created_at) / (24 * 60 * 60 * 1000)) : null;
+            const shouldClean = auction.created_at && auction.created_at < oneDayAgo;
+            if (!shouldClean) {
+              console.log(`[CLEANUP] Skipping ${auction.status} auction ${auction.auction_id.substring(0, 20)}... - created ${ageDays} days ago (needs to be > 1 day)`);
+            }
+            return shouldClean;
+          }
+        });
+        
+        if (auctions && auctions.length > 0) {
+          console.log(`[CLEANUP] ✅ Found ${auctions.length} old auction(s) to clean up (older than 1 day)`);
+          console.log(`[CLEANUP] Auction details:`, auctions.map(a => ({
+            id: a.auction_id.substring(0, 30),
+            title: a.title,
+            status: a.status,
+            ended_days_ago: a.status === 'FINISHED' && a.end_time ? Math.floor((Date.now() - a.end_time) / (24 * 60 * 60 * 1000)) : 'N/A',
+            created_days_ago: a.created_at ? Math.floor((Date.now() - a.created_at) / (24 * 60 * 60 * 1000)) : 'N/A'
+          })));
+          for (const auction of auctions) {
+            try {
+              console.log(`[CLEANUP] Processing auction: ${auction.title} (${auction.auction_id.substring(0, 20)}...)`);
+              console.log(`[CLEANUP]   Guild ID: ${auction.guild_id}, Channel ID: ${auction.channel_id}, Message ID: ${auction.message_id}, Thread ID: ${auction.thread_id || 'none'}`);
+              
+              const guild = await client.guilds.fetch(auction.guild_id).catch((err) => {
+                console.error(`[CLEANUP] Error fetching guild ${auction.guild_id}:`, err.message, err.code);
+                return null;
+              });
+              if (!guild) {
+                console.log(`[CLEANUP] ❌ Skipping auction ${auction.auction_id.substring(0, 20)}...: Guild ${auction.guild_id} not found or bot not in guild`);
+                continue;
+              }
+              console.log(`[CLEANUP] ✅ Found guild: ${guild.name} (${guild.id})`);
+              
+              const channel = await guild.channels.fetch(auction.channel_id).catch((err) => {
+                console.error(`[CLEANUP] Error fetching channel ${auction.channel_id}:`, err.message, err.code);
+                return null;
+              });
+              if (!channel) {
+                console.log(`[CLEANUP] ❌ Skipping auction ${auction.auction_id.substring(0, 20)}...: Channel ${auction.channel_id} not found in guild ${guild.name}`);
+                continue;
+              }
+              console.log(`[CLEANUP] ✅ Found channel: ${channel.name} (${channel.id}), Type: ${channel.type}`);
+              
+              // Check if it's a forum channel
+              const isForumChannel = channel.type === ChannelType.GuildForum;
+              
+              console.log(`[CLEANUP] Channel type: ${channel.type}, Is Forum: ${isForumChannel}`);
+              
+              if (isForumChannel && auction.thread_id) {
+                // For forum channels, the thread IS the post - delete the thread
+                try {
+                  console.log(`[CLEANUP] Attempting to fetch and delete forum thread: ${auction.thread_id}`);
+                  const thread = await channel.threads.fetch(auction.thread_id).catch((err) => {
+                    console.error(`[CLEANUP] Error fetching thread ${auction.thread_id}:`, err.message, err.code);
+                    return null;
+                  });
+                  if (thread) {
+                    await thread.delete();
+                    console.log(`[CLEANUP] ✅ Deleted forum post/thread: ${auction.title} (${auction.auction_id})`);
+                    auctionsDeleted++;
+                  } else {
+                    console.log(`[CLEANUP] ⚠️ Thread not found (may already be deleted): ${auction.title} (${auction.auction_id})`);
+                  }
+                } catch (threadError) {
+                  if (threadError.code === 10003) {
+                    console.log(`[CLEANUP] ℹ️ Thread already deleted: ${auction.title} (${auction.auction_id})`);
+                  } else {
+                    console.error(`[CLEANUP] ❌ Error deleting thread ${auction.auction_id}:`, threadError.message, threadError.code);
+                    errors++;
+                  }
+                }
+              } else {
+                // For regular channels, delete the message
+                try {
+                  console.log(`[CLEANUP] Attempting to fetch and delete message: ${auction.message_id}`);
+                  const message = await channel.messages.fetch(auction.message_id).catch((err) => {
+                    console.error(`[CLEANUP] Error fetching message ${auction.message_id}:`, err.message, err.code);
+                    return null;
+                  });
+                  if (message) {
+                    await message.delete();
+                    console.log(`[CLEANUP] ✅ Deleted auction message: ${auction.title} (${auction.auction_id})`);
+                    auctionsDeleted++;
+                  } else {
+                    console.log(`[CLEANUP] ⚠️ Message not found (may already be deleted): ${auction.title} (${auction.auction_id})`);
+                  }
+                  
+                  // Also delete thread if it exists
+                  if (auction.thread_id) {
+                    console.log(`[CLEANUP] Attempting to delete thread: ${auction.thread_id}`);
+                    const thread = await channel.threads.fetch(auction.thread_id).catch(() => null);
+                    if (thread) {
+                      await thread.delete().catch((err) => {
+                        console.error(`[CLEANUP] Error deleting thread ${auction.thread_id}:`, err.message);
+                      });
+                    }
+                  }
+                } catch (msgError) {
+                  if (msgError.code === 10008) {
+                    console.log(`[CLEANUP] ℹ️ Message already deleted: ${auction.title} (${auction.auction_id})`);
+                  } else {
+                    console.error(`[CLEANUP] ❌ Error deleting message ${auction.auction_id}:`, msgError.message, msgError.code);
+                    errors++;
+                  }
+                }
+              }
+              
+              await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (error) {
+              console.error(`[CLEANUP] Error processing auction ${auction.auction_id}:`, error.message);
+              errors++;
+            }
+          }
+        } else {
+          if (allAuctions && allAuctions.length > 0) {
+            console.log(`[CLEANUP] ⚠️ Found ${allAuctions.length} auction(s) with cleanup statuses, but none are old enough (> 1 day)`);
+            console.log(`[CLEANUP] They will be cleaned up once they're older than 1 day`);
+          } else {
+            console.log('[CLEANUP] ℹ️ No auctions found with cleanup statuses (FINISHED, CANCELLED, EXPIRED)');
+          }
+        }
+      } catch (error) {
+        console.error('[CLEANUP] Error cleaning up auctions:', error.message);
+      }
+      
+      if (listingsDeleted > 0 || auctionsDeleted > 0) {
+        console.log(`[CLEANUP] ✅ Cleanup complete: ${listingsDeleted} listing(s) and ${auctionsDeleted} auction(s) deleted`);
+      } else if (errors > 0) {
+        console.log(`[CLEANUP] ⚠️ Cleanup completed with ${errors} error(s)`);
+      } else {
+        console.log(`[CLEANUP] ℹ️ No old embeds found to clean up (all listings/auctions are either active or less than 1 day old)`);
+      }
+    } catch (error) {
+      console.error('[CLEANUP] Error in cleanup task:', error.message);
+    }
+  };
+  
+  // Run cleanup once per day (24 hours)
+  setInterval(cleanupOldEmbeds, 24 * 60 * 60 * 1000);
+  
+  // Run cleanup on startup (after 10 seconds delay to let bot fully initialize)
+  setTimeout(cleanupOldEmbeds, 10 * 1000);
+  
+  console.log('Old Discord embeds cleanup scheduled (once per day, also runs on startup)');
   
   // Refresh football match pot sizes on startup (with delay to ensure data is loaded)
   setTimeout(() => {

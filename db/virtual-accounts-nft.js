@@ -602,6 +602,37 @@ async function getOffer(guildId, offerId) {
   }
 }
 
+async function getOfferById(offerId) {
+  try {
+    const { data, error } = await supabase
+      .from('nft_offers')
+      .select('*')
+      .eq('offer_id', offerId)
+      .single();
+    
+    if (error && error.code !== 'PGRST116') throw error;
+    
+    if (!data) return null;
+    
+    return {
+      offerId: data.offer_id,
+      guildId: data.guild_id,
+      listingId: data.listing_id,
+      offererId: data.offerer_id,
+      offererTag: data.offerer_tag,
+      priceTokenIdentifier: data.price_token_identifier,
+      priceAmount: data.price_amount,
+      status: data.status,
+      createdAt: data.created_at,
+      acceptedAt: data.accepted_at,
+      expiresAt: data.expires_at
+    };
+  } catch (error) {
+    console.error('[DB] Error getting offer by ID:', error);
+    throw error;
+  }
+}
+
 async function getOffersForListing(guildId, listingId) {
   try {
     const { data, error } = await supabase
@@ -766,6 +797,7 @@ module.exports = {
   // Offers
   createOffer,
   getOffer,
+  getOfferById,
   getOffersForListing,
   getUserOffers,
   updateOffer,
