@@ -776,6 +776,33 @@ const commands = [
         default_member_permissions: null,
     },
     {
+        name: 'show-my-nft',
+        description: 'View detailed information about an NFT in your Virtual Account',
+        options: [
+            {
+                name: 'collection',
+                description: 'NFT collection',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'nft-name',
+                description: 'NFT name or identifier',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'public',
+                description: 'Show NFT details publicly (default: private)',
+                type: ApplicationCommandOptionType.Boolean,
+                required: false
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
         name: 'withdraw-nft',
         description: 'Withdraw an NFT from your Virtual Account to your registered wallet',
         options: [
@@ -1096,6 +1123,19 @@ const commands = [
                 required: false,
                 min_value: 0,
                 max_value: 50
+            },
+            {
+                name: 'use_house_lottery_balance',
+                description: 'Use House Lottery balance to fund initial prize pool',
+                type: ApplicationCommandOptionType.Boolean,
+                required: false
+            },
+            {
+                name: 'initial_prize_pool',
+                description: 'Initial prize pool (only if use_house_lottery_balance). Defaults to full balance.',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 0.00000001
             }
         ],
         default_member_permissions: null, // Permissions checked in code

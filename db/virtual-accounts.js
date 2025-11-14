@@ -284,92 +284,6 @@ async function getTransactionHistory(guildId, userId, limit = 50) {
   }
 }
 
-// Clean up old transaction history (keep only last 100 transactions per user)
-async function cleanupOldTransactions() {
-  try {
-    let totalCleaned = 0;
-    let usersProcessed = 0;
-    
-    // Get all unique (guild_id, user_id) combinations
-    const { data: allAccounts, error: accountsError } = await supabase
-      .from('virtual_accounts')
-      .select('guild_id, user_id');
-    
-    if (accountsError) throw accountsError;
-    
-    if (!allAccounts || allAccounts.length === 0) {
-      return { totalCleaned: 0, usersProcessed: 0 };
-    }
-    
-    // Process each user's transactions
-    for (const account of allAccounts) {
-      try {
-        // Get transaction count for this user
-        const { count, error: countError } = await supabase
-          .from('virtual_account_transactions')
-          .select('*', { count: 'exact', head: true })
-          .eq('guild_id', account.guild_id)
-          .eq('user_id', account.user_id);
-        
-        if (countError) {
-          console.error(`[DB] Error counting transactions for user ${account.user_id} in guild ${account.guild_id}:`, countError);
-          continue;
-        }
-        
-        // If user has more than 100 transactions, keep only the latest 100
-        if (count > 100) {
-          // Get the timestamp of the 100th most recent transaction
-          const { data: transactions, error: transError } = await supabase
-            .from('virtual_account_transactions')
-            .select('timestamp')
-            .eq('guild_id', account.guild_id)
-            .eq('user_id', account.user_id)
-            .order('timestamp', { ascending: false })
-            .limit(1)
-            .range(99, 99); // Get the 100th transaction (0-indexed, so 99)
-          
-          if (transError) {
-            console.error(`[DB] Error getting cutoff timestamp for user ${account.user_id}:`, transError);
-            continue;
-          }
-          
-          if (transactions && transactions.length > 0) {
-            const cutoffTimestamp = transactions[0].timestamp;
-            
-            // Delete all transactions older than the cutoff timestamp
-            const { error: deleteError, count: deletedCount } = await supabase
-              .from('virtual_account_transactions')
-              .delete({ count: 'exact' })
-              .eq('guild_id', account.guild_id)
-              .eq('user_id', account.user_id)
-              .lt('timestamp', cutoffTimestamp);
-            
-            if (deleteError) {
-              console.error(`[DB] Error deleting old transactions for user ${account.user_id}:`, deleteError);
-              continue;
-            }
-            
-            totalCleaned += deletedCount || 0;
-          }
-        }
-        
-        usersProcessed++;
-      } catch (error) {
-        console.error(`[DB] Error processing cleanup for user ${account.user_id} in guild ${account.guild_id}:`, error);
-        continue;
-      }
-    }
-    
-    return {
-      totalCleaned,
-      usersProcessed
-    };
-  } catch (error) {
-    console.error('[DB] Error cleaning up old transactions:', error);
-    throw error;
-  }
-}
-
 // Get server-wide virtual accounts summary
 async function getServerVirtualAccountsSummary(guildId) {
   try {
@@ -471,7 +385,6 @@ module.exports = {
   updateAccountBalance,
   addTransaction,
   getTransactionHistory,
-  cleanupOldTransactions,
   getServerVirtualAccountsSummary
 };
 

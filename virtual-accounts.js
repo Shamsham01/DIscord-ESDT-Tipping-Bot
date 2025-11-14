@@ -247,16 +247,6 @@ async function getUserTransactionHistory(guildId, userId, limit = 20) {
   }
 }
 
-// Clean up old transaction history (keep only last 100 transactions per user)
-async function cleanupOldTransactions() {
-  try {
-    return await dbVirtualAccounts.cleanupOldTransactions();
-  } catch (error) {
-    console.error(`[VIRTUAL] Error cleaning up old transactions:`, error.message);
-    return { totalCleaned: 0, usersProcessed: 0 };
-  }
-}
-
 // Get server-wide virtual accounts summary
 async function getServerVirtualAccountsSummary(guildId) {
   try {
@@ -400,6 +390,5 @@ module.exports = {
   forceReloadData,
   updateUserUsername,
   updateAllUsernamesInGuild,
-  cleanupOldTransactions,
   getAllVirtualAccountsWithBalances
 };

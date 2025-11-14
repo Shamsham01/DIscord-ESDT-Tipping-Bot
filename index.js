@@ -2964,23 +2964,15 @@ client.on('interactionCreate', async (interaction) => {
       }
       // For virtual_account, nftDetails is already set above
 
-      // Extract NFT image URL
+      // Extract NFT image URL using robust fallback strategy
       let nftImageUrl = null;
       if (source === 'virtual_account') {
         // Get image from virtual account NFT data
         const nft = await virtualAccountsNFT.getUserNFTBalance(guildId, sellerId, collection, nftDetails.nonce);
-        if (nft && nft.nft_image_url) {
-          nftImageUrl = nft.nft_image_url;
-        }
+        nftImageUrl = await extractNFTImageUrl(nftDetails, nft?.nft_image_url);
       } else {
-        // Get image from API response
-        if (nftDetails.url) {
-          nftImageUrl = nftDetails.url;
-        } else if (nftDetails.media && nftDetails.media.length > 0 && nftDetails.media[0].url) {
-          nftImageUrl = nftDetails.media[0].url;
-        } else if (nftDetails.media && nftDetails.media.length > 0 && nftDetails.media[0].thumbnailUrl) {
-          nftImageUrl = nftDetails.media[0].thumbnailUrl;
-        }
+        // Get image from API response using robust fallback
+        nftImageUrl = await extractNFTImageUrl(nftDetails);
       }
 
       // Generate unique auction ID
@@ -2989,14 +2981,45 @@ client.on('interactionCreate', async (interaction) => {
       // Calculate end time
       const endTime = Date.now() + (duration * 60 * 60 * 1000);
       
+      // Fetch token price for USD valuation
+      let tokenPriceUsd = 0;
+      try {
+        const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+        if (priceResponse.ok) {
+          const priceData = await priceResponse.json();
+          tokenPriceUsd = priceData.price || 0;
+        }
+      } catch (error) {
+        console.error('[AUCTIONS] Error fetching token price:', error.message);
+      }
+      
+      // Calculate USD values
+      const startingAmountUsd = tokenPriceUsd > 0 
+        ? new BigNumber(startingAmount).multipliedBy(tokenPriceUsd).toFixed(2)
+        : null;
+      const minBidIncreaseUsd = tokenPriceUsd > 0 
+        ? new BigNumber(minBidIncrease).multipliedBy(tokenPriceUsd).toFixed(2)
+        : null;
+      
+      // Format display values
+      const startingAmountDisplay = startingAmountUsd 
+        ? `${startingAmount} ${tokenTicker} (≈ $${startingAmountUsd})`
+        : `${startingAmount} ${tokenTicker}`;
+      const currentBidDisplay = startingAmountUsd
+        ? `${startingAmount} ${tokenTicker} (≈ $${startingAmountUsd}) (No bids yet)`
+        : `${startingAmount} ${tokenTicker} (No bids yet)`;
+      const minBidIncreaseDisplay = minBidIncreaseUsd
+        ? `${minBidIncrease} ${tokenTicker} (≈ $${minBidIncreaseUsd})`
+        : `${minBidIncrease} ${tokenTicker}`;
+      
       // Create auction embed
       const auctionEmbed = new EmbedBuilder()
         .setTitle(title)
         .setDescription(`${description}\n\n**NFT:** ${nftName}\n**Collection:** ${collection}\n**Nonce:** ${nftDetails.nonce}`)
         .addFields([
-          { name: 'Starting Amount', value: `${startingAmount} ${tokenTicker}`, inline: true },
-          { name: 'Current Bid', value: `${startingAmount} ${tokenTicker} (No bids yet)`, inline: true },
-          { name: 'Minimum Increase', value: `${minBidIncrease} ${tokenTicker}`, inline: true },
+          { name: 'Starting Amount', value: startingAmountDisplay, inline: true },
+          { name: 'Current Bid', value: currentBidDisplay, inline: true },
+          { name: 'Minimum Increase', value: minBidIncreaseDisplay, inline: true },
           { name: 'Token', value: tokenTicker, inline: true },
           { name: 'Time Remaining', value: `<t:${Math.floor(endTime / 1000)}:R>`, inline: true },
           { name: 'Status', value: '🟢 Active', inline: true }
@@ -4959,6 +4982,7 @@ client.on('interactionCreate', async (interaction) => {
         '🖼️ Virtual Accounts (NFT)': [
           '`/check-balance-nft` - View your NFT virtual account balance',
           '`/balance-history-nft` - View your NFT transaction history',
+          '`/show-my-nft` - View detailed information about an NFT (image, attributes, metadata)',
           '`/tip-virtual-nft` - Tip another user an NFT from your virtual account',
           '`/sell-nft` - List an NFT for sale on the marketplace',
           '`/withdraw-nft` - Withdraw an NFT to your registered wallet'
@@ -7038,6 +7062,603 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (commandName === 'show-my-nft') {
+    try {
+      const collection = interaction.options.getString('collection');
+      const nftName = interaction.options.getString('nft-name');
+      const isPublic = interaction.options.getBoolean('public') || false;
+      await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      // Get user's NFTs in the collection
+      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collection);
+      
+      if (!userNFTs || userNFTs.length === 0) {
+        await interaction.editReply({ 
+          content: `❌ **NFT not found!**\n\nYou don't own any NFTs in collection "${collection}" in your virtual account.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Find the specific NFT by name
+      const nft = userNFTs.find(n => 
+        (n.nft_name && n.nft_name.toLowerCase() === nftName.toLowerCase()) ||
+        `${collection}#${n.nonce}` === nftName ||
+        (n.nft_name && `${collection}#${n.nonce}`.toLowerCase() === nftName.toLowerCase())
+      );
+      
+      if (!nft) {
+        await interaction.editReply({ 
+          content: `❌ **NFT not found!**\n\nNFT "${nftName}" not found in your collection "${collection}".`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Fetch full NFT details from MultiversX API
+      let nftDetails = null;
+      let nftImageUrl = nft.nft_image_url;
+      let attributes = [];
+      let metadata = nft.metadata || {};
+      
+      // Helper function to convert IPFS URL to HTTP gateway URL
+      const convertIPFSToGateway = (ipfsUrl) => {
+        if (!ipfsUrl) return ipfsUrl;
+        if (ipfsUrl.startsWith('ipfs://')) {
+          const ipfsHash = ipfsUrl.replace('ipfs://', '');
+          return `https://ipfs.io/ipfs/${ipfsHash}`;
+        }
+        return ipfsUrl;
+      };
+      
+      // Convert stored image URL if it's IPFS
+      if (nftImageUrl && nftImageUrl.startsWith('ipfs://')) {
+        nftImageUrl = convertIPFSToGateway(nftImageUrl);
+      }
+      
+      try {
+        await interaction.editReply({ content: '🔄 Fetching NFT details from MultiversX...', flags: [MessageFlags.Ephemeral] });
+        
+        const nftUrl = `https://api.multiversx.com/nfts/${nft.identifier}`;
+        const nftResponse = await fetch(nftUrl);
+        
+        if (nftResponse.ok) {
+          nftDetails = await nftResponse.json();
+          
+          // Decode URIs array to get IPFS URLs (standard MultiversX format)
+          let ipfsImageUrl = null;
+          let ipfsJsonUrl = null;
+          if (nftDetails.uris && Array.isArray(nftDetails.uris) && nftDetails.uris.length > 0) {
+            for (const uri of nftDetails.uris) {
+              try {
+                const decodedUri = Buffer.from(uri, 'base64').toString('utf-8');
+                console.log(`[SHOW-NFT] Decoded URI: ${decodedUri}`);
+                
+                if (decodedUri.includes('.png') || decodedUri.includes('.jpg') || decodedUri.includes('.jpeg') || decodedUri.includes('.gif') || decodedUri.includes('.webp')) {
+                  ipfsImageUrl = decodedUri;
+                } else if (decodedUri.includes('.json')) {
+                  ipfsJsonUrl = decodedUri;
+                }
+              } catch (uriError) {
+                console.log(`[SHOW-NFT] Could not decode URI: ${uriError.message}`);
+              }
+            }
+          }
+          
+          // Update image URL if available from API - check multiple sources
+          if (nftDetails.url && !nftDetails.url.includes('default.png')) {
+            nftImageUrl = convertIPFSToGateway(nftDetails.url);
+          } else if (ipfsImageUrl) {
+            nftImageUrl = convertIPFSToGateway(ipfsImageUrl);
+            console.log(`[SHOW-NFT] Using image from decoded URIs: ${nftImageUrl}`);
+          } else if (nftDetails.media && nftDetails.media.length > 0) {
+            const mediaUrl = nftDetails.media[0].url || nftDetails.media[0].thumbnailUrl;
+            if (mediaUrl && !mediaUrl.includes('default.png')) {
+              nftImageUrl = convertIPFSToGateway(mediaUrl);
+            }
+          }
+          
+          // Also check for image in metadata
+          if (!nftImageUrl && nftDetails.metadata) {
+            try {
+              if (typeof nftDetails.metadata === 'string') {
+                const decoded = Buffer.from(nftDetails.metadata, 'base64').toString('utf-8');
+                const parsed = JSON.parse(decoded);
+                if (parsed.image) {
+                  nftImageUrl = convertIPFSToGateway(parsed.image);
+                }
+              } else if (typeof nftDetails.metadata === 'object' && nftDetails.metadata.image) {
+                nftImageUrl = convertIPFSToGateway(nftDetails.metadata.image);
+              }
+            } catch (metaError) {
+              // Ignore metadata parsing errors for image
+            }
+          }
+          
+          // Decode attributes field to extract metadata URI (MultiversX standard format)
+          if (nftDetails.attributes && typeof nftDetails.attributes === 'string') {
+            try {
+              const decodedAttributes = Buffer.from(nftDetails.attributes, 'base64').toString('utf-8');
+              console.log(`[SHOW-NFT] Decoded attributes field: ${decodedAttributes}`);
+              
+              // Parse format: "tags:...;metadata:..."
+              const metadataMatch = decodedAttributes.match(/metadata:([^\s;]+)/);
+              if (metadataMatch && metadataMatch[1]) {
+                let metadataPath = metadataMatch[1];
+                // If it's just a path, construct full IPFS URL
+                if (!metadataPath.startsWith('http') && !metadataPath.startsWith('ipfs://')) {
+                  // Extract IPFS hash from other URIs or use the path directly
+                  if (ipfsJsonUrl) {
+                    // Use the decoded JSON URI we already found
+                    console.log(`[SHOW-NFT] Using JSON URI from uris array: ${ipfsJsonUrl}`);
+                  } else {
+                    // Try to construct from hash if available
+                    if (nftDetails.hash) {
+                      try {
+                        const hashDecoded = Buffer.from(nftDetails.hash, 'base64').toString('utf-8');
+                        metadataPath = `ipfs://${hashDecoded}/${metadataPath}`;
+                        console.log(`[SHOW-NFT] Constructed metadata path: ${metadataPath}`);
+                      } catch (hashError) {
+                        console.log(`[SHOW-NFT] Could not decode hash: ${hashError.message}`);
+                      }
+                    }
+                  }
+                } else {
+                  metadataPath = metadataMatch[1];
+                }
+                
+                // Use the JSON URL from uris if we have it, otherwise use the constructed path
+                const jsonUrlToFetch = ipfsJsonUrl || (metadataPath.startsWith('ipfs://') ? metadataPath : `ipfs://${metadataPath}`);
+                console.log(`[SHOW-NFT] Will fetch metadata from: ${jsonUrlToFetch}`);
+                
+                // Helper function to fetch JSON and extract attributes
+                const fetchJsonMetadata = async (url) => {
+                  if (url.startsWith('ipfs://')) {
+                    const ipfsHash = url.replace('ipfs://', '');
+                    const ipfsGateways = [
+                      `https://ipfs.io/ipfs/${ipfsHash}`,
+                      `https://cloudflare-ipfs.com/ipfs/${ipfsHash}`,
+                      `https://gateway.pinata.cloud/ipfs/${ipfsHash}`,
+                      `https://dweb.link/ipfs/${ipfsHash}`
+                    ];
+                    
+                    // Try each gateway until one works
+                    for (const gateway of ipfsGateways) {
+                      let timeoutId = null;
+                      try {
+                        console.log(`[SHOW-NFT] Attempting to fetch JSON metadata from ${gateway}`);
+                        const controller = new AbortController();
+                        timeoutId = setTimeout(() => controller.abort(), 5000);
+                        const ipfsResponse = await fetch(gateway, { 
+                          signal: controller.signal
+                        });
+                        if (timeoutId) clearTimeout(timeoutId);
+                        
+                        if (ipfsResponse.ok) {
+                          const ipfsData = await ipfsResponse.json();
+                          console.log(`[SHOW-NFT] Successfully fetched JSON metadata from ${gateway}`);
+                          
+                          // Extract attributes from IPFS JSON metadata
+                          if (ipfsData.attributes && Array.isArray(ipfsData.attributes)) {
+                            attributes = ipfsData.attributes;
+                            console.log(`[SHOW-NFT] Found ${attributes.length} attributes from IPFS JSON metadata`);
+                            
+                            // Also update image URL if found in IPFS JSON metadata
+                            if (ipfsData.image && !nftImageUrl) {
+                              nftImageUrl = convertIPFSToGateway(ipfsData.image);
+                              console.log(`[SHOW-NFT] Updated image URL from IPFS JSON metadata: ${nftImageUrl}`);
+                            }
+                            return true; // Success
+                          } else if (ipfsData.traits && Array.isArray(ipfsData.traits)) {
+                            attributes = ipfsData.traits;
+                            console.log(`[SHOW-NFT] Found ${attributes.length} traits from IPFS JSON metadata`);
+                            
+                            // Also update image URL if found in IPFS JSON metadata
+                            if (ipfsData.image && !nftImageUrl) {
+                              nftImageUrl = convertIPFSToGateway(ipfsData.image);
+                              console.log(`[SHOW-NFT] Updated image URL from IPFS JSON metadata: ${nftImageUrl}`);
+                            }
+                            return true; // Success
+                          }
+                        }
+                      } catch (ipfsError) {
+                        if (timeoutId) clearTimeout(timeoutId);
+                        console.log(`[SHOW-NFT] Failed to fetch JSON from ${gateway}:`, ipfsError.message);
+                        continue;
+                      }
+                    }
+                  } else if (url.startsWith('http')) {
+                    // Direct HTTP URL
+                    try {
+                      console.log(`[SHOW-NFT] Fetching JSON metadata from direct URL: ${url}`);
+                      const controller = new AbortController();
+                      const timeoutId = setTimeout(() => controller.abort(), 5000);
+                      const jsonResponse = await fetch(url, { 
+                        signal: controller.signal
+                      });
+                      clearTimeout(timeoutId);
+                      
+                      if (jsonResponse.ok) {
+                        const jsonData = await jsonResponse.json();
+                        if (jsonData.attributes && Array.isArray(jsonData.attributes)) {
+                          attributes = jsonData.attributes;
+                          console.log(`[SHOW-NFT] Found ${attributes.length} attributes from direct JSON URL`);
+                          
+                          // Also update image URL if found
+                          if (jsonData.image && !nftImageUrl) {
+                            nftImageUrl = convertIPFSToGateway(jsonData.image);
+                            console.log(`[SHOW-NFT] Updated image URL from JSON metadata: ${nftImageUrl}`);
+                          }
+                          return true; // Success
+                        } else if (jsonData.traits && Array.isArray(jsonData.traits)) {
+                          attributes = jsonData.traits;
+                          console.log(`[SHOW-NFT] Found ${attributes.length} traits from direct JSON URL`);
+                          
+                          // Also update image URL if found
+                          if (jsonData.image && !nftImageUrl) {
+                            nftImageUrl = convertIPFSToGateway(jsonData.image);
+                            console.log(`[SHOW-NFT] Updated image URL from JSON metadata: ${nftImageUrl}`);
+                          }
+                          return true; // Success
+                        }
+                      }
+                    } catch (jsonError) {
+                      console.log(`[SHOW-NFT] Failed to fetch from direct URL: ${jsonError.message}`);
+                    }
+                  }
+                  return false; // Failed
+                };
+                
+                // Try fetching from the JSON URL
+                await fetchJsonMetadata(jsonUrlToFetch);
+              }
+            } catch (attrError) {
+              console.log(`[SHOW-NFT] Could not decode attributes field: ${attrError.message}`);
+            }
+          }
+          
+          // If we still don't have attributes and we have a JSON URL from uris, try fetching it directly
+          if (attributes.length === 0 && ipfsJsonUrl) {
+            console.log(`[SHOW-NFT] Attempting to fetch attributes from uris JSON URL: ${ipfsJsonUrl}`);
+            const fetchJsonMetadata = async (url) => {
+              if (url.startsWith('ipfs://')) {
+                const ipfsHash = url.replace('ipfs://', '');
+                const ipfsGateways = [
+                  `https://ipfs.io/ipfs/${ipfsHash}`,
+                  `https://cloudflare-ipfs.com/ipfs/${ipfsHash}`,
+                  `https://gateway.pinata.cloud/ipfs/${ipfsHash}`,
+                  `https://dweb.link/ipfs/${ipfsHash}`
+                ];
+                
+                for (const gateway of ipfsGateways) {
+                  let timeoutId = null;
+                  try {
+                    console.log(`[SHOW-NFT] Attempting to fetch JSON metadata from ${gateway}`);
+                    const controller = new AbortController();
+                    timeoutId = setTimeout(() => controller.abort(), 5000);
+                    const ipfsResponse = await fetch(gateway, { 
+                      signal: controller.signal
+                    });
+                    if (timeoutId) clearTimeout(timeoutId);
+                    
+                    if (ipfsResponse.ok) {
+                      const ipfsData = await ipfsResponse.json();
+                      if (ipfsData.attributes && Array.isArray(ipfsData.attributes)) {
+                        attributes = ipfsData.attributes;
+                        console.log(`[SHOW-NFT] Found ${attributes.length} attributes from uris JSON URL`);
+                        if (ipfsData.image && !nftImageUrl) {
+                          nftImageUrl = convertIPFSToGateway(ipfsData.image);
+                        }
+                        return true;
+                      } else if (ipfsData.traits && Array.isArray(ipfsData.traits)) {
+                        attributes = ipfsData.traits;
+                        console.log(`[SHOW-NFT] Found ${attributes.length} traits from uris JSON URL`);
+                        if (ipfsData.image && !nftImageUrl) {
+                          nftImageUrl = convertIPFSToGateway(ipfsData.image);
+                        }
+                        return true;
+                      }
+                    }
+                  } catch (ipfsError) {
+                    if (timeoutId) clearTimeout(timeoutId);
+                    continue;
+                  }
+                }
+              } else if (url.startsWith('http')) {
+                try {
+                  const controller = new AbortController();
+                  const timeoutId = setTimeout(() => controller.abort(), 5000);
+                  const jsonResponse = await fetch(url, { 
+                    signal: controller.signal
+                  });
+                  clearTimeout(timeoutId);
+                  
+                  if (jsonResponse.ok) {
+                    const jsonData = await jsonResponse.json();
+                    if (jsonData.attributes && Array.isArray(jsonData.attributes)) {
+                      attributes = jsonData.attributes;
+                      console.log(`[SHOW-NFT] Found ${attributes.length} attributes from uris JSON URL`);
+                      if (jsonData.image && !nftImageUrl) {
+                        nftImageUrl = convertIPFSToGateway(jsonData.image);
+                      }
+                      return true;
+                    } else if (jsonData.traits && Array.isArray(jsonData.traits)) {
+                      attributes = jsonData.traits;
+                      console.log(`[SHOW-NFT] Found ${attributes.length} traits from uris JSON URL`);
+                      if (jsonData.image && !nftImageUrl) {
+                        nftImageUrl = convertIPFSToGateway(jsonData.image);
+                      }
+                      return true;
+                    }
+                  }
+                } catch (jsonError) {
+                  console.log(`[SHOW-NFT] Failed to fetch from uris JSON URL: ${jsonError.message}`);
+                }
+              }
+              return false;
+            };
+            await fetchJsonMetadata(ipfsJsonUrl);
+          }
+          
+          // Extract attributes - check multiple possible locations
+          if (nftDetails.attributes && Array.isArray(nftDetails.attributes) && nftDetails.attributes.length > 0) {
+            attributes = nftDetails.attributes;
+            console.log(`[SHOW-NFT] Found ${attributes.length} attributes from nftDetails.attributes for ${nft.identifier}`);
+          } else if (nftDetails.metadata) {
+            // Check if metadata is an object with attributes
+            if (typeof nftDetails.metadata === 'object' && !Array.isArray(nftDetails.metadata)) {
+              if (nftDetails.metadata.attributes && Array.isArray(nftDetails.metadata.attributes)) {
+                attributes = nftDetails.metadata.attributes;
+                console.log(`[SHOW-NFT] Found ${attributes.length} attributes from metadata.attributes for ${nft.identifier}`);
+              }
+            } else if (typeof nftDetails.metadata === 'string') {
+              // Try to decode base64 metadata if present
+              try {
+                const decoded = Buffer.from(nftDetails.metadata, 'base64').toString('utf-8');
+                const parsed = JSON.parse(decoded);
+                
+                // Check if it contains an IPFS URL for metadata
+                if (parsed.metadataUri || parsed.metadata_url || parsed.uri) {
+                  const ipfsUrl = parsed.metadataUri || parsed.metadata_url || parsed.uri;
+                  console.log(`[SHOW-NFT] Found IPFS metadata URL in decoded metadata: ${ipfsUrl}`);
+                  
+                  // Try to fetch from IPFS
+                  if (ipfsUrl.startsWith('ipfs://')) {
+                    const ipfsHash = ipfsUrl.replace('ipfs://', '');
+                    const ipfsGateways = [
+                      `https://ipfs.io/ipfs/${ipfsHash}`,
+                      `https://cloudflare-ipfs.com/ipfs/${ipfsHash}`,
+                      `https://gateway.pinata.cloud/ipfs/${ipfsHash}`,
+                      `https://dweb.link/ipfs/${ipfsHash}`
+                    ];
+                    
+                    // Try each gateway until one works
+                    for (const gateway of ipfsGateways) {
+                      let timeoutId = null;
+                      try {
+                        console.log(`[SHOW-NFT] Attempting to fetch metadata from ${gateway}`);
+                        const controller = new AbortController();
+                        timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+                        const ipfsResponse = await fetch(gateway, { 
+                          signal: controller.signal
+                        });
+                        if (timeoutId) clearTimeout(timeoutId);
+                        
+                        if (ipfsResponse.ok) {
+                          const ipfsData = await ipfsResponse.json();
+                          console.log(`[SHOW-NFT] Successfully fetched IPFS metadata from ${gateway}`);
+                          
+                          // Extract attributes from IPFS metadata
+                          if (ipfsData.attributes && Array.isArray(ipfsData.attributes)) {
+                            attributes = ipfsData.attributes;
+                            console.log(`[SHOW-NFT] Found ${attributes.length} attributes from IPFS metadata`);
+                            break;
+                          } else if (ipfsData.traits && Array.isArray(ipfsData.traits)) {
+                            // Some NFTs use "traits" instead of "attributes"
+                            attributes = ipfsData.traits;
+                            console.log(`[SHOW-NFT] Found ${attributes.length} traits from IPFS metadata`);
+                            break;
+                          }
+                          
+                          // Also update image URL if found in IPFS metadata (prefer IPFS metadata image)
+                          if (ipfsData.image) {
+                            nftImageUrl = convertIPFSToGateway(ipfsData.image);
+                            console.log(`[SHOW-NFT] Updated image URL from IPFS metadata: ${nftImageUrl}`);
+                          }
+                        }
+                      } catch (ipfsError) {
+                        if (timeoutId) clearTimeout(timeoutId);
+                        console.log(`[SHOW-NFT] Failed to fetch from ${gateway}:`, ipfsError.message);
+                        continue; // Try next gateway
+                      }
+                    }
+                  }
+                }
+                
+                // Also check if attributes are directly in the decoded JSON
+                if (attributes.length === 0 && parsed.attributes && Array.isArray(parsed.attributes)) {
+                  attributes = parsed.attributes;
+                  console.log(`[SHOW-NFT] Found ${attributes.length} attributes from decoded base64 metadata for ${nft.identifier}`);
+                } else if (attributes.length === 0 && parsed.traits && Array.isArray(parsed.traits)) {
+                  attributes = parsed.traits;
+                  console.log(`[SHOW-NFT] Found ${attributes.length} traits from decoded base64 metadata for ${nft.identifier}`);
+                }
+              } catch (decodeError) {
+                console.log(`[SHOW-NFT] Could not decode base64 metadata for ${nft.identifier}:`, decodeError.message);
+              }
+            }
+          }
+          
+          // Fallback to stored metadata
+          if (attributes.length === 0 && metadata.attributes && Array.isArray(metadata.attributes) && metadata.attributes.length > 0) {
+            attributes = metadata.attributes;
+            console.log(`[SHOW-NFT] Found ${attributes.length} attributes from stored metadata for ${nft.identifier}`);
+          }
+          
+          // Log for debugging if no attributes found
+          if (attributes.length === 0) {
+            console.log(`[SHOW-NFT] No attributes found for ${nft.identifier}. API response keys:`, Object.keys(nftDetails));
+            if (nftDetails.metadata) {
+              console.log(`[SHOW-NFT] Metadata type:`, typeof nftDetails.metadata, 'Is array:', Array.isArray(nftDetails.metadata));
+              if (typeof nftDetails.metadata === 'object') {
+                console.log(`[SHOW-NFT] Metadata keys:`, Object.keys(nftDetails.metadata));
+              }
+            }
+          }
+          
+          // Merge metadata
+          metadata = {
+            ...metadata,
+            collection: nftDetails.collection || collection,
+            ticker: nftDetails.ticker || null,
+            owner: nftDetails.owner || null,
+            supply: nftDetails.supply || null,
+            decimals: nftDetails.decimals || null
+          };
+        }
+      } catch (fetchError) {
+        console.error(`[SHOW-NFT] Error fetching NFT details for ${nft.identifier}:`, fetchError.message);
+        // Continue with stored metadata if API fetch fails
+        if (metadata.attributes && Array.isArray(metadata.attributes)) {
+          attributes = metadata.attributes;
+        }
+      }
+      
+      // Create beautiful embed
+      const nftDisplayName = nft.nft_name || `${collection}#${nft.nonce}`;
+      const explorerUrl = `https://explorer.multiversx.com/nfts/${nft.identifier}/transactions`;
+      const embed = new EmbedBuilder()
+        .setTitle(`🖼️ ${nftDisplayName}`)
+        .setDescription(`**Collection:** ${collection}\n**Identifier:** [${nft.identifier}](${explorerUrl})\n**Nonce:** ${nft.nonce}`)
+        .setColor(0x00FF00)
+        .setTimestamp()
+        .setFooter({ text: `Owned by ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL() });
+      
+      // Set image/thumbnail
+      if (nftImageUrl) {
+        embed.setImage(nftImageUrl);
+      } else {
+        embed.setThumbnail('https://i.ibb.co/FkZdFMPz/NFT-Wallet-Logo.png');
+      }
+      
+      // Add supply if available
+      if (metadata.supply) {
+        embed.addFields({
+          name: '📊 Supply',
+          value: metadata.supply.toString(),
+          inline: true
+        });
+      }
+      
+      // Add section separator before attributes
+      if (attributes && attributes.length > 0) {
+        embed.addFields({
+          name: '━━━━━━━━━━━━━━━━━━━━',
+          value: '**Attributes & Traits**',
+          inline: false
+        });
+      }
+      
+      // Add attributes section
+      if (attributes && attributes.length > 0) {
+        // Group attributes by trait type for better display
+        const attributesByType = {};
+        for (const attr of attributes) {
+          // Handle different attribute formats
+          let traitType = 'Other';
+          let value = '';
+          
+          if (typeof attr === 'string') {
+            // If attribute is a string, try to parse it
+            try {
+              const parsed = JSON.parse(attr);
+              traitType = parsed.trait_type || parsed.name || parsed.key || 'Other';
+              value = parsed.value || parsed.val || attr;
+            } catch {
+              traitType = 'Other';
+              value = attr;
+            }
+          } else if (typeof attr === 'object') {
+            traitType = attr.trait_type || attr.name || attr.key || attr.type || 'Other';
+            value = attr.value || attr.val || attr.toString();
+          } else {
+            value = String(attr);
+          }
+          
+          if (!attributesByType[traitType]) {
+            attributesByType[traitType] = [];
+          }
+          attributesByType[traitType].push({ value, rarity: attr.rarity || attr.rarityPercent || null });
+        }
+        
+        // Add attributes as fields (Discord limit: 25 fields, 1024 chars per field)
+        let attributeFieldsAdded = 0;
+        for (const [traitType, attrs] of Object.entries(attributesByType)) {
+          if (attributeFieldsAdded >= 20) break; // Leave room for other fields
+          
+          const attrValues = attrs.map(attr => {
+            const displayValue = attr.value || 'N/A';
+            const rarity = attr.rarity ? ` (${attr.rarity}%)` : '';
+            return `• **${displayValue}**${rarity}`;
+          }).join('\n');
+          
+          // Truncate if too long
+          const fieldValue = attrValues.length > 1024 
+            ? attrValues.substring(0, 1021) + '...'
+            : attrValues;
+          
+          embed.addFields({
+            name: traitType,
+            value: fieldValue || 'N/A',
+            inline: true
+          });
+          
+          attributeFieldsAdded++;
+        }
+        
+        // If we have more attributes, add a summary
+        if (attributes.length > attributeFieldsAdded * 3) {
+          embed.addFields({
+            name: '📋 Attributes Summary',
+            value: `**Total Attributes:** ${attributes.length}\n**Trait Types:** ${Object.keys(attributesByType).length}`,
+            inline: false
+          });
+        }
+      } else {
+        embed.addFields({
+          name: '━━━━━━━━━━━━━━━━━━━━',
+          value: '**Attributes & Traits**\nNo attributes available for this NFT',
+          inline: false
+        });
+      }
+      
+      // Add ownership section separator
+      embed.addFields({
+        name: '━━━━━━━━━━━━━━━━━━━━',
+        value: '**Ownership Information**',
+        inline: false
+      });
+      
+      // Add ownership info
+      embed.addFields({
+        name: 'Status',
+        value: `**In Virtual Account**\n**Owner:** ${interaction.user.tag}\n**Added:** <t:${Math.floor(new Date(nft.created_at).getTime() / 1000)}:R>`,
+        inline: false
+      });
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (error) {
+      console.error('Error in show-my-nft command:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
   } else if (commandName === 'sell-nft') {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
@@ -7187,12 +7808,30 @@ client.on('interactionCreate', async (interaction) => {
         expiresAt = Date.now() + (expiresInHours * 60 * 60 * 1000);
       }
       
+      // Fetch token price for USD valuation
+      let priceUsd = 0;
+      try {
+        const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+        if (priceResponse.ok) {
+          const priceData = await priceResponse.json();
+          const tokenPriceUsd = priceData.price || 0;
+          priceUsd = new BigNumber(priceAmount).multipliedBy(tokenPriceUsd).toNumber();
+        }
+      } catch (error) {
+        console.error('[NFT-MARKETPLACE] Error fetching token price:', error.message);
+      }
+      
+      // Format price with USD value
+      const priceDisplay = priceUsd > 0 
+        ? `${priceAmount} ${displayTicker} (≈ $${priceUsd.toFixed(2)})`
+        : `${priceAmount} ${displayTicker}`;
+      
       // Create listing embed
       const listingEmbed = new EmbedBuilder()
         .setTitle(title)
         .setDescription(`${description}\n\n**NFT:** ${nft.nft_name || `${collection}#${nft.nonce}`}\n**Collection:** ${collection}\n**Nonce:** ${nft.nonce}`)
         .addFields([
-          { name: '💰 Price', value: `${priceAmount} ${displayTicker}`, inline: true },
+          { name: '💰 Price', value: priceDisplay, inline: true },
           { name: '📋 Listing Type', value: listingType === 'fixed_price' ? 'Fixed Price' : 'Accept Offers', inline: true },
           { name: '👤 Seller', value: `<@${userId}>`, inline: true },
           { name: '📊 Status', value: '🟢 Active', inline: true }
@@ -7207,8 +7846,23 @@ client.on('interactionCreate', async (interaction) => {
         ]);
       }
       
-      if (nft.nft_image_url) {
-        listingEmbed.setThumbnail(nft.nft_image_url);
+      // Fetch NFT details from API for better image URL resolution
+      let nftImageUrl = nft.nft_image_url;
+      try {
+        const nftApiUrl = `https://api.multiversx.com/nfts/${nft.identifier}`;
+        const nftResponse = await fetch(nftApiUrl);
+        if (nftResponse.ok) {
+          const nftDetails = await nftResponse.json();
+          nftImageUrl = await extractNFTImageUrl(nftDetails, nft.nft_image_url);
+        }
+      } catch (error) {
+        console.error('[NFT-MARKETPLACE] Error fetching NFT details for listing:', error.message);
+        // Use stored image URL as fallback
+        nftImageUrl = nft.nft_image_url;
+      }
+      
+      if (nftImageUrl) {
+        listingEmbed.setThumbnail(nftImageUrl);
       }
       
       // Create buttons
@@ -8500,14 +9154,161 @@ client.on('interactionCreate', async (interaction) => {
       // Convert ticket price to wei
       const ticketPriceWei = new BigNumber(ticketPrice).multipliedBy(new BigNumber(10).pow(tokenDecimals)).toString();
       
-      // Generate unique lottery ID
+      // Generate unique lottery ID (needed for memo in House Lottery balance tracking)
       const lotteryId = `lottery_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Check if user wants to use House Lottery balance for initial prize pool
+      const useHouseLotteryBalance = interaction.options.getBoolean('use_house_lottery_balance') || false;
+      const initialPrizePoolHuman = interaction.options.getNumber('initial_prize_pool');
+      let initialPrizePoolWei = '0';
+      let initialPrizePoolUsd = 0;
+      
+      if (useHouseLotteryBalance) {
+        try {
+          // Get all house balances
+          const houseBalanceData = await getAllHouseBalances(guildId);
+          const tokenTickerOnly = tokenIdentifier.includes('-') ? tokenIdentifier.split('-')[0] : tokenIdentifier;
+          
+          // Aggregate lottery earnings and spending
+          const aggregatedBalances = {
+            lotteryEarnings: {},
+            lotterySpending: {}
+          };
+          
+          for (const [tokenId, tokenData] of Object.entries(houseBalanceData || {})) {
+            // Merge lottery earnings
+            if (tokenData.lotteryEarnings) {
+              for (const [token, amount] of Object.entries(tokenData.lotteryEarnings)) {
+                if (!aggregatedBalances.lotteryEarnings[token]) {
+                  aggregatedBalances.lotteryEarnings[token] = '0';
+                }
+                const current = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
+                aggregatedBalances.lotteryEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+              }
+            }
+            
+            // Merge lottery spending
+            if (tokenData.lotterySpending) {
+              for (const [token, amount] of Object.entries(tokenData.lotterySpending)) {
+                if (!aggregatedBalances.lotterySpending[token]) {
+                  aggregatedBalances.lotterySpending[token] = '0';
+                }
+                const current = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
+                aggregatedBalances.lotterySpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+              }
+            }
+          }
+          
+          // Calculate available House Lottery balance (check both identifier and ticker for backward compatibility)
+          const lotteryEarningsId = aggregatedBalances.lotteryEarnings[tokenIdentifier] || '0';
+          const lotteryEarningsTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.lotteryEarnings[tokenTickerOnly] || '0') : '0';
+          const lotteryEarnings = new BigNumber(lotteryEarningsId).plus(new BigNumber(lotteryEarningsTicker));
+          
+          const lotterySpendingId = aggregatedBalances.lotterySpending[tokenIdentifier] || '0';
+          const lotterySpendingTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.lotterySpending[tokenTickerOnly] || '0') : '0';
+          const lotterySpending = new BigNumber(lotterySpendingId).plus(new BigNumber(lotterySpendingTicker));
+          
+          const availableBalanceWei = lotteryEarnings.minus(lotterySpending);
+          
+          if (availableBalanceWei.isLessThanOrEqualTo(0)) {
+            await interaction.editReply({ 
+              content: `❌ **Insufficient House Lottery balance!**\n\nHouse Lottery has no balance for ${actualTicker} yet. No lotteries have collected commission.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+            return;
+          }
+          
+          // Determine the amount to use
+          let amountToUseWei;
+          if (initialPrizePoolHuman !== null && initialPrizePoolHuman !== undefined) {
+            // User specified an amount
+            amountToUseWei = new BigNumber(initialPrizePoolHuman).multipliedBy(new BigNumber(10).pow(tokenDecimals));
+            
+            if (amountToUseWei.isGreaterThan(availableBalanceWei)) {
+              const availableHuman = availableBalanceWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+              await interaction.editReply({ 
+                content: `❌ **Insufficient House Lottery balance!**\n\nRequested: **${initialPrizePoolHuman}** ${actualTicker}\nAvailable: **${availableHuman}** ${actualTicker}`, 
+                flags: [MessageFlags.Ephemeral] 
+              });
+              return;
+            }
+          } else {
+            // Use full available balance
+            amountToUseWei = availableBalanceWei;
+          }
+          
+          // Track spending from House Lottery balance
+          const spendingResult = await trackHouseSpending(
+            guildId, 
+            amountToUseWei.toString(), 
+            tokenIdentifier, 
+            `Initial prize pool for lottery ${lotteryId.substring(0, 16)}...`, 
+            'lottery'
+          );
+          
+          if (!spendingResult || !spendingResult.success) {
+            await interaction.editReply({ 
+              content: `❌ **Failed to track House Lottery spending!**\n\nError: ${spendingResult?.error || 'Unknown error'}`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+            return;
+          }
+          
+          // Set initial prize pool
+          initialPrizePoolWei = amountToUseWei.toString();
+          
+          // Fetch token price for USD calculation
+          try {
+            const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+            if (priceResponse.ok) {
+              const priceData = await priceResponse.json();
+              const tokenPriceUsd = priceData.price || 0;
+              const initialPrizePoolHumanAmount = amountToUseWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+              initialPrizePoolUsd = new BigNumber(initialPrizePoolHumanAmount).multipliedBy(tokenPriceUsd).toNumber();
+            }
+          } catch (error) {
+            console.error('[LOTTERY] Error fetching token price for initial prize pool:', error.message);
+          }
+          
+        } catch (error) {
+          console.error('[LOTTERY] Error processing House Lottery balance funding:', error);
+          await interaction.editReply({ 
+            content: `❌ **Error processing House Lottery balance!**\n\n${error.message}`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+      }
       
       // Calculate times
       const startTime = Date.now();
       const frequencyMs = lotteryHelpers.parseFrequency(drawingFrequency);
       const endTime = startTime + frequencyMs;
       const nextDrawTime = endTime;
+      
+      // Fetch token price from MultiversX API (if not already calculated for initial prize pool)
+      let tokenPriceUsd = 0;
+      if (useHouseLotteryBalance && initialPrizePoolWei !== '0' && initialPrizePoolUsd > 0) {
+        // We already have the USD value, calculate token price from it
+        const initialPrizePoolHumanAmount = new BigNumber(initialPrizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        tokenPriceUsd = initialPrizePoolUsd / parseFloat(initialPrizePoolHumanAmount);
+      } else {
+        // Fetch token price from API
+        try {
+          const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+          if (priceResponse.ok) {
+            const priceData = await priceResponse.json();
+            tokenPriceUsd = priceData.price || 0;
+            // If we have initial prize pool but no USD value yet, calculate it
+            if (useHouseLotteryBalance && initialPrizePoolWei !== '0' && initialPrizePoolUsd === 0) {
+              const initialPrizePoolHumanAmount = new BigNumber(initialPrizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+              initialPrizePoolUsd = new BigNumber(initialPrizePoolHumanAmount).multipliedBy(tokenPriceUsd).toNumber();
+            }
+          }
+        } catch (error) {
+          console.error('[LOTTERY] Error fetching token price:', error.message);
+        }
+      }
       
       // Create lottery in database
       await dbLottery.createLottery(guildId, lotteryId, {
@@ -8518,8 +9319,8 @@ client.on('interactionCreate', async (interaction) => {
         drawingFrequency,
         houseCommissionPercent: houseCommission,
         ticketPriceWei,
-        prizePoolWei: '0',
-        prizePoolUsd: 0,
+        prizePoolWei: initialPrizePoolWei,
+        prizePoolUsd: initialPrizePoolUsd,
         startTime,
         endTime,
         nextDrawTime,
@@ -8531,17 +9332,11 @@ client.on('interactionCreate', async (interaction) => {
         rolloverCount: 0
       });
       
-      // Fetch token price from MultiversX API
-      let tokenPriceUsd = 0;
-      try {
-        const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
-        if (priceResponse.ok) {
-          const priceData = await priceResponse.json();
-          tokenPriceUsd = priceData.price || 0;
-        }
-      } catch (error) {
-        console.error('[LOTTERY] Error fetching token price:', error.message);
-      }
+      // Format prize pool display
+      const prizePoolHuman = new BigNumber(initialPrizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+      const prizePoolDisplay = initialPrizePoolWei !== '0' 
+        ? `${prizePoolHuman} ${actualTicker} (≈ $${initialPrizePoolUsd.toFixed(2)})` 
+        : `0 ${actualTicker} (≈ $0.00)`;
       
       // Create embed
       const lotteryEmbed = new EmbedBuilder()
@@ -8549,7 +9344,7 @@ client.on('interactionCreate', async (interaction) => {
         .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${winningNumbersCount} numbers from 1 to ${totalPoolNumbers}`)
         .addFields([
           { name: '🎫 Ticket Price', value: `${ticketPrice} ${actualTicker}`, inline: true },
-          { name: '💰 Prize Pool', value: `0 ${actualTicker} (≈ $0.00)`, inline: true },
+          { name: '💰 Prize Pool', value: prizePoolDisplay, inline: true },
           { name: '🏦 House Commission', value: `${houseCommission}%`, inline: true },
           { name: '⏰ End Time', value: `<t:${Math.floor(endTime / 1000)}:R>`, inline: true },
           { name: '🎫 Tickets Sold', value: '0', inline: true },
@@ -10686,12 +11481,13 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // COLLECTION AUTOCOMPLETE FOR CHECK-BALANCE-NFT, BALANCE-HISTORY-NFT, SELL-NFT, AND WITHDRAW-NFT
+  // COLLECTION AUTOCOMPLETE FOR CHECK-BALANCE-NFT, BALANCE-HISTORY-NFT, SELL-NFT, WITHDRAW-NFT, AND SHOW-MY-NFT
   if ((interaction.commandName === 'check-balance-nft' || 
        interaction.commandName === 'balance-history-nft' || 
        interaction.commandName === 'sell-nft' ||
        interaction.commandName === 'withdraw-nft' ||
-       interaction.commandName === 'tip-virtual-nft') && 
+       interaction.commandName === 'tip-virtual-nft' ||
+       interaction.commandName === 'show-my-nft') && 
       interaction.options.getFocused(true).name === 'collection') {
     try {
       console.log('[AUTOCOMPLETE] Collection autocomplete for command:', interaction.commandName);
@@ -10799,6 +11595,43 @@ client.on('interactionCreate', async (interaction) => {
       );
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in tip-virtual-nft collection autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // NFT NAME AUTOCOMPLETE FOR SHOW-MY-NFT
+  if (interaction.commandName === 'show-my-nft' && interaction.options.getFocused(true).name === 'nft-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const selectedCollection = interaction.options.getString('collection');
+      
+      if (!selectedCollection) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Get user's NFTs in selected collection
+      const nfts = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, selectedCollection);
+      
+      // Filter by focused value (match by name or identifier)
+      const filtered = nfts.filter(nft => {
+        const name = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
+        const identifier = `${selectedCollection}#${nft.nonce}`;
+        return name.toLowerCase().includes(focusedValue.toLowerCase()) ||
+               identifier.toLowerCase().includes(focusedValue.toLowerCase());
+      });
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(nft => ({
+          name: `${nft.nft_name || `${selectedCollection}#${nft.nonce}`} (${selectedCollection}#${nft.nonce})`,
+          value: nft.nft_name || `${selectedCollection}#${nft.nonce}`
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in show-my-nft nft-name autocomplete:', error);
       await safeRespond(interaction, []);
     }
     return;
@@ -14006,14 +14839,7 @@ client.on('ready', async () => {
   }, 5 * 60 * 1000); // Run every 5 minutes
   
   // FINISHED matches remain in database for historical records - no cleanup needed
-
-  // Set up weekly cleanup of old transaction history
-  setInterval(async () => {
-    const cleanupResult = await virtualAccounts.cleanupOldTransactions();
-    if (cleanupResult.totalCleaned > 0) {
-      console.log(`🧹 Weekly cleanup: Removed ${cleanupResult.totalCleaned} old transactions from ${cleanupResult.usersProcessed} users`);
-    }
-  }, 7 * 24 * 60 * 60 * 1000); // Run once a week
+  // Transaction history cleanup removed - Supabase can efficiently handle unlimited transactions with proper indexing
 
   // Set up periodic check for expired auctions
   setInterval(async () => {
@@ -14071,7 +14897,6 @@ client.on('ready', async () => {
   
   console.log('RPS challenge cleanup scheduled (every 5 minutes)');
   console.log('Football match cleanup scheduled (once a day)');
-  console.log('Transaction history cleanup scheduled (once a week)');
   console.log('Auction expiration check scheduled (every minute)');
   console.log('Lottery draw check scheduled (every minute)');
   console.log('Lottery embed update scheduled (every 10 minutes)');
@@ -14095,14 +14920,6 @@ client.on('ready', async () => {
   
   console.log('NFT marketplace cleanup scheduled (every hour)');
   
-  // Clean up old transaction history on startup
-  (async () => {
-    const cleanupResult = await virtualAccounts.cleanupOldTransactions();
-    if (cleanupResult.totalCleaned > 0) {
-      console.log(`🧹 Cleanup: Removed ${cleanupResult.totalCleaned} old transactions from ${cleanupResult.usersProcessed} users`);
-    }
-  })();
-
   // Refresh football match pot sizes on startup (with delay to ensure data is loaded)
   setTimeout(() => {
     console.log('[FOOTBALL] 🚀 Starting football match pot size refresh...');
@@ -14362,6 +15179,76 @@ async function getAuctions(guildId) {
 }
 
 // Check if auction is expired
+// Helper function to extract NFT image URL with robust fallback strategy
+async function extractNFTImageUrl(nftDetails, storedImageUrl = null) {
+  // Helper function to convert IPFS URL to HTTP gateway URL
+  const convertIPFSToGateway = (ipfsUrl) => {
+    if (!ipfsUrl) return ipfsUrl;
+    if (ipfsUrl.startsWith('ipfs://')) {
+      const ipfsHash = ipfsUrl.replace('ipfs://', '');
+      return `https://ipfs.io/ipfs/${ipfsHash}`;
+    }
+    return ipfsUrl;
+  };
+  
+  let nftImageUrl = storedImageUrl;
+  
+  // Convert stored image URL if it's IPFS
+  if (nftImageUrl && nftImageUrl.startsWith('ipfs://')) {
+    nftImageUrl = convertIPFSToGateway(nftImageUrl);
+  }
+  
+  // If we have nftDetails from API, use the robust fallback strategy
+  if (nftDetails) {
+    // Decode URIs array to get IPFS URLs (standard MultiversX format)
+    let ipfsImageUrl = null;
+    if (nftDetails.uris && Array.isArray(nftDetails.uris) && nftDetails.uris.length > 0) {
+      for (const uri of nftDetails.uris) {
+        try {
+          const decodedUri = Buffer.from(uri, 'base64').toString('utf-8');
+          if (decodedUri.includes('.png') || decodedUri.includes('.jpg') || decodedUri.includes('.jpeg') || decodedUri.includes('.gif') || decodedUri.includes('.webp')) {
+            ipfsImageUrl = decodedUri;
+            break;
+          }
+        } catch (uriError) {
+          // Ignore decode errors
+        }
+      }
+    }
+    
+    // Update image URL if available from API - check multiple sources
+    if (nftDetails.url && !nftDetails.url.includes('default.png')) {
+      nftImageUrl = convertIPFSToGateway(nftDetails.url);
+    } else if (ipfsImageUrl) {
+      nftImageUrl = convertIPFSToGateway(ipfsImageUrl);
+    } else if (nftDetails.media && nftDetails.media.length > 0) {
+      const mediaUrl = nftDetails.media[0].url || nftDetails.media[0].thumbnailUrl;
+      if (mediaUrl && !mediaUrl.includes('default.png')) {
+        nftImageUrl = convertIPFSToGateway(mediaUrl);
+      }
+    }
+    
+    // Also check for image in metadata
+    if (!nftImageUrl && nftDetails.metadata) {
+      try {
+        if (typeof nftDetails.metadata === 'string') {
+          const decoded = Buffer.from(nftDetails.metadata, 'base64').toString('utf-8');
+          const parsed = JSON.parse(decoded);
+          if (parsed.image) {
+            nftImageUrl = convertIPFSToGateway(parsed.image);
+          }
+        } else if (typeof nftDetails.metadata === 'object' && nftDetails.metadata.image) {
+          nftImageUrl = convertIPFSToGateway(nftDetails.metadata.image);
+        }
+      } catch (metaError) {
+        // Ignore metadata parsing errors for image
+      }
+    }
+  }
+  
+  return nftImageUrl;
+}
+
 function isAuctionExpired(auction) {
   return Date.now() >= auction.endTime || auction.status !== 'ACTIVE';
 }
@@ -14387,12 +15274,30 @@ async function updateNFTListingEmbed(guildId, listingId) {
     const color = isSold ? 0xFF0000 : isCancelled ? 0x808080 : isExpired ? 0xFF9900 : 0x00FF00;
     
     const tokenTicker = listing.priceTokenIdentifier.split('-')[0];
+    
+    // Fetch token price for USD valuation
+    let priceUsd = 0;
+    try {
+      const priceResponse = await fetch(`https://api.multiversx.com/tokens/${listing.priceTokenIdentifier}?denominated=true`);
+      if (priceResponse.ok) {
+        const priceData = await priceResponse.json();
+        const tokenPriceUsd = priceData.price || 0;
+        priceUsd = new BigNumber(listing.priceAmount).multipliedBy(tokenPriceUsd).toNumber();
+      }
+    } catch (error) {
+      console.error('[NFT-MARKETPLACE] Error fetching token price for listing:', error.message);
+    }
+    
+    // Format price with USD value
+    const priceDisplay = priceUsd > 0 
+      ? `${listing.priceAmount} ${tokenTicker} (≈ $${priceUsd.toFixed(2)})`
+      : `${listing.priceAmount} ${tokenTicker}`;
 
     const listingEmbed = new EmbedBuilder()
       .setTitle(listing.title)
       .setDescription(`${listing.description || ''}\n\n**NFT:** ${listing.nftName || `${listing.collection}#${listing.nonce}`}\n**Collection:** ${listing.collection}\n**Nonce:** ${listing.nonce}`)
       .addFields([
-        { name: '💰 Price', value: `${listing.priceAmount} ${tokenTicker}`, inline: true },
+        { name: '💰 Price', value: priceDisplay, inline: true },
         { name: '📋 Listing Type', value: listing.listingType === 'fixed_price' ? 'Fixed Price' : 'Accept Offers', inline: true },
         { name: '👤 Seller', value: `<@${listing.sellerId}>`, inline: true },
         { name: '📊 Status', value: statusText, inline: true }
@@ -14418,8 +15323,25 @@ async function updateNFTListingEmbed(guildId, listingId) {
       }
     }
 
-    if (listing.nftImageUrl) {
-      listingEmbed.setThumbnail(listing.nftImageUrl);
+    // Fetch NFT details from API for better image URL resolution
+    let nftImageUrl = listing.nftImageUrl;
+    if (listing.identifier) {
+      try {
+        const nftApiUrl = `https://api.multiversx.com/nfts/${listing.identifier}`;
+        const nftResponse = await fetch(nftApiUrl);
+        if (nftResponse.ok) {
+          const nftDetails = await nftResponse.json();
+          nftImageUrl = await extractNFTImageUrl(nftDetails, listing.nftImageUrl);
+        }
+      } catch (error) {
+        console.error(`[NFT-MARKETPLACE] Error fetching NFT details for listing update: ${error.message}`);
+        // Use stored image URL as fallback
+        nftImageUrl = listing.nftImageUrl;
+      }
+    }
+    
+    if (nftImageUrl) {
+      listingEmbed.setThumbnail(nftImageUrl);
     }
 
     // Create buttons based on status
@@ -14474,17 +15396,58 @@ async function updateAuctionEmbed(guildId, auctionId) {
     const statusText = isExpired ? '🔴 Finished' : '🟢 Active';
     const color = isExpired ? 0xFF0000 : 0x00FF00;
 
+    // Resolve token identifier for price lookup
+    const tokenIdentifier = await resolveTokenIdentifier(guildId, auction.tokenTicker);
+    
+    // Fetch token price for USD valuation
+    let tokenPriceUsd = 0;
+    if (tokenIdentifier) {
+      try {
+        const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+        if (priceResponse.ok) {
+          const priceData = await priceResponse.json();
+          tokenPriceUsd = priceData.price || 0;
+        }
+      } catch (error) {
+        console.error('[AUCTIONS] Error fetching token price for auction:', error.message);
+      }
+    }
+    
+    // Calculate USD values
+    const startingAmountUsd = tokenPriceUsd > 0 
+      ? new BigNumber(auction.startingAmount).multipliedBy(tokenPriceUsd).toFixed(2)
+      : null;
+    const currentBidUsd = tokenPriceUsd > 0 
+      ? new BigNumber(auction.currentBid).multipliedBy(tokenPriceUsd).toFixed(2)
+      : null;
+    const minBidIncreaseUsd = tokenPriceUsd > 0 
+      ? new BigNumber(auction.minBidIncrease).multipliedBy(tokenPriceUsd).toFixed(2)
+      : null;
+    
+    // Format display values
+    const startingAmountDisplay = startingAmountUsd 
+      ? `${auction.startingAmount} ${auction.tokenTicker} (≈ $${startingAmountUsd})`
+      : `${auction.startingAmount} ${auction.tokenTicker}`;
+    
     const currentBidText = auction.highestBidderTag 
-      ? `${auction.currentBid} ${auction.tokenTicker} by ${auction.highestBidderTag}`
-      : `${auction.currentBid} ${auction.tokenTicker} (No bids yet)`;
+      ? (currentBidUsd 
+          ? `${auction.currentBid} ${auction.tokenTicker} (≈ $${currentBidUsd}) by ${auction.highestBidderTag}`
+          : `${auction.currentBid} ${auction.tokenTicker} by ${auction.highestBidderTag}`)
+      : (currentBidUsd
+          ? `${auction.currentBid} ${auction.tokenTicker} (≈ $${currentBidUsd}) (No bids yet)`
+          : `${auction.currentBid} ${auction.tokenTicker} (No bids yet)`);
+    
+    const minBidIncreaseDisplay = minBidIncreaseUsd
+      ? `${auction.minBidIncrease} ${auction.tokenTicker} (≈ $${minBidIncreaseUsd})`
+      : `${auction.minBidIncrease} ${auction.tokenTicker}`;
 
     const auctionEmbed = new EmbedBuilder()
       .setTitle(auction.title)
       .setDescription(`${auction.description}\n\n**NFT:** ${auction.nftName}\n**Collection:** ${auction.collection}\n**Nonce:** ${auction.nftNonce}`)
       .addFields([
-        { name: 'Starting Amount', value: `${auction.startingAmount} ${auction.tokenTicker}`, inline: true },
+        { name: 'Starting Amount', value: startingAmountDisplay, inline: true },
         { name: 'Current Bid', value: currentBidText, inline: true },
-        { name: 'Minimum Increase', value: `${auction.minBidIncrease} ${auction.tokenTicker}`, inline: true },
+        { name: 'Minimum Increase', value: minBidIncreaseDisplay, inline: true },
         { name: 'Token', value: auction.tokenTicker, inline: true },
         { name: 'Time Remaining', value: timeRemaining, inline: true },
         { name: 'Status', value: statusText, inline: true }
@@ -14493,8 +15456,25 @@ async function updateAuctionEmbed(guildId, auctionId) {
       .setTimestamp(new Date(auction.endTime))
       .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
 
-    if (auction.nftImageUrl) {
-      auctionEmbed.setThumbnail(auction.nftImageUrl);
+    // Fetch NFT details from API for better image URL resolution
+    let nftImageUrl = auction.nftImageUrl;
+    if (auction.nftIdentifier) {
+      try {
+        const nftApiUrl = `https://api.multiversx.com/nfts/${auction.nftIdentifier}`;
+        const nftResponse = await fetch(nftApiUrl);
+        if (nftResponse.ok) {
+          const nftDetails = await nftResponse.json();
+          nftImageUrl = await extractNFTImageUrl(nftDetails, auction.nftImageUrl);
+        }
+      } catch (error) {
+        console.error(`[AUCTIONS] Error fetching NFT details for auction update: ${error.message}`);
+        // Use stored image URL as fallback
+        nftImageUrl = auction.nftImageUrl;
+      }
+    }
+    
+    if (nftImageUrl) {
+      auctionEmbed.setThumbnail(nftImageUrl);
     } else {
       auctionEmbed.setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif');
     }
