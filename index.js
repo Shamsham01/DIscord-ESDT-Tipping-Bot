@@ -9401,12 +9401,16 @@ client.on('interactionCreate', async (interaction) => {
         ? `${prizePoolHuman} ${actualTicker} (≈ $${initialPrizePoolUsd.toFixed(2)})` 
         : `0 ${actualTicker} (≈ $0.00)`;
       
+      // Calculate ticket price USD value
+      const ticketPriceUsdValue = tokenPriceUsd > 0 ? new BigNumber(ticketPrice).multipliedBy(tokenPriceUsd).toFixed(2) : '0.00';
+      const ticketPriceDisplay = `${ticketPrice} ${actualTicker} (≈ $${ticketPriceUsdValue})`;
+      
       // Create embed
       const lotteryEmbed = new EmbedBuilder()
         .setTitle('🎰 Lottery')
         .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${winningNumbersCount} numbers from 1 to ${totalPoolNumbers}`)
         .addFields([
-          { name: '🎫 Ticket Price', value: `${ticketPrice} ${actualTicker}`, inline: true },
+          { name: '🎫 Ticket Price', value: ticketPriceDisplay, inline: true },
           { name: '💰 Prize Pool', value: prizePoolDisplay, inline: true },
           { name: '🏦 House Commission', value: `${houseCommission}%`, inline: true },
           { name: '⏰ End Time', value: `<t:${Math.floor(endTime / 1000)}:R>`, inline: true },
@@ -14429,6 +14433,7 @@ async function updateLotteryEmbed(guildId, lotteryId) {
     const prizePoolHuman = new BigNumber(lottery.prizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
     const ticketPriceHuman = new BigNumber(lottery.ticketPriceWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
     const prizePoolUsdValue = tokenPriceUsd > 0 ? new BigNumber(prizePoolHuman).multipliedBy(tokenPriceUsd).toFixed(2) : '0.00';
+    const ticketPriceUsdValue = tokenPriceUsd > 0 ? new BigNumber(ticketPriceHuman).multipliedBy(tokenPriceUsd).toFixed(2) : '0.00';
     
     // Update prize pool USD in database
     await dbLottery.updateLottery(guildId, lotteryId, {
@@ -14444,7 +14449,7 @@ async function updateLotteryEmbed(guildId, lotteryId) {
       .setTitle(lottery.isRollover ? '🎰 Lottery (Rollover)' : '🎰 Lottery')
       .setDescription(`${lottery.isRollover ? `**Rollover #${lottery.rolloverCount}** - No winners in previous draw!\n\n` : ''}**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers}`)
       .addFields([
-        { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${lottery.tokenTicker}`, inline: true },
+        { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${lottery.tokenTicker} (≈ $${ticketPriceUsdValue})`, inline: true },
         { name: '💰 Prize Pool', value: `${prizePoolHuman} ${lottery.tokenTicker} (≈ $${prizePoolUsdValue})`, inline: true },
         { name: '🏦 House Commission', value: `${lottery.houseCommissionPercent}%`, inline: true },
         { name: '⏰ End Time', value: endTimeText, inline: true },
@@ -14830,12 +14835,13 @@ async function processLotteryDraw(guildId, lotteryId) {
           const prizePoolHuman = new BigNumber(lottery.prizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
           const ticketPriceHuman = new BigNumber(lottery.ticketPriceWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
           const prizePoolUsdValue = new BigNumber(prizePoolHuman).multipliedBy(tokenPriceUsd).toFixed(2);
+          const ticketPriceUsdValue = new BigNumber(ticketPriceHuman).multipliedBy(tokenPriceUsd).toFixed(2);
           
           const rolloverEmbed = new EmbedBuilder()
             .setTitle('🎰 Lottery (Rollover)')
             .setDescription(`**Lottery ID:** \`${rolloverLotteryId}\`\n\n**Rollover #${lottery.rolloverCount + 1}** - No winners in previous draw!\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers}`)
             .addFields([
-              { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${lottery.tokenTicker}`, inline: true },
+              { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${lottery.tokenTicker} (≈ $${ticketPriceUsdValue})`, inline: true },
               { name: '💰 Prize Pool', value: `${prizePoolHuman} ${lottery.tokenTicker} (≈ $${prizePoolUsdValue})`, inline: true },
               { name: '🏦 House Commission', value: `${lottery.houseCommissionPercent}%`, inline: true },
               { name: '⏰ End Time', value: `<t:${Math.floor(newEndTime / 1000)}:R>`, inline: true },
