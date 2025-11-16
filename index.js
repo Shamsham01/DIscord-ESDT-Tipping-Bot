@@ -3121,10 +3121,17 @@ client.on('interactionCreate', async (interaction) => {
       console.log(`[AUCTIONS] Created auction ${auctionId} by ${interaction.user.tag} for NFT ${nftName} (${collection}#${nftDetails.nonce})`);
     } catch (error) {
       console.error('Error creating auction:', error);
+      
+      // Check if it's a database schema error
+      let errorMessage = error.message;
+      if (error.message?.includes('seller_id') || error.message?.includes('source') || error.message?.includes('token_identifier')) {
+        errorMessage = `Database migration required! Please run the migration SQL file (migration-add-auction-fields.sql) in your Supabase SQL editor to add the missing columns. The auction was created but some data may be missing.\n\nOriginal error: ${error.message}`;
+      }
+      
       if (interaction.deferred) {
-        await interaction.editReply({ content: `Error creating auction: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        await interaction.editReply({ content: `Error creating auction: ${errorMessage}`, flags: [MessageFlags.Ephemeral] });
       } else {
-        await interaction.reply({ content: `Error creating auction: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        await interaction.reply({ content: `Error creating auction: ${errorMessage}`, flags: [MessageFlags.Ephemeral] });
       }
     }
   } else if (commandName === 'set-community-fund') {
@@ -15979,21 +15986,6 @@ async function processAuctionClosure(guildId, auctionId) {
       return;
     }
 
-    // Get winner's wallet
-    const userWallets = await getUserWallets(guildId);
-    const winnerWallet = userWallets[auction.highestBidderId];
-
-    console.log(`[AUCTIONS] Winner ID: ${auction.highestBidderId}`);
-    console.log(`[AUCTIONS] Available wallets:`, Object.keys(userWallets));
-    console.log(`[AUCTIONS] Winner wallet:`, winnerWallet);
-
-    if (!winnerWallet) {
-      if (thread) {
-        await thread.send(`❌ **Auction ended but winner <@${auction.highestBidderId}> has no registered wallet.** Please use /set-wallet to register your wallet.`);
-      }
-      return;
-    }
-
     // Resolve token identifier (use stored identifier if available, otherwise resolve from ticker)
     const tokenIdentifier = auction.tokenIdentifier || await resolveTokenIdentifier(guildId, auction.tokenTicker);
     if (!tokenIdentifier) {
@@ -16023,14 +16015,105 @@ async function processAuctionClosure(guildId, auctionId) {
       return;
     }
 
-    // Transfer NFT
-    const transferResult = await transferNFT(
-      winnerWallet,
-      auction.collection,
-      auction.nftNonce,
-      auction.projectName,
-      guildId
-    );
+    // Handle different auction sources
+    const isVirtualAccountAuction = auction.source === 'virtual_account';
+    let transferResult = { success: false, errorMessage: null, txHash: null };
+
+    if (isVirtualAccountAuction) {
+      // Virtual Account Auction: Transfer NFT between virtual accounts
+      if (!auction.sellerId) {
+        console.error(`[AUCTIONS] Virtual account auction ${auctionId} missing sellerId`);
+        if (thread) {
+          await thread.send(`❌ **Error:** Auction data is missing seller information. Please contact an administrator.`);
+        }
+        // Refund the deduction
+        await virtualAccounts.addFundsToAccount(
+          guildId,
+          auction.highestBidderId,
+          tokenIdentifier,
+          auction.currentBid,
+          null,
+          'auction_refund',
+          null
+        );
+        return;
+      }
+
+      try {
+        // Transfer NFT from seller's VA to winner's VA
+        await virtualAccountsNFT.transferNFTBetweenUsers(
+          guildId,
+          auction.sellerId,
+          auction.highestBidderId,
+          auction.collection,
+          auction.nftNonce,
+          {
+            tokenIdentifier: tokenIdentifier,
+            amount: auction.currentBid
+          }
+        );
+        
+        // Credit tokens to seller's virtual account
+        await virtualAccounts.addFundsToAccount(
+          guildId,
+          auction.sellerId,
+          tokenIdentifier,
+          auction.currentBid,
+          `Auction sale: ${auction.nftName}`,
+          'auction_sale',
+          null
+        );
+
+        transferResult = { success: true, txHash: null };
+        console.log(`[AUCTIONS] Successfully transferred NFT from seller ${auction.sellerId} to winner ${auction.highestBidderId} via virtual accounts`);
+      } catch (vaError) {
+        console.error(`[AUCTIONS] Error transferring NFT between virtual accounts:`, vaError);
+        transferResult = { success: false, errorMessage: vaError.message, txHash: null };
+      }
+    } else {
+      // Project Wallet Auction: Transfer NFT via blockchain
+      const userWallets = await getUserWallets(guildId);
+      const winnerWallet = userWallets[auction.highestBidderId];
+
+      console.log(`[AUCTIONS] Winner ID: ${auction.highestBidderId}`);
+      console.log(`[AUCTIONS] Available wallets:`, Object.keys(userWallets));
+      console.log(`[AUCTIONS] Winner wallet:`, winnerWallet);
+
+      if (!winnerWallet) {
+        if (thread) {
+          await thread.send(`❌ **Auction ended but winner <@${auction.highestBidderId}> has no registered wallet.** Please use /set-wallet to register your wallet.`);
+        }
+        // Refund the deduction
+        await virtualAccounts.addFundsToAccount(
+          guildId,
+          auction.highestBidderId,
+          tokenIdentifier,
+          auction.currentBid,
+          null,
+          'auction_refund',
+          null
+        );
+        return;
+      }
+
+      // Transfer NFT via blockchain
+      transferResult = await transferNFT(
+        winnerWallet,
+        auction.collection,
+        auction.nftNonce,
+        auction.projectName,
+        guildId
+      );
+
+      // For project wallet auctions, track earnings for house balance
+      if (transferResult.success) {
+        const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
+        if (storedDecimals !== null) {
+          const amountWei = toBlockchainAmount(auction.currentBid, storedDecimals);
+          await trackAuctionEarnings(guildId, auctionId, amountWei, storedDecimals, tokenIdentifier);
+        }
+      }
+    }
 
     const balanceAfter = await virtualAccounts.getUserBalance(guildId, auction.highestBidderId, tokenIdentifier);
 
@@ -16039,19 +16122,12 @@ async function processAuctionClosure(guildId, auctionId) {
     if (!message) return;
 
     if (transferResult.success) {
-      // Track auction earnings for house balance (using identifier)
-      const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
-      if (storedDecimals !== null) {
-        const amountWei = toBlockchainAmount(auction.currentBid, storedDecimals);
-        await trackAuctionEarnings(guildId, auctionId, amountWei, storedDecimals, tokenIdentifier);
-      }
-      
       const explorerUrl = transferResult.txHash
         ? `https://explorer.multiversx.com/transactions/${transferResult.txHash}`
         : null;
       const txHashFieldValue = transferResult.txHash
         ? `[${transferResult.txHash}](${explorerUrl})`
-        : 'Not available';
+        : isVirtualAccountAuction ? 'Virtual Account Transfer' : 'Not available';
 
       const successEmbed = new EmbedBuilder()
         .setTitle('🎉 Auction Complete - NFT Transferred!')
@@ -16060,12 +16136,19 @@ async function processAuctionClosure(guildId, auctionId) {
           { name: 'Winner', value: `<@${auction.highestBidderId}>`, inline: true },
           { name: 'Final Bid', value: `${auction.currentBid} ${auction.tokenTicker}`, inline: true },
           { name: 'Balance Before', value: `${balanceBefore} ${auction.tokenTicker}`, inline: true },
-          { name: 'Balance After', value: `${balanceAfter} ${auction.tokenTicker}`, inline: true },
-          { name: 'Transaction Hash', value: txHashFieldValue, inline: false }
+          { name: 'Balance After', value: `${balanceAfter} ${auction.tokenTicker}`, inline: true }
         ])
         .setColor(0x00FF00)
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+
+      if (transferResult.txHash) {
+        successEmbed.addFields([{ name: 'Transaction Hash', value: txHashFieldValue, inline: false }]);
+      }
+
+      if (isVirtualAccountAuction && auction.sellerId) {
+        successEmbed.addFields([{ name: 'Seller', value: `<@${auction.sellerId}>`, inline: true }]);
+      }
 
       if (auction.nftImageUrl) {
         successEmbed.setThumbnail(auction.nftImageUrl);
@@ -16078,7 +16161,7 @@ async function processAuctionClosure(guildId, auctionId) {
       }
     } else {
       // Refund the deduction (using identifier)
-      virtualAccounts.addFundsToAccount(
+      await virtualAccounts.addFundsToAccount(
         guildId,
         auction.highestBidderId,
         tokenIdentifier,
@@ -16107,8 +16190,7 @@ async function processAuctionClosure(guildId, auctionId) {
         await thread.send(`❌ **NFT transfer failed.** Payment has been refunded to <@${auction.highestBidderId}>.`);
       }
 
-      auction.status = 'failed';
-      // Removed - using database
+      await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
     }
   } catch (error) {
     console.error(`[AUCTIONS] Error processing closure for auction ${auctionId}:`, error.message);

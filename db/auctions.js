@@ -12,6 +12,13 @@ async function getAuction(guildId, auctionId) {
     if (error && error.code !== 'PGRST116') throw error;
     if (!data) return null;
     
+    // Infer source from project_name: NULL = virtual_account, has value = project_wallet
+    const inferredSource = data.project_name ? 'project_wallet' : 'virtual_account';
+    
+    // Use token_ticker as token_identifier if it contains '-', otherwise resolve it
+    const tokenIdentifier = data.token_identifier || (data.token_ticker?.includes('-') ? data.token_ticker : null);
+    const tokenTicker = data.token_ticker?.includes('-') ? data.token_ticker.split('-')[0] : data.token_ticker;
+    
     return {
       auctionId: data.auction_id,
       guildId: data.guild_id,
@@ -27,7 +34,8 @@ async function getAuction(guildId, auctionId) {
       description: data.description,
       duration: data.duration,
       endTime: data.end_time,
-      tokenTicker: data.token_ticker,
+      tokenTicker: tokenTicker || data.token_ticker, // Display ticker (extracted from identifier if needed)
+      tokenIdentifier: tokenIdentifier || data.token_ticker, // Full identifier (use token_ticker if it's already an identifier)
       startingAmount: data.starting_amount,
       minBidIncrease: data.min_bid_increase,
       currentBid: data.current_bid,
@@ -37,7 +45,9 @@ async function getAuction(guildId, auctionId) {
       threadId: data.thread_id,
       channelId: data.channel_id,
       status: data.status,
-      createdAt: data.created_at
+      createdAt: data.created_at,
+      source: data.source || inferredSource, // Use stored source or infer from project_name
+      sellerId: data.seller_id
     };
   } catch (error) {
     console.error('[DB] Error getting auction:', error);
@@ -57,6 +67,13 @@ async function getAuctionsByGuild(guildId) {
     
     const auctions = {};
     (data || []).forEach(row => {
+      // Infer source from project_name: NULL = virtual_account, has value = project_wallet
+      const inferredSource = row.project_name ? 'project_wallet' : 'virtual_account';
+      
+      // Use token_ticker as token_identifier if it contains '-', otherwise resolve it
+      const tokenIdentifier = row.token_identifier || (row.token_ticker?.includes('-') ? row.token_ticker : null);
+      const tokenTicker = row.token_ticker?.includes('-') ? row.token_ticker.split('-')[0] : row.token_ticker;
+      
       auctions[row.auction_id] = {
         auctionId: row.auction_id,
         guildId: row.guild_id,
@@ -72,7 +89,8 @@ async function getAuctionsByGuild(guildId) {
         description: row.description,
         duration: row.duration,
         endTime: row.end_time,
-        tokenTicker: row.token_ticker,
+        tokenTicker: tokenTicker || row.token_ticker, // Display ticker
+        tokenIdentifier: tokenIdentifier || row.token_ticker, // Full identifier
         startingAmount: row.starting_amount,
         minBidIncrease: row.min_bid_increase,
         currentBid: row.current_bid,
@@ -82,7 +100,9 @@ async function getAuctionsByGuild(guildId) {
         threadId: row.thread_id,
         channelId: row.channel_id,
         status: row.status,
-        createdAt: row.created_at
+        createdAt: row.created_at,
+        source: row.source || inferredSource, // Use stored source or infer
+        sellerId: row.seller_id
       };
     });
     return auctions;
@@ -138,37 +158,69 @@ async function getActiveAuctions(guildId) {
 
 async function createAuction(guildId, auctionId, auctionData) {
   try {
-    const { error } = await supabase
-      .from('auctions')
-      .insert({
-        auction_id: auctionId,
-        guild_id: guildId,
-        creator_id: auctionData.creatorId,
-        creator_tag: auctionData.creatorTag || null,
-        project_name: auctionData.projectName || null,
-        collection: auctionData.collection || null,
-        nft_name: auctionData.nftName || null,
-        nft_identifier: auctionData.nftIdentifier || null,
-        nft_nonce: auctionData.nftNonce || null,
-        nft_image_url: auctionData.nftImageUrl || null,
-        title: auctionData.title,
-        description: auctionData.description || null,
-        duration: auctionData.duration || null,
-        end_time: auctionData.endTime,
-        token_ticker: auctionData.tokenTicker,
-        starting_amount: auctionData.startingAmount,
-        min_bid_increase: auctionData.minBidIncrease || null,
-        current_bid: auctionData.currentBid || null,
-        highest_bidder_id: auctionData.highestBidderId || null,
-        highest_bidder_tag: auctionData.highestBidderTag || null,
-        message_id: auctionData.messageId || null,
-        thread_id: auctionData.threadId || null,
-        channel_id: auctionData.channelId || null,
-        status: auctionData.status || 'ACTIVE',
-        created_at: auctionData.createdAt || Date.now()
-      });
+    // Store token_identifier in token_ticker column (repurposed)
+    // If tokenIdentifier is provided, use it; otherwise use tokenTicker (which might already be an identifier)
+    const tokenTickerValue = auctionData.tokenIdentifier || auctionData.tokenTicker;
     
-    if (error) throw error;
+    // Build insert data - repurpose columns:
+    // - project_name: stores project name (NULL for virtual_account auctions)
+    // - token_ticker: stores full token identifier (e.g., "REWARD-cf6eac")
+    // - seller_id: only new column needed
+    const insertData = {
+      auction_id: auctionId,
+      guild_id: guildId,
+      creator_id: auctionData.creatorId,
+      creator_tag: auctionData.creatorTag || null,
+      project_name: auctionData.projectName || null, // NULL = virtual_account, value = project_wallet
+      collection: auctionData.collection || null,
+      nft_name: auctionData.nftName || null,
+      nft_identifier: auctionData.nftIdentifier || null,
+      nft_nonce: auctionData.nftNonce || null,
+      nft_image_url: auctionData.nftImageUrl || null,
+      title: auctionData.title,
+      description: auctionData.description || null,
+      duration: auctionData.duration || null,
+      end_time: auctionData.endTime,
+      token_ticker: tokenTickerValue, // Store full identifier here
+      starting_amount: auctionData.startingAmount,
+      min_bid_increase: auctionData.minBidIncrease || null,
+      current_bid: auctionData.currentBid || null,
+      highest_bidder_id: auctionData.highestBidderId || null,
+      highest_bidder_tag: auctionData.highestBidderTag || null,
+      message_id: auctionData.messageId || null,
+      thread_id: auctionData.threadId || null,
+      channel_id: auctionData.channelId || null,
+      status: auctionData.status || 'ACTIVE',
+      created_at: auctionData.createdAt || Date.now()
+    };
+
+    // Try to include seller_id (only new column needed)
+    let insertWithSellerId = {
+      ...insertData,
+      seller_id: auctionData.sellerId || null
+    };
+
+    let { error } = await supabase
+      .from('auctions')
+      .insert(insertWithSellerId);
+    
+    // If error is about missing seller_id column, retry without it
+    if (error && (error.message?.includes('seller_id') || error.code === '42703')) {
+      console.warn('[DB] seller_id column not found, inserting without it. Please run migration to add seller_id column.');
+      // Retry without seller_id
+      const { error: retryError } = await supabase
+        .from('auctions')
+        .insert(insertData);
+      
+      if (retryError) throw retryError;
+      
+      if (auctionData.sellerId) {
+        console.warn(`[DB] Auction ${auctionId} created without seller_id field. Run migration and update manually if needed.`);
+      }
+    } else if (error) {
+      throw error;
+    }
+    
     return true;
   } catch (error) {
     console.error('[DB] Error creating auction:', error);
@@ -194,7 +246,12 @@ async function updateAuction(guildId, auctionId, auctionData) {
     if (auctionData.description !== undefined) updateData.description = auctionData.description;
     if (auctionData.duration !== undefined) updateData.duration = auctionData.duration;
     if (auctionData.endTime !== undefined) updateData.end_time = auctionData.endTime;
-    if (auctionData.tokenTicker !== undefined) updateData.token_ticker = auctionData.tokenTicker;
+    // Store token_identifier in token_ticker column (repurposed)
+    if (auctionData.tokenIdentifier !== undefined) {
+      updateData.token_ticker = auctionData.tokenIdentifier; // Store full identifier
+    } else if (auctionData.tokenTicker !== undefined) {
+      updateData.token_ticker = auctionData.tokenTicker;
+    }
     if (auctionData.startingAmount !== undefined) updateData.starting_amount = auctionData.startingAmount;
     if (auctionData.minBidIncrease !== undefined) updateData.min_bid_increase = auctionData.minBidIncrease;
     if (auctionData.currentBid !== undefined) updateData.current_bid = auctionData.currentBid;
@@ -205,6 +262,8 @@ async function updateAuction(guildId, auctionId, auctionData) {
     if (auctionData.channelId !== undefined) updateData.channel_id = auctionData.channelId;
     if (auctionData.status !== undefined) updateData.status = auctionData.status;
     if (auctionData.createdAt !== undefined) updateData.created_at = auctionData.createdAt;
+    // source is inferred from project_name, no need to store separately
+    if (auctionData.sellerId !== undefined) updateData.seller_id = auctionData.sellerId;
     
     const { error } = await supabase
       .from('auctions')

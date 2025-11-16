@@ -292,6 +292,9 @@ CREATE TABLE IF NOT EXISTS auctions (
     status TEXT NOT NULL DEFAULT 'ACTIVE',
     created_at BIGINT,
     updated_at TIMESTAMPTZ DEFAULT NOW(),
+    seller_id TEXT,
+    -- Note: source is inferred from project_name (NULL = virtual_account, value = project_wallet)
+    -- Note: token_ticker stores full token identifier (e.g., "REWARD-cf6eac")
     UNIQUE(auction_id, guild_id)
 );
 
