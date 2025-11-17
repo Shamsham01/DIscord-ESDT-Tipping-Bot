@@ -8,34 +8,97 @@ description: >-
 
 ***
 
-### 🛠️ Setup and Management
+### 👛 Virtual Accounts (ESDT)
 
-* **/set-wallet** — Register your MultiversX wallet address with the bot.
-* **/register-project** — Admins: Register a new project wallet for sending tokens.
-* **/update-project** — Admins: Update details for an existing project wallet.
-* **/delete-project** — Admins: Delete a registered project wallet.
-* **/set-community-fund** — Admins: Set a project wallet as the Community Fund for P2P tips and games.
-* **/set-tip-limits** — Admins: Set minimum and maximum tip amounts for each token.
-* **/list-wallets** — Admins: List all registered user wallets in the server.
-* **/list-projects** — List all registered project wallets.
-* **/list-tip-limits** — Admins: View current tip limits for each token.
+* **/check-balance-esdt** — View your virtual account balance for all ESDT tokens.
+* **/balance-history** — View your transaction history.
+* **/tip-virtual-esdt** — Tip another user with virtual balance.
+* **/virtual-house-topup** — Transfer from Virtual Account to House Balance.
+* **/withdraw-esdt** — Withdraw funds to your wallet.
 
 ***
 
-### 💸 Tipping and Transfers
+### 🖼️ Virtual Accounts (NFT)
 
-* **/send-esdt** — Admins: Send ESDT tokens from a project wallet to any user.
-* **/tip** — Send a random tip (from the Community Fund) to another user.
-
-***
-
-### 🎮 RPS Game
-
-* **/challenge-rps** — Challenge another user to a Rock, Paper, Scissors game (requires transaction hash).
-* **/join-rps** — Join an existing RPS challenge by matching the bet (requires transaction hash).
-* **/play-rps** — Play your move (Rock, Paper, or Scissors) in an active RPS game.
-* **/list-rps-challenges** — View all active and waiting RPS challenges.
+* **/check-balance-nft** — View your NFT virtual account balance.
+* **/balance-history-nft** — View your NFT transaction history.
+* **/show-my-nft** — View detailed information about an NFT (image, attributes, metadata).
+* **/tip-virtual-nft** — Tip another user an NFT from your virtual account.
+* **/sell-nft** — List an NFT for sale on the marketplace.
+* **/withdraw-nft** — Withdraw an NFT to your registered wallet.
 
 ***
 
-For more details and support reach out to HODL Token Club [Discord](https://discord.gg/RBtGMjwTDw) Server.
+### ⚽ Football Betting
+
+* **/create-fixtures** 🔴 Admin — Create football matches for betting.
+* **/leaderboard** — View betting leaderboard.
+* **/leaderboard-filtered** — View leaderboard for date range.
+* **/my-football-stats** — View your betting statistics & PNL.
+
+***
+
+### 🎮 Rock Paper Scissors
+
+* **/challenge-rps** — Challenge someone to RPS using virtual balance.
+* **/list-rps-challenges** — List active challenges.
+
+***
+
+### 🎰 Lottery & Auctions
+
+* **/create-lottery** 🔴 Admin — Create a new lottery game.
+* **/create-auction** 🔴 Admin — Create an NFT auction.
+
+***
+
+### 💼 Wallet & Project Management
+
+* **/set-wallet** — Register your MultiversX wallet.
+* **/register-project** 🔴 Admin — Register a new project.
+* **/update-project** 🔴 Admin — Update project settings.
+* **/list-projects** 🔴 Admin — View all projects.
+* **/delete-project** 🔴 Admin — Delete a project.
+* **/set-community-fund** 🔴 Admin — Set community fund project.
+* **/show-community-fund-address** — View community fund address.
+
+***
+
+### 💰 Token & NFT Transfers
+
+* **/send-esdt** 🔴 Admin — Send tokens to a user.
+* **/send-nft** 🔴 Admin — Send NFT to a user.
+* **/house-tip** 🔴 Admin — Tip from house balance.
+* **/list-wallets** — List registered wallets (verify your registration).
+
+***
+
+### 🔧 Utilities & Debug
+
+* **/update-token-metadata** 🔴 Admin — Update token info.
+* **/blockchain-status** 🔴 Admin — Check blockchain listener.
+* **/server-balances** 🔴 Admin — View server balances.
+* **/house-balance** 🔴 Admin — View house balance (no-winner matches).
+* **/update-usernames** 🔴 Admin — Update Discord usernames.
+* **/get-competition** — View last used competition.
+* **/test-football-api** 🔴 Admin — Test API connectivity.
+* **/debug-server-config** 🔴 Admin — Debug server config.
+* **/debug-user** 🔴 Admin — Debug user info.
+* **/check-community-fund-balance** 🔴 Admin — Check Community Fund balances.
+* **/leaderboard-reset** 🔴 Admin — Reset the leaderboard.
+* **/delete-all-server-data** 🔴 Admin — Delete ALL server data (hard reset).
+
+***
+
+### 📚 Help
+
+* **/help** — View all available commands organized by category.
+
+***
+
+**Legend:**
+- 🔴 Admin — Commands marked with this icon require administrator permissions.
+
+For more details on each command, use `/help` or refer to the [Admin Commands Reference](admin-commands-reference.md) and [User Guide](user-guide.md).
+
+For support, reach out to HODL Token Club [Discord](https://discord.gg/RBtGMjwTDw) Server.

@@ -11,9 +11,15 @@
      * ✅ View Channel
      * ✅ Send Messages
      * ✅ Embed Links
+     * ✅ Create Public Threads (Required for football betting)
+     * ✅ Send Messages in Threads
+     * ✅ Read Message History
+     * ✅ Use External Emojis
   4. Ensure that users/roles who should interact with the bot can use **slash commands** in that channel.
 
 > ⚠️ **These permissions are required for the bot to function properly!**
+>
+> **Note:** The "Create Public Threads" permission is essential for football betting features, as the bot creates threads for each match.
 
 ***
 
