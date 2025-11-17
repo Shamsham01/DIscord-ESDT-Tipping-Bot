@@ -75,26 +75,17 @@ If the bot responds with an embed, permissions are correctly set.
 
 A **project** represents a wallet that can send tokens and NFTs to users. You can have multiple projects per server.
 
-### Step 1: Prepare Your Wallet Information
+### Step 1: Register the Project
 
-You'll need:
-- **Wallet Address**: Your MultiversX wallet address (starts with `erd1...`, 62 characters)
-- **PEM File**: The private key file content for your wallet
-- **Supported Tokens**: List of token tickers this project will handle (e.g., `REWARD-cf6eac,EGLD,USDC`)
-
-### Step 2: Register the Project
-
-Use the `/register-project` command:
+Use the `/register-project` command to create a new project with an **auto-generated wallet**:
 
 ```
-/register-project project-name wallet-address wallet-pem supported-tokens [project-logo-url] [user-input]
+/register-project project-name supported-tokens [project-logo-url] [user-input]
 ```
 
 #### Parameters Explained
 
 - **`project-name`** (Required): A unique name for your project (e.g., "Main Wallet", "Gaming Fund")
-- **`wallet-address`** (Required): Your MultiversX wallet address (must start with `erd1` and be 62 characters)
-- **`wallet-pem`** (Required): The full content of your PEM file (paste the entire file content)
 - **`supported-tokens`** (Required): Comma-separated list of token tickers (e.g., `REWARD-cf6eac,EGLD,USDC`)
 - **`project-logo-url`** (Optional): URL to your project logo image (will be used in notifications and embeds)
 - **`user-input`** (Optional): Additional notes or description for the project
@@ -102,10 +93,37 @@ Use the `/register-project` command:
 #### Example
 
 ```
-/register-project MainWallet erd1abc123... "-----BEGIN PRIVATE KEY-----\n..." REWARD-cf6eac,EGLD https://example.com/logo.png "Main community wallet"
+/register-project MainWallet REWARD-cf6eac,EGLD https://example.com/logo.png "Main community wallet"
 ```
 
-### Step 3: Verify Project Registration
+**Note**: The bot will automatically generate a new MultiversX wallet for your project. You don't need to provide a wallet address or PEM file.
+
+### Step 2: Save Your Wallet Information
+
+After registering the project, the bot will:
+
+1. **Display wallet details in the command response** (embed)
+2. **Send you a DM** with:
+   - Wallet address
+   - Seed phrase (24 words)
+   - PEM file content
+   - Downloadable PEM file (if possible)
+
+**⚠️ Important**: 
+- **Save the PEM file** to a secure location (copy/paste into a text editor and save as `WalletKey.pem`)
+- **Save the Seed Phrase** - you can use it to log in to xPortal or Extension wallet
+- **Keep this information secure** - you have full control of this wallet
+
+### Step 3: Top Up Your Wallet
+
+**Before using the wallet, you must top it up with:**
+
+- **EGLD** - Required for blockchain transaction fees
+- **REWARD tokens** - Required for MakeX API usage fees ($0.03 per transaction)
+
+Without these, the bot cannot send tokens or NFTs from this wallet.
+
+### Step 4: Verify Project Registration
 
 Check that your project was created:
 
@@ -724,14 +742,16 @@ Complete reference of all admin commands for managing the bot.
 ## Project Management
 
 ### `/register-project`
-Register a new project wallet.
+Register a new project with auto-generated wallet.
 
-**Usage**: `/register-project project-name wallet-address wallet-pem supported-tokens [project-logo-url] [user-input]`
+**Usage**: `/register-project project-name supported-tokens [project-logo-url] [user-input]`
 
 **Example**:
 ```
-/register-project MainWallet erd1... "-----BEGIN..." REWARD-cf6eac,EGLD https://logo.png
+/register-project MainWallet REWARD-cf6eac,EGLD https://logo.png
 ```
+
+**Note**: The bot automatically generates a new MultiversX wallet for your project. Wallet details (address, seed phrase, PEM file) will be displayed in the command response and sent to you via DM. Make sure to save the PEM file and seed phrase securely. You must top up the wallet with EGLD (for fees) and REWARD tokens (for usage fees) before using it.
 
 ### `/update-project`
 Update project settings.

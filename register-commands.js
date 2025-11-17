@@ -225,23 +225,11 @@ const commands = [
     },
     {
         name: 'register-project',
-        description: 'Register a new MultiversX project for token transfers (Admin only)',
+        description: 'Register a new MultiversX project with auto-generated wallet (Admin only)',
         options: [
             {
                 name: 'project-name',
                 description: 'Name of the project',
-                type: ApplicationCommandOptionType.String,
-                required: true,
-            },
-            {
-                name: 'wallet-address',
-                description: 'Wallet address for the project (erd1...)',
-                type: ApplicationCommandOptionType.String,
-                required: true,
-            },
-            {
-                name: 'wallet-pem',
-                description: 'PEM file content for the project wallet',
                 type: ApplicationCommandOptionType.String,
                 required: true,
             },

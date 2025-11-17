@@ -1784,23 +1784,9 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       const projectName = interaction.options.getString('project-name');
-      const walletAddress = interaction.options.getString('wallet-address');
-      const walletPem = interaction.options.getString('wallet-pem');
       const supportedTokensStr = interaction.options.getString('supported-tokens');
       const projectLogoUrl = interaction.options.getString('project-logo-url');
       const userInput = interaction.options.getString('user-input') || '';
-
-      // Validate wallet address format
-      if (!walletAddress.startsWith('erd1') || walletAddress.length !== 62) {
-        await interaction.editReply({ content: 'Invalid wallet address format. Please provide a valid MultiversX wallet address (erd1...).', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-
-      const pemValid = isValidPemFormat(walletPem);
-      if (!pemValid) {
-        await interaction.editReply({ content: 'Invalid PEM format. Please provide a valid MultiversX wallet PEM file content.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
 
       // Validate and parse supported tokens
       if (!supportedTokensStr || supportedTokensStr.trim() === '') {
@@ -1825,25 +1811,68 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      // Generate wallet using MultiversX SDK
+      const walletGenerator = require('./utils/wallet-generator');
+      await interaction.editReply({ 
+        content: '🔄 **Generating Project Wallet...**\n\nCreating a new MultiversX wallet using the SDK...', 
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+      const wallet = await walletGenerator.generateCompleteWallet();
+      
+      // Validate generated PEM before storing
+      if (!wallet.pem || wallet.pem.trim().length === 0) {
+        throw new Error('Failed to generate wallet: PEM is empty');
+      }
+      
+      if (!wallet.pem.includes('BEGIN') || !wallet.pem.includes('END')) {
+        throw new Error('Failed to generate wallet: Invalid PEM format');
+      }
+      
+      // Validate PEM length (should be at least 90 characters)
+      if (wallet.pem.length < 90) {
+        console.error(`[REGISTER-PROJECT] Generated PEM is too short: ${wallet.pem.length} characters (expected 90+)`);
+        throw new Error(`Failed to generate wallet: PEM is too short (${wallet.pem.length} chars, expected 90+). Please try again.`);
+      }
+      
+      console.log(`[REGISTER-PROJECT] Generated wallet with address: ${wallet.address}, PEM length: ${wallet.pem.length} characters`);
+      
       // Save project to database
       await dbServerData.setProject(guildId, projectName, {
-        walletAddress: walletAddress,
-        walletPem: walletPem,
+        walletAddress: wallet.address,
+        walletPem: wallet.pem,
         supportedTokens: supportedTokens,
         projectLogoUrl: projectLogoUrl,
         userInput: userInput,
         registeredBy: interaction.user.id,
         registeredAt: Date.now()
       });
+      
+      // Verify the PEM was stored correctly by reading it back
+      console.log(`[REGISTER-PROJECT] Verifying stored PEM...`);
+      const storedProject = await dbServerData.getProject(guildId, projectName);
+      if (!storedProject || !storedProject.walletPem) {
+        throw new Error('Failed to verify stored PEM: PEM not found after storage');
+      }
+      
+      if (storedProject.walletPem.length !== wallet.pem.length) {
+        console.error(`[REGISTER-PROJECT] PEM length mismatch! Original: ${wallet.pem.length}, Stored: ${storedProject.walletPem.length}`);
+        throw new Error(`PEM length mismatch after storage! Original: ${wallet.pem.length}, Stored: ${storedProject.walletPem.length}`);
+      }
+      
+      console.log(`[REGISTER-PROJECT] ✅ PEM verified successfully after storage (length: ${storedProject.walletPem.length} chars)`);
 
+      // Build embed with wallet information
       const embed = new EmbedBuilder()
-        .setTitle('Project Registered Successfully')
-        .setDescription(`Project **${projectName}** has been registered for this server.`)
+        .setTitle('✅ Project Wallet Created Successfully')
+        .setDescription(`Project **${projectName}** has been registered with an auto-generated MultiversX wallet.`)
         .addFields([
-          { name: 'Wallet Address', value: `\`${walletAddress}\``, inline: false },
-          { name: 'Supported Tokens', value: supportedTokens.join(', '), inline: false },
-          { name: 'Registered By', value: `<@${interaction.user.id}>`, inline: true },
-          { name: 'Status', value: '✅ Active', inline: true }
+          { name: '📍 Wallet Address', value: `\`${wallet.address}\``, inline: false },
+          { name: '🔑 Seed Phrase', value: `\`${wallet.mnemonic}\``, inline: false },
+          { name: '📝 PEM File Content', value: `\`\`\`\n${wallet.pem}\n\`\`\``, inline: false },
+          { name: '📝 Supported Tokens', value: supportedTokens.join(', '), inline: false },
+          { name: '🔐 Security', value: 'Wallet was generated by the bot using MultiversX SDK. PEM is encrypted in the database.', inline: false },
+          { name: '⚠️ Important Instructions', value: '**Check your DMs for complete wallet details and PEM file!**\n\n**Next Steps:**\n1. Save the PEM file content to a secure location (e.g., `WalletKey.pem`)\n2. You can use the Seed Phrase to log in to xPortal or Extension wallet\n3. **Top up the wallet with:**\n   - **EGLD** for blockchain transaction fees\n   - **REWARD** tokens for MakeX API usage fees', inline: false }
         ])
         .setColor('#00FF00')
         .setTimestamp()
@@ -1851,10 +1880,80 @@ client.on('interactionCreate', async (interaction) => {
 
       // Add user input field if provided
       if (userInput) {
-        embed.addFields({ name: 'Notes', value: userInput, inline: false });
+        embed.addFields({ name: '📋 Notes', value: userInput, inline: false });
+      }
+      
+      // Add project logo if provided
+      if (projectLogoUrl) {
+        embed.setThumbnail(projectLogoUrl);
       }
 
       await interaction.editReply({ embeds: [embed] });
+      
+      // Send DM to admin with wallet details and PEM file
+      try {
+        const adminUser = await client.users.fetch(interaction.user.id);
+        
+        // Create DM embed
+        const dmEmbed = new EmbedBuilder()
+          .setTitle('🔐 Project Wallet Details')
+          .setDescription(`Here are the complete wallet details for project **${projectName}**`)
+          .addFields([
+            { name: '📍 Wallet Address', value: `\`${wallet.address}\``, inline: false },
+            { name: '🔑 Seed Phrase (24 words)', value: `\`${wallet.mnemonic}\``, inline: false },
+            { name: '📝 PEM File Content', value: `\`\`\`\n${wallet.pem}\n\`\`\``, inline: false },
+            { name: '📝 Supported Tokens', value: supportedTokens.join(', '), inline: false },
+            { name: '💾 How to Save PEM File', value: '1. Copy the PEM content above\n2. Open a text editor (Notepad, VS Code, etc.)\n3. Paste the PEM content\n4. Save as `WalletKey.pem` (or any name you prefer)\n5. Store in a secure location', inline: false },
+            { name: '🔐 Using Seed Phrase', value: 'You can use the Seed Phrase to log in to:\n- xPortal mobile app\n- MultiversX Extension wallet\n- Any MultiversX wallet that supports seed phrase import', inline: false },
+            { name: '⚠️ Important: Top Up Your Wallet', value: '**Before using this wallet, make sure to top it up with:**\n- **EGLD** - Required for blockchain transaction fees\n- **REWARD** tokens - Required for MakeX API usage fees ($0.03 per transaction)\n\nWithout these, the bot cannot send tokens or NFTs from this wallet.', inline: false }
+          ])
+          .setColor('#00FF00')
+          .setTimestamp()
+          .setFooter({ text: 'Keep this information secure!', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        // Try to send PEM file as attachment
+        const fs = require('fs');
+        const path = require('path');
+        const tempPemPath = path.join(__dirname, `temp_${projectName}_${Date.now()}.pem`);
+        
+        try {
+          // Write PEM to temporary file
+          fs.writeFileSync(tempPemPath, wallet.pem, 'utf8');
+          
+          // Send DM with file attachment
+          await adminUser.send({
+            embeds: [dmEmbed],
+            files: [{
+              attachment: tempPemPath,
+              name: `${projectName}_WalletKey.pem`,
+              description: 'PEM file for your project wallet'
+            }]
+          });
+          
+          // Clean up temporary file
+          fs.unlinkSync(tempPemPath);
+          console.log(`[REGISTER-PROJECT] ✅ Sent DM with PEM file to admin ${interaction.user.tag}`);
+        } catch (fileError) {
+          // If file attachment fails, send without file
+          console.error(`[REGISTER-PROJECT] Could not send PEM file, sending text only:`, fileError.message);
+          
+          // Clean up temp file if it exists
+          if (fs.existsSync(tempPemPath)) {
+            try {
+              fs.unlinkSync(tempPemPath);
+            } catch (cleanupError) {
+              // Ignore cleanup errors
+            }
+          }
+          
+          // Send DM without file attachment
+          await adminUser.send({ embeds: [dmEmbed] });
+          console.log(`[REGISTER-PROJECT] ✅ Sent DM (text only) to admin ${interaction.user.tag}`);
+        }
+      } catch (dmError) {
+        console.error(`[REGISTER-PROJECT] Could not send DM to admin ${interaction.user.tag}:`, dmError.message);
+        // Don't fail the command if DM fails - the embed already has the info
+      }
       
       // Fetch and store token metadata for all supported tokens with rate limiting
       console.log(`[TOKEN] Fetching metadata for ${supportedTokens.length} tokens: ${supportedTokens.join(', ')}`);
@@ -1892,7 +1991,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       console.log(`[TOKEN] Metadata fetch complete: ${metadataSuccessCount} success, ${metadataFailCount} failed`);
-      console.log(`Project "${projectName}" registered for guild ${guildId} by ${interaction.user.tag}`);
+      console.log(`Project "${projectName}" registered for guild ${guildId} by ${interaction.user.tag} with auto-generated wallet ${wallet.address}`);
     } catch (error) {
       console.error('Error registering project:', error);
       if (interaction.deferred) {
@@ -5050,6 +5149,13 @@ client.on('interactionCreate', async (interaction) => {
       embed.addFields({
         name: 'ℹ️ How to Use',
         value: 'Type `/` in Discord to see all commands. Commands marked **🔴 Admin Only** require administrator permissions. Most commands support both private and public responses.',
+        inline: false
+      });
+
+      // Add documentation link
+      embed.addFields({
+        name: '📖 Documentation',
+        value: 'For detailed guides and more information, visit our [GitBook Documentation](https://hodltokenclub.gitbook.io/esdt-tipping-bot/)',
         inline: false
       });
 

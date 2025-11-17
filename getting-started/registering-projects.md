@@ -57,20 +57,28 @@ Understanding the difference between these two wallet types is crucial for prope
 
 ### 📝 How to Register a Project Wallet
 
-1. **Prepare your wallet address, PEM file, and supported tokens list.**
+1. **Prepare your supported tokens list.**
 2. Use the `/register-project` command:
    * `project-name`: Choose a unique name for this wallet.
-   * `wallet-address`: Paste MultiversX wallet address associated with PEM (must start with `erd1` and be 62 characters).
-   * `wallet-pem`: Paste the PEM file content (use Notepad for easy copy/paste).
    * `supported-tokens`: Comma-separated list (e.g., `EGLD,REWARD,USDC,MYTOKEN`).
    * (Optional) `project-logo-url`: URL to your project logo image (will be used in notifications and embeds).
    * (Optional) `user-input`: Add notes for this project.
-3. The bot will confirm registration and show your project in `/list-projects`.
+3. The bot will automatically generate a new MultiversX wallet for your project.
+4. **Save the wallet information** that will be displayed in the command response and sent to you via DM:
+   * Wallet address
+   * Seed phrase (24 words) - you can use this to log in to xPortal or Extension wallet
+   * PEM file content - save this to a secure location (e.g., `WalletKey.pem`)
+5. **Top up the wallet** with:
+   * **EGLD** - Required for blockchain transaction fees
+   * **REWARD tokens** - Required for MakeX API usage fees ($0.03 per transaction)
+6. The bot will confirm registration and show your project in `/list-projects`.
 
 **Example:**
 ```
-/register-project MainWallet erd1abc123... "-----BEGIN PRIVATE KEY-----..." REWARD-cf6eac,EGLD https://example.com/logo.png "Main community wallet"
+/register-project MainWallet REWARD-cf6eac,EGLD https://example.com/logo.png "Main community wallet"
 ```
+
+**Note**: The bot automatically generates a new MultiversX wallet for your project. You don't need to provide a wallet address or PEM file - the bot creates and manages this wallet automatically, and you'll receive the wallet details via DM.
 
 ***
 

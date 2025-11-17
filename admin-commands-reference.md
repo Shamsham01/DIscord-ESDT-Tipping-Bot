@@ -9,22 +9,22 @@ Complete reference of all admin commands for managing the bot.
 ## Project Management
 
 ### `/register-project`
-Register a new project wallet.
+Register a new project with auto-generated wallet.
 
-**Usage**: `/register-project project-name wallet-address wallet-pem supported-tokens [project-logo-url] [user-input]`
+**Usage**: `/register-project project-name supported-tokens [project-logo-url] [user-input]`
 
 **Parameters**:
 - `project-name` (Required): Unique name for the project
-- `wallet-address` (Required): MultiversX wallet address (erd1..., 62 characters)
-- `wallet-pem` (Required): PEM file content
 - `supported-tokens` (Required): Comma-separated list of token tickers
 - `project-logo-url` (Optional): URL to project logo image
 - `user-input` (Optional): Additional notes
 
 **Example**:
 ```
-/register-project MainWallet erd1abc123... "-----BEGIN..." REWARD-cf6eac,EGLD https://logo.png
+/register-project MainWallet REWARD-cf6eac,EGLD https://logo.png
 ```
+
+**Note**: The bot automatically generates a new MultiversX wallet for your project. Wallet details (address, seed phrase, PEM file) will be displayed in the command response and sent to you via DM. Make sure to save the PEM file and seed phrase securely. You must top up the wallet with EGLD (for fees) and REWARD tokens (for usage fees) before using it.
 
 ### `/update-project`
 Update project settings.
