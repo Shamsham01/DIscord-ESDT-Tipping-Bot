@@ -11,16 +11,47 @@ description: >-
 
 ### 🔑 Project Wallets vs. Community Fund
 
-* **Project Wallet:**
-  * Used by admins for `/send-esdt` and `/tip` (no min/max limits).
-  * Intended for admin-controlled transfers and unrestricted tipping.
-  * **Not recommended** for P2P tips or games.
-* **Community Fund:**
-  * Special project wallet for P2P tips (`/tip`) and RPS games.
-  * Requires min/max limits for each supported ESDT token.
-  * Enables users to tip each other and play games with safe, controlled limits.
+Understanding the difference between these two wallet types is crucial for proper bot setup and security.
 
-> ⚠️ **Warning:** If you only register one wallet for admin use, **do NOT set it as the Community Fund**. This could expose admin funds to public tipping and games.
+#### Project Wallets (Admin-Controlled)
+
+* **Control**: Fully controlled by admins
+* **Purpose**: Used for admin-controlled transfers and operations
+* **Commands**: 
+  * `/send-esdt` - Send tokens to users
+  * `/send-nft` - Send NFTs to users
+  * `/create-auction` - Create NFT auctions
+* **On-Chain Transfers**: All operations result in **on-chain blockchain transfers**
+* **Usage Fee**: MakeX API `usageFee` ($0.03 in REWARD) is charged for each transfer
+* **Security**: Admins have full control - can delete projects, manage funds, etc.
+
+> ⚠️ **Important**: Project Wallets are controlled by admins. Deletion commands result in mass withdrawals to user wallets for safety.
+
+#### Community Fund Wallet (User-Focused)
+
+* **Control**: **NOT controlled by admins** - auto-generated and managed by the bot
+* **Purpose**: Used for user-to-user interactions and Virtual Account operations
+* **Commands**:
+  * `/tip-virtual-esdt` - User-to-user tips
+  * `/tip-virtual-nft` - User-to-user NFT transfers
+  * `/challenge-rps` - RPS game challenges
+  * `/withdraw-esdt` - User withdrawals
+* **Virtual Account Operations**: Most operations happen **inside the Community Fund** - bot just updates balance records
+* **Usage Fee**: **NO usageFee** for Virtual Account operations (tips, RPS, NFT transfers)
+* **Usage Fee Exception**: `/withdraw-esdt` and `/house-withdraw` to Project Wallets **DO charge usageFee** (on-chain transfers)
+* **Security**: Cannot be deleted by admins - protects user funds. All deletion commands result in mass withdrawals to user wallets
+
+#### Key Differences Summary
+
+| Feature | Project Wallets | Community Fund |
+|---------|----------------|----------------|
+| **Control** | Admin-controlled | Bot-managed (not admin-controlled) |
+| **Operations** | On-chain transfers | Virtual Account (balance updates) |
+| **Usage Fee** | ✅ Charged ($0.03 REWARD) | ❌ Not charged (except withdrawals) |
+| **Commands** | `/send-esdt`, `/send-nft`, `/create-auction` | `/tip-virtual-esdt`, `/challenge-rps`, `/withdraw-esdt` |
+| **Deletion** | Admin can delete | Protected - mass withdrawal only |
+
+> ⚠️ **Warning:** If you only register one wallet for admin use, **do NOT set it as the Community Fund**. This could expose admin funds to public tipping and games. Always use separate wallets.
 
 ***
 

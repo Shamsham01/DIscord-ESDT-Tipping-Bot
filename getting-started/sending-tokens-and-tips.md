@@ -42,10 +42,33 @@ description: >-
 
 ### 💸 Usage Fee (usageFee)
 
-* Every transfer or tip incurs a **$0.03 fee in REWARD tokens** (automatically consumed per transfer/tip).
-* This fee covers server and bot hosting costs.
-* **Buy REWARD:** Buy REWARD on DEX or in xPortal.
-* **Pro Tip:** We strongly recommend investing in HODL Token Club DeFi and farming REWARD on OneDEX instead of buying directly.
+**Important**: Usage fees depend on which wallet type is used:
+
+#### Project Wallets (Admin-Controlled)
+* **All operations charge usageFee**: Every transfer from Project Wallets incurs a **$0.03 fee in REWARD tokens**
+* **Commands that charge**:
+  * `/send-esdt` - Sending tokens
+  * `/send-nft` - Sending NFTs
+  * `/create-auction` - Creating auctions
+* This is because all operations result in **on-chain blockchain transfers**
+
+#### Community Fund (Virtual Account Operations)
+* **Most operations are FREE**: Virtual Account operations do **NOT charge usageFee**
+* **Commands that are FREE**:
+  * `/tip-virtual-esdt` - User-to-user tips
+  * `/tip-virtual-nft` - User-to-user NFT transfers
+  * `/challenge-rps` - RPS game challenges
+* **Commands that DO charge usageFee**:
+  * `/withdraw-esdt` - Withdrawing to user wallets (on-chain transfer)
+  * `/house-withdraw` - Withdrawing from House Balance to Project Wallets (on-chain transfer)
+
+**Why the difference?**
+- Project Wallet operations = On-chain transfers = UsageFee charged
+- Community Fund Virtual Account operations = Balance updates only = No UsageFee
+- Withdrawals = On-chain transfers = UsageFee charged
+
+**Buy REWARD:** Buy REWARD on DEX or in xPortal.
+**Pro Tip:** We strongly recommend investing in HODL Token Club DeFi and farming REWARD on OneDEX instead of buying directly.
 
 ***
 

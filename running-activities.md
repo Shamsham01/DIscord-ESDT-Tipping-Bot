@@ -180,32 +180,61 @@ When an NFT is sold at auction, the sale amount goes to Auction House. This bala
 
 ## Rock Paper Scissors
 
-Rock Paper Scissors allows users to challenge each other with token prizes.
+Rock Paper Scissors allows users to challenge each other with token prizes. The Community Fund wallet acts as a secure middleman (like a smart contract), holding both players' deposits until a winner is determined.
 
 ### How RPS Works
 
-1. **Challenge Created**: User challenges another user with a bet amount
-2. **Challenge Accepted**: Other user joins by matching the bet
-3. **Players Make Moves**: Both players choose Rock, Paper, or Scissors
-4. **Winner Determined**: Standard RPS rules apply
-5. **Prize Distributed**: Winner receives total pot (both bets)
-6. **Draw Handling**: If draw, game continues with additional rounds
+#### 1. Challenge Creation
+
+- **Challenger**: Initiates the game by choosing a token and amount to wager
+- The challenger uses `/challenge-rps` command with:
+  * The Discord tag of the user they want to challenge
+  * The token ticker (e.g., `REWARD-cf6eac`)
+  * The bet amount
+  * Optional memo
+- The bet amount is automatically deducted from the challenger's Virtual Account balance
+- **No transaction hash needed!** The bot uses Virtual Account balance
+
+#### 2. Challenge Notification
+
+- The challenged user is notified in the channel and via DM (if their DMs are open)
+- The notification includes the token, amount, and instructions to join
+
+#### 3. Accepting the Challenge
+
+- The challenged user reviews the token and amount
+- If they accept, they use `/join-rps` command (or click the "Join Challenge" button)
+- The bot automatically deducts the matching bet amount from their Virtual Account balance
+- The bot verifies that both deposits match in token and amount
+
+#### 4. Game Play
+
+- Once both players have joined and deposited, the game becomes active
+- Players take turns making their moves (rock, paper, or scissors) using the `/play-rps` command
+- The winner is determined by standard RPS rules:
+  * Rock beats Scissors
+  * Scissors beats Paper
+  * Paper beats Rock
+  * If both pick the same, it's a draw and a new round starts
+
+#### 5. Prize Distribution
+
+- The winner receives the **total prize** (both players' deposits) directly to their Virtual Account
+- The bot announces the winner in the channel and sends a DM (if possible)
+
+### Game Rules & Dynamics
+
+- **Both players must deposit the same amount and token.** The bot enforces this automatically
+- **No self-challenges:** You cannot challenge yourself
+- **Virtual Account Integration:** All bets use Virtual Account balance - no blockchain transactions needed for gameplay
+- **Timeout & Refunds:** If the challenged user does not join within 30 minutes, the challenge expires and the challenger is automatically refunded to their Virtual Account
+- **Transparency:** All moves, results, and prize transfers are announced in the channel for fairness
 
 ### Creating a Challenge
-
-Users create challenges with:
 
 ```
 /challenge-rps user-tag bet-amount [token] [memo] [public]
 ```
-
-#### Parameters
-
-- **`user-tag`**: Discord user to challenge
-- **`bet-amount`**: Amount to bet
-- **`token`** (Optional): Token to use (default: Community Fund token)
-- **`memo`** (Optional): Optional message
-- **`public`** (Optional): Show publicly or privately
 
 #### Example
 
@@ -215,7 +244,11 @@ Users create challenges with:
 
 ### Joining a Challenge
 
-The challenged user can join by matching the bet. They use their Virtual Account balance - no transaction hash needed!
+The challenged user can join by:
+- Clicking the "Join Challenge" button on the challenge embed (opens a modal)
+- Or using `/join-rps` command with the challenge ID
+
+**No transaction hash needed!** The bot uses Virtual Account balance automatically.
 
 ### Viewing Challenges
 
@@ -231,12 +264,61 @@ RPS challenges use Virtual Account balance, so users don't need to:
 - Provide transaction hashes
 - Wait for blockchain confirmations
 - Pay gas fees for each game
+- Make on-chain transfers
 
-The bot automatically deducts from Virtual Accounts when challenges are created and joined.
+The bot automatically:
+- Deducts from Virtual Accounts when challenges are created and joined
+- Credits the winner's Virtual Account with the prize
+- Refunds expired challenges automatically
 
 ---
 
+## Cleanup Feature
+
+The bot automatically cleans up old messages to keep channels tidy:
+
+- **Finished Listings**: NFT listings that are sold, canceled, or expired are automatically deleted
+- **Ended Auctions**: Completed auctions are automatically removed
+- **Expired Challenges**: RPS challenges that expired are cleaned up
+- **Finished Matches**: Football betting matches that ended are cleaned up
+
+This helps maintain clean, organized channels and makes it easier for users to find active listings and activities.
+
+> 💡 **Tip**: The cleanup feature runs automatically. You don't need to manually delete old messages.
+
 ## Best Practices
+
+### For NFT Listings (Forum Channels)
+
+**Recommended Setup**: Use Discord Forum Channels for NFT listings
+
+1. **Create a Forum Channel**: Set up a forum channel (not a regular text channel)
+2. **Create Posts per Collection**: Make a separate post for each NFT collection
+3. **List NFTs in Posts**: Users can list NFTs using `/sell-nft` in the collection post
+4. **Clean Browsing**: With the cleanup feature, finished listings are automatically removed, keeping each collection post clean and organized
+
+**Benefits:**
+- ✅ Clean, organized browsing of all listings
+- ✅ Easy to find NFTs by collection
+- ✅ Automatic cleanup keeps posts tidy
+- ✅ Better user experience
+
+**Limitations:**
+- ❌ No threads are created (users can't comment directly on listings)
+- ❌ Offers are made via DM (not in comments)
+
+**Example Structure:**
+```
+#nft-marketplace (Forum Channel)
+  ├── OlivePantheon Collection (Post)
+  │   ├── Perseus Olive - 1750 OLV
+  │   ├── Diogenes Olive - 2000 OLV
+  │   └── (Finished listings auto-removed)
+  ├── Basturds Collection (Post)
+  │   └── (Active listings)
+  └── SuperVictor Collection (Post)
+      └── (Active listings)
+```
 
 ### For Lotteries
 
@@ -258,6 +340,7 @@ The bot automatically deducts from Virtual Accounts when challenges are created 
 - Use appropriate minimum bid increases
 - Provide clear descriptions and titles
 - Monitor Auction House balance
+- **Use Forum Channels**: Create a forum channel and make posts for each NFT collection (see best practices below)
 
 ### For RPS
 

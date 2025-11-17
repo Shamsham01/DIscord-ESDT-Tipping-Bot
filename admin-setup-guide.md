@@ -360,6 +360,32 @@ This creates a lottery with:
 - 5% house commission
 - 1000 tokens initial prize pool (from Lottery House)
 
+### House Balance Top-Up Workaround
+
+**Important**: To top up House Balance, you need a Virtual Account. Here's the recommended workaround:
+
+1. **Create a Generic Discord Profile**: Create a separate Discord account for your project (e.g., "Project Bot Account")
+2. **Register Project Wallet**: Use `/set-wallet` with the generic account to register your Project Wallet address
+3. **Deposit to Community Fund**: Transfer tokens/NFTs to the Community Fund wallet address
+4. **Top Up House Balance**: Use `/virtual-house-topup` with the generic account to transfer from Virtual Account to House Balance
+5. **Fund Lotteries**: Once House Balance is funded, you can use it to sponsor initial prize pools when creating lotteries
+
+**Why This Works:**
+- The generic Discord account gets a Virtual Account when you register the Project Wallet
+- Deposits to Community Fund automatically credit the Virtual Account
+- You can then transfer from Virtual Account to House Balance
+- This allows you to fund House Balance without exposing admin wallets
+
+**Example Flow:**
+```
+1. Create generic Discord account: "ProjectBot"
+2. Register Project Wallet: /set-wallet erd1... (as ProjectBot)
+3. Transfer 1000 REWARD to Community Fund wallet
+4. Bot auto-credits ProjectBot's Virtual Account
+5. Top up House Balance: /virtual-house-topup REWARD-cf6eac 1000 lottery
+6. Create lottery with initial prize pool: /create-lottery ... initial-prize-pool:1000
+```
+
 ---
 
 ## Next Steps
