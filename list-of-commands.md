@@ -1,0 +1,41 @@
+---
+description: >-
+  Below is a list of all available commands for the ESDT Tipping Bot, grouped by
+  category.
+---
+
+# List of Commands
+
+***
+
+### 🛠️ Setup and Management
+
+* **/set-wallet** — Register your MultiversX wallet address with the bot.
+* **/register-project** — Admins: Register a new project wallet for sending tokens.
+* **/update-project** — Admins: Update details for an existing project wallet.
+* **/delete-project** — Admins: Delete a registered project wallet.
+* **/set-community-fund** — Admins: Set a project wallet as the Community Fund for P2P tips and games.
+* **/set-tip-limits** — Admins: Set minimum and maximum tip amounts for each token.
+* **/list-wallets** — Admins: List all registered user wallets in the server.
+* **/list-projects** — List all registered project wallets.
+* **/list-tip-limits** — Admins: View current tip limits for each token.
+
+***
+
+### 💸 Tipping and Transfers
+
+* **/send-esdt** — Admins: Send ESDT tokens from a project wallet to any user.
+* **/tip** — Send a random tip (from the Community Fund) to another user.
+
+***
+
+### 🎮 RPS Game
+
+* **/challenge-rps** — Challenge another user to a Rock, Paper, Scissors game (requires transaction hash).
+* **/join-rps** — Join an existing RPS challenge by matching the bet (requires transaction hash).
+* **/play-rps** — Play your move (Rock, Paper, or Scissors) in an active RPS game.
+* **/list-rps-challenges** — View all active and waiting RPS challenges.
+
+***
+
+For more details and support reach out to HODL Token Club [Discord](https://discord.gg/RBtGMjwTDw) Server.
