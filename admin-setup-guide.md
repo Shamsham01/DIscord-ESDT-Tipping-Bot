@@ -66,9 +66,7 @@ Use the `/register-project` command to create a new project with an **auto-gener
 /register-project project-name supported-tokens [project-logo-url] [user-input]
 ```
 
-{% embed url="https://sendvid.com/9yd2wb0y" %}
-
-{% embed url="https://drive.google.com/file/d/1G1kSDBZldmzGq3Nfsvra69fjkbZ7Mgf9/view?usp=sharing" %}
+{% embed url="https://streamable.com/wsq5u9" fullWidth="true" %}
 
 #### Parameters Explained
 
@@ -139,6 +137,8 @@ Use the `/set-community-fund` command:
 /set-community-fund fund-name supported-tokens [qr-code-url]
 ```
 
+{% embed url="https://streamable.com/mom0mk" fullWidth="true" %}
+
 #### Parameters Explained
 
 * **`fund-name`** (Required): Name for your Community Fund (e.g., "Main Fund", "Gaming Fund")
@@ -198,6 +198,8 @@ To add or update a project logo (for non-Community Fund projects):
 /update-project project-name project-logo-url:https://example.com/new-logo.png
 ```
 
+{% embed url="https://streamable.com/n95ql4" fullWidth="true" %}
+
 **Note**: Project logos are stored in the `projects` table and used in:
 
 * DM notifications when sending tokens
@@ -211,6 +213,8 @@ To add or update the Community Fund QR code:
 ```
 /update-project Community Fund qr-code-url:https://example.com/new-qr.png
 ```
+
+{% embed url="https://streamable.com/x6txwo" fullWidth="true" %}
 
 **Note**:
 
