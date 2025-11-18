@@ -11,10 +11,9 @@
      * ✅ View Channel
      * ✅ Send Messages
      * ✅ Embed Links
-     * ✅ Create Public Threads (Required for football betting)
+     * ✅ Create Public Threads
      * ✅ Send Messages in Threads
      * ✅ Read Message History
-     * ✅ Use External Emojis
   4. Ensure that users/roles who should interact with the bot can use **slash commands** in that channel.
 
 > ⚠️ **These permissions are required for the bot to function properly!**
@@ -46,7 +45,7 @@ Welcome! Follow these steps to quickly set up your ESDT Tipping Bot and register
 ### 3. Prepare Supported Tokens List
 
 * Make a list of all ESDT tokens you want the bot to support, separated by commas.
-* Example:  `WEGLD-bd4d79,USDC-c76f1f,REWARD-cf6eac,UTK-2f80e9`
+* Example: `WEGLD-bd4d79,USDC-c76f1f,REWARD-cf6eac,UTK-2f80e9`
 * You will need this list when registering a project wallet.
 
 ***
