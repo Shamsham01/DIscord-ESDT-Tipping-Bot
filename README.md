@@ -101,11 +101,28 @@ Set it and forget it:
 
 ## 🔒 Security & Best Practices
 
-### **Wallet Management**
-- ✅ **Auto-Generated Wallets** - Project wallets are created automatically by the bot
-- ✅ **Encrypted Storage** - All sensitive data is encrypted before database storage
-- ✅ **New Wallets Only** - Always use dedicated wallets (never personal or exchange wallets)
-- ✅ **Minimal Storage** - Keep only necessary tokens in bot wallets (top up regularly)
+### **Wallet Types & Control**
+
+#### **Project Wallets (Admin-Controlled)**
+- ✅ **Auto-Generated** - Created automatically by the bot with `/register-project`
+- ✅ **Admin Control** - Admins have full control over these wallets
+- ✅ **Encrypted Storage** - PEM files are encrypted before database storage
+- ✅ **Dedicated Use** - Always use new, dedicated wallets (never personal or exchange wallets)
+- ✅ **Mass Withdrawal Protection** - If admins delete project data, the bot automatically performs mass withdrawals to all user wallets before deletion
+
+#### **Community Fund Wallets (User-Protected)**
+- ✅ **Auto-Generated** - Created automatically by the bot with `/set-community-fund`
+- ✅ **NOT Admin-Controlled** - Admins cannot control or delete these wallets (enhanced user safety)
+- ✅ **User Protection** - If admins attempt to delete project data, the bot performs mass withdrawals to all user wallets first
+- ✅ **Bot-Managed** - Fully managed by the bot for user activities and virtual accounts
+
+### **User Wallet Registration**
+- ✅ **100% Safe** - Users can safely register their personal wallets with the bot
+- ✅ **No Sensitive Data** - The bot only stores:
+  - Discord username
+  - Associated wallet address
+- ✅ **No PEM Storage** - User wallet PEM files are NEVER stored or requested
+- ✅ **Easy Top-Ups** - Registering personal wallets makes topping up virtual accounts seamless
 
 ### **Wallet Requirements**
 Each project wallet needs:
@@ -118,7 +135,11 @@ Each project wallet needs:
 - **On-Chain Transfers** - $0.03 in REWARD tokens (only for admin transfers and withdrawals)
 
 {% hint style="warning" %}
-**Important Security Note:** Always create new, dedicated wallets for the bot. While PEM files are encrypted in the database, it's best practice to keep minimal funds in bot wallets and top up regularly. Never use personal or exchange wallets.
+**Important Security Note for Admins:** Always create new, dedicated wallets for project registration. While PEM files are encrypted in the database, it's best practice to keep minimal funds in bot wallets and top up regularly. Never use personal or exchange wallets for project registration.
+{% endhint %}
+
+{% hint style="success" %}
+**Safe for Users:** Users can confidently register their personal wallets with the bot. The bot only stores your Discord username and wallet address—no sensitive information like PEM files or private keys are ever stored or required.
 {% endhint %}
 
 ***
