@@ -268,82 +268,6 @@ async function getNFTTransactionHistory(guildId, userId, collection = null, limi
 }
 
 // ============================================
-// HOUSE BALANCE
-// ============================================
-
-async function trackNFTTopup(guildId, collection, identifier, nonce, userId, txHash, metadata = {}) {
-  try {
-    // Get or create house balance record for this collection
-    const { data: existingBalance, error: fetchError } = await supabase
-      .from('house_nft_balance')
-      .select('*')
-      .eq('guild_id', guildId)
-      .eq('collection', collection)
-      .single();
-    
-    let nftList = [];
-    let nftCount = 0;
-    
-    if (existingBalance) {
-      nftList = existingBalance.nft_list || [];
-      nftCount = existingBalance.nft_count || 0;
-    }
-    
-    // Add NFT to list
-    const nftEntry = {
-      identifier: identifier,
-      nonce: nonce,
-      nft_name: metadata.nft_name || null,
-      deposited_by: userId,
-      deposited_at: Date.now(),
-      tx_hash: txHash
-    };
-    
-    nftList.push(nftEntry);
-    nftCount += 1;
-    
-    // Update or insert house balance
-    const { error } = await supabase
-      .from('house_nft_balance')
-      .upsert({
-        guild_id: guildId,
-        collection: collection,
-        nft_count: nftCount,
-        nft_list: nftList,
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'guild_id,collection' });
-    
-    if (error) throw error;
-    
-    return { success: true, nftCount };
-  } catch (error) {
-    console.error('[DB] Error tracking NFT topup:', error);
-    throw error;
-  }
-}
-
-async function getHouseNFTBalance(guildId, collection = null) {
-  try {
-    let query = supabase
-      .from('house_nft_balance')
-      .select('*')
-      .eq('guild_id', guildId);
-    
-    if (collection) {
-      query = query.eq('collection', collection);
-    }
-    
-    const { data, error } = await query;
-    
-    if (error) throw error;
-    return data || [];
-  } catch (error) {
-    console.error('[DB] Error getting house NFT balance:', error);
-    throw error;
-  }
-}
-
-// ============================================
 // LISTINGS
 // ============================================
 
@@ -782,10 +706,6 @@ module.exports = {
   // Transaction History
   addNFTTransaction,
   getNFTTransactionHistory,
-  
-  // House Balance
-  trackNFTTopup,
-  getHouseNFTBalance,
   
   // Listings
   createListing,

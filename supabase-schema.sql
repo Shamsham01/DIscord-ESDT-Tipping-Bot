@@ -528,16 +528,3 @@ CREATE INDEX IF NOT EXISTS idx_nft_offers_offerer ON nft_offers(guild_id, offere
 CREATE INDEX IF NOT EXISTS idx_nft_offers_status ON nft_offers(status);
 CREATE INDEX IF NOT EXISTS idx_nft_offers_expires_at ON nft_offers(expires_at) WHERE expires_at IS NOT NULL;
 
--- House NFT balance (tracks NFTs in Community Fund)
-CREATE TABLE IF NOT EXISTS house_nft_balance (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    guild_id TEXT NOT NULL,
-    collection TEXT NOT NULL,
-    nft_count INTEGER DEFAULT 0,
-    nft_list JSONB DEFAULT '[]',
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(guild_id, collection)
-);
-
-CREATE INDEX IF NOT EXISTS idx_house_nft_balance_guild ON house_nft_balance(guild_id);
-

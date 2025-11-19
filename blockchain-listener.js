@@ -479,17 +479,6 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
       nftMetadata
     );
     
-    // Track NFT top-up to house balance
-    await virtualAccountsNFT.trackNFTTopup(
-      guildId,
-      collection,
-      identifier,
-      nonce,
-      userId,
-      txHash,
-      nftMetadata
-    );
-    
     // Create transaction record
     await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
       id: `nft_deposit_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
