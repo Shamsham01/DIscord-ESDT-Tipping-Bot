@@ -194,6 +194,13 @@ const commands = [
                 type: ApplicationCommandOptionType.String,
                 required: false
             },
+            {
+                name: 'amount',
+                description: 'Amount to auction (default: 1, required for SFTs)',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 1
+            },
         ],
         default_member_permissions: null, // Permissions are checked in code
     },
@@ -792,21 +799,28 @@ const commands = [
     },
     {
         name: 'withdraw-nft',
-        description: 'Withdraw an NFT from your Virtual Account to your registered wallet',
+        description: 'Withdraw an NFT or SFT from your Virtual Account to your registered wallet',
         options: [
             {
                 name: 'collection',
-                description: 'NFT collection',
+                description: 'NFT/SFT collection',
                 type: ApplicationCommandOptionType.String,
                 required: true,
                 autocomplete: true
             },
             {
                 name: 'nft-name',
-                description: 'NFT name or identifier',
+                description: 'NFT/SFT name or identifier',
                 type: ApplicationCommandOptionType.String,
                 required: true,
                 autocomplete: true
+            },
+            {
+                name: 'amount',
+                description: 'Amount to withdraw (default: 1, required for SFTs)',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 1
             }
         ],
         default_member_permissions: null,
@@ -867,6 +881,13 @@ const commands = [
             {
                 name: 'expires-in',
                 description: 'Hours until expiration (optional)',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 1
+            },
+            {
+                name: 'amount',
+                description: 'Amount to list (default: 1, required for SFTs)',
                 type: ApplicationCommandOptionType.Number,
                 required: false,
                 min_value: 1
@@ -976,6 +997,13 @@ const commands = [
                 description: 'Optional memo for the tip',
                 type: ApplicationCommandOptionType.String,
                 required: false
+            },
+            {
+                name: 'amount',
+                description: 'Amount to tip (default: 1, required for SFTs)',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 1
             }
         ],
         default_member_permissions: null,

@@ -309,7 +309,6 @@ CREATE TABLE IF NOT EXISTS auction_bids (
     bidder_id TEXT NOT NULL,
     bidder_tag TEXT,
     bid_amount_wei TEXT NOT NULL,
-    tx_hash TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(auction_id, guild_id, bidder_id, created_at)
 );
@@ -455,6 +454,8 @@ CREATE TABLE IF NOT EXISTS virtual_account_nft_transactions (
     identifier TEXT NOT NULL,
     nonce INTEGER NOT NULL,
     nft_name TEXT,
+    amount INTEGER DEFAULT 1, -- Amount for SFTs (default 1 for NFTs)
+    token_type TEXT DEFAULT 'NFT', -- 'NFT' or 'SFT' - explicit classification, not inferred from amount
     from_user_id TEXT,
     to_user_id TEXT,
     price_token_identifier TEXT,
@@ -478,6 +479,7 @@ CREATE TABLE IF NOT EXISTS nft_listings (
     guild_id TEXT NOT NULL,
     seller_id TEXT NOT NULL,
     seller_tag TEXT,
+    buyer_id TEXT,
     collection TEXT NOT NULL,
     identifier TEXT NOT NULL,
     nonce INTEGER NOT NULL,
@@ -502,6 +504,7 @@ CREATE TABLE IF NOT EXISTS nft_listings (
 CREATE INDEX IF NOT EXISTS idx_nft_listings_guild ON nft_listings(guild_id);
 CREATE INDEX IF NOT EXISTS idx_nft_listings_status ON nft_listings(status);
 CREATE INDEX IF NOT EXISTS idx_nft_listings_seller ON nft_listings(guild_id, seller_id);
+CREATE INDEX IF NOT EXISTS idx_nft_listings_buyer ON nft_listings(guild_id, buyer_id) WHERE buyer_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_nft_listings_collection ON nft_listings(guild_id, collection);
 CREATE INDEX IF NOT EXISTS idx_nft_listings_expires_at ON nft_listings(expires_at) WHERE expires_at IS NOT NULL;
 

@@ -65,52 +65,141 @@ async function getUserCollections(guildId, userId) {
   }
 }
 
-async function addNFTToAccount(guildId, userId, collection, identifier, nonce, metadata = {}) {
+async function addNFTToAccount(guildId, userId, collection, identifier, nonce, metadata = {}, amount = 1, tokenType = 'NFT') {
   try {
-    const { data, error } = await supabase
-      .from('virtual_account_nft_balances')
-      .insert({
-        guild_id: guildId,
-        user_id: userId,
-        collection: collection,
-        identifier: identifier,
-        nonce: nonce,
-        nft_name: metadata.nft_name || null,
-        nft_image_url: metadata.nft_image_url || null,
-        metadata: metadata.metadata || {}
-      })
-      .select()
-      .single();
+    // Convert amount to number if string
+    const amountNum = typeof amount === 'string' ? parseInt(amount, 10) : Number(amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      throw new Error(`Invalid amount: ${amount}. Amount must be a positive number.`);
+    }
+
+    // Validate token type - must be explicitly 'SFT' or 'NFT'
+    // CRITICAL: Don't infer from amount! 1 SFT is still SFT, not NFT
+    const validTokenType = (tokenType === 'SFT' || tokenType === 'NFT') ? tokenType : 'NFT';
+    const finalTokenType = validTokenType; // Use explicit type, no inference
+
+    // Check if record already exists
+    const existing = await getUserNFTBalance(guildId, userId, collection, nonce);
     
-    if (error) throw error;
-    return data;
+    if (existing) {
+      // Update existing record: increment amount, preserve token_type (don't downgrade SFT to NFT)
+      const newAmount = (existing.amount || 1) + amountNum;
+      const existingTokenType = existing.token_type || 'NFT';
+      // If existing is SFT, keep it as SFT; if new is SFT, upgrade to SFT
+      const updatedTokenType = existingTokenType === 'SFT' || finalTokenType === 'SFT' ? 'SFT' : 'NFT';
+      
+      const { data, error } = await supabase
+        .from('virtual_account_nft_balances')
+        .update({
+          amount: newAmount,
+          token_type: updatedTokenType,
+          nft_name: metadata.nft_name || existing.nft_name || null,
+          nft_image_url: metadata.nft_image_url || existing.nft_image_url || null,
+          metadata: metadata.metadata || existing.metadata || {},
+          updated_at: new Date().toISOString()
+        })
+        .eq('guild_id', guildId)
+        .eq('user_id', userId)
+        .eq('collection', collection)
+        .eq('nonce', nonce)
+        .select()
+        .single();
+      
+      if (error) throw error;
+      return data;
+    } else {
+      // Insert new record
+      const { data, error } = await supabase
+        .from('virtual_account_nft_balances')
+        .insert({
+          guild_id: guildId,
+          user_id: userId,
+          collection: collection,
+          identifier: identifier,
+          nonce: nonce,
+          amount: amountNum,
+          token_type: finalTokenType,
+          nft_name: metadata.nft_name || null,
+          nft_image_url: metadata.nft_image_url || null,
+          metadata: metadata.metadata || {}
+        })
+        .select()
+        .single();
+      
+      if (error) throw error;
+      return data;
+    }
   } catch (error) {
     console.error('[DB] Error adding NFT to account:', error);
     throw error;
   }
 }
 
-async function removeNFTFromAccount(guildId, userId, collection, nonce) {
+async function removeNFTFromAccount(guildId, userId, collection, nonce, amount = 1) {
   try {
-    const { error } = await supabase
-      .from('virtual_account_nft_balances')
-      .delete()
-      .eq('guild_id', guildId)
-      .eq('user_id', userId)
-      .eq('collection', collection)
-      .eq('nonce', nonce);
+    // Convert amount to number if string
+    const amountNum = typeof amount === 'string' ? parseInt(amount, 10) : Number(amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      throw new Error(`Invalid amount: ${amount}. Amount must be a positive number.`);
+    }
+
+    // Get current balance
+    const existing = await getUserNFTBalance(guildId, userId, collection, nonce);
     
-    if (error) throw error;
-    return true;
+    if (!existing) {
+      throw new Error('NFT not found in account');
+    }
+
+    const currentAmount = existing.amount || 1;
+    
+    if (amountNum > currentAmount) {
+      throw new Error(`Insufficient balance. You have ${currentAmount}, trying to remove ${amountNum}`);
+    }
+
+    if (amountNum >= currentAmount) {
+      // Remove entire record
+      const { error } = await supabase
+        .from('virtual_account_nft_balances')
+        .delete()
+        .eq('guild_id', guildId)
+        .eq('user_id', userId)
+        .eq('collection', collection)
+        .eq('nonce', nonce);
+      
+      if (error) throw error;
+      return { removed: currentAmount, remaining: 0 };
+    } else {
+      // Decrement amount
+      const newAmount = currentAmount - amountNum;
+      const { error } = await supabase
+        .from('virtual_account_nft_balances')
+        .update({
+          amount: newAmount,
+          updated_at: new Date().toISOString()
+        })
+        .eq('guild_id', guildId)
+        .eq('user_id', userId)
+        .eq('collection', collection)
+        .eq('nonce', nonce);
+      
+      if (error) throw error;
+      return { removed: amountNum, remaining: newAmount };
+    }
   } catch (error) {
     console.error('[DB] Error removing NFT from account:', error);
     throw error;
   }
 }
 
-async function transferNFTBetweenUsers(guildId, fromUserId, toUserId, collection, nonce, priceData = null) {
+async function transferNFTBetweenUsers(guildId, fromUserId, toUserId, collection, nonce, priceData = null, amount = 1) {
   try {
-    // 1. Verify seller owns the NFT
+    // Convert amount to number if string
+    const amountNum = typeof amount === 'string' ? parseInt(amount, 10) : Number(amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
+      throw new Error(`Invalid amount: ${amount}. Amount must be a positive number.`);
+    }
+
+    // 1. Verify seller owns the NFT and has sufficient amount
     const { data: nftData, error: fetchError } = await supabase
       .from('virtual_account_nft_balances')
       .select('*')
@@ -123,37 +212,39 @@ async function transferNFTBetweenUsers(guildId, fromUserId, toUserId, collection
     if (fetchError || !nftData) {
       throw new Error('NFT not found in seller account');
     }
+
+    const currentAmount = nftData.amount || 1;
+    if (amountNum > currentAmount) {
+      throw new Error(`Insufficient balance. You have ${currentAmount}, trying to transfer ${amountNum}`);
+    }
     
-    // 2. DELETE from seller
-    const { error: deleteError } = await supabase
-      .from('virtual_account_nft_balances')
-      .delete()
-      .eq('guild_id', guildId)
-      .eq('user_id', fromUserId)
-      .eq('collection', collection)
-      .eq('nonce', nonce);
+    // 2. Remove from seller (handles partial removal)
+    await removeNFTFromAccount(guildId, fromUserId, collection, nonce, amountNum);
     
-    if (deleteError) throw deleteError;
-    
-    // 3. INSERT for buyer
-    const { error: insertError } = await supabase
-      .from('virtual_account_nft_balances')
-      .insert({
-        guild_id: guildId,
-        user_id: toUserId,
-        collection: collection,
-        identifier: nftData.identifier,
-        nonce: nonce,
+    // 3. Add to buyer (handles aggregation)
+    // CRITICAL: Get token_type from seller's balance (most reliable source)
+    // Don't infer from amount - 1 SFT is still SFT, not NFT!
+    const sellerTokenType = nftData.token_type || 'NFT';
+    await addNFTToAccount(
+      guildId,
+      toUserId,
+      collection,
+      nftData.identifier,
+      nonce,
+      {
         nft_name: nftData.nft_name,
         nft_image_url: nftData.nft_image_url,
         metadata: nftData.metadata
-      });
-    
-    if (insertError) throw insertError;
+      },
+      amountNum,
+      sellerTokenType // Preserve token_type from seller (SFT vs NFT)
+    );
     
     // 4. Create transaction records for both users
     const transactionId = `nft_transfer_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const timestamp = Date.now();
+    const amountText = amountNum > 1 ? `${amountNum}x ` : '';
+    const sftText = sellerTokenType === 'SFT' ? 'SFT' : 'NFT';
     
     // Seller transaction
     await addNFTTransaction(guildId, fromUserId, {
@@ -163,11 +254,16 @@ async function transferNFTBetweenUsers(guildId, fromUserId, toUserId, collection
       identifier: nftData.identifier,
       nonce: nonce,
       nft_name: nftData.nft_name,
+      amount: amountNum, // Store amount for SFTs
+      token_type: sellerTokenType, // Use actual token_type from balance, not inferred from amount
+      from_user_id: fromUserId, // Set from_user_id for sender's transaction record
       to_user_id: toUserId,
       price_token_identifier: priceData?.tokenIdentifier || null,
       price_amount: priceData?.amount || null,
       timestamp: timestamp,
-      description: priceData ? `Sold NFT to user ${toUserId}` : `Transferred NFT to user ${toUserId}`
+      description: priceData 
+        ? `Sold ${amountText}${sftText} to user ${toUserId}` 
+        : `Transferred ${amountText}${sftText} to user ${toUserId}`
     });
     
     // Buyer transaction
@@ -178,14 +274,19 @@ async function transferNFTBetweenUsers(guildId, fromUserId, toUserId, collection
       identifier: nftData.identifier,
       nonce: nonce,
       nft_name: nftData.nft_name,
-      from_user_id: fromUserId,
+      amount: amountNum, // Store amount for SFTs
+      token_type: sellerTokenType, // Use same token_type as seller (preserves SFT classification)
+      from_user_id: fromUserId, // Set from_user_id for recipient's transaction record
+      to_user_id: toUserId, // Set to_user_id to recipient's own ID (they received it)
       price_token_identifier: priceData?.tokenIdentifier || null,
       price_amount: priceData?.amount || null,
       timestamp: timestamp,
-      description: priceData ? `Purchased NFT from user ${fromUserId}` : `Received NFT from user ${fromUserId}`
+      description: priceData 
+        ? `Purchased ${amountText}${sftText} from user ${fromUserId}` 
+        : `Received ${amountText}${sftText} from user ${fromUserId}`
     });
     
-    return { success: true, nftData };
+    return { success: true, nftData, amount: amountNum };
   } catch (error) {
     console.error('[DB] Error transferring NFT:', error);
     throw error;
@@ -198,6 +299,15 @@ async function transferNFTBetweenUsers(guildId, fromUserId, toUserId, collection
 
 async function addNFTTransaction(guildId, userId, transaction) {
   try {
+    // Convert amount to integer (default to 1 if not provided)
+    const amount = transaction.amount !== undefined && transaction.amount !== null 
+      ? (typeof transaction.amount === 'string' ? parseInt(transaction.amount, 10) : Number(transaction.amount))
+      : 1;
+    const finalAmount = isNaN(amount) || amount <= 0 ? 1 : amount;
+    
+    // Validate token_type - must be 'NFT' or 'SFT', default to 'NFT' if not provided
+    const tokenType = transaction.token_type === 'SFT' ? 'SFT' : 'NFT';
+    
     const { error } = await supabase
       .from('virtual_account_nft_transactions')
       .insert({
@@ -209,6 +319,8 @@ async function addNFTTransaction(guildId, userId, transaction) {
         identifier: transaction.identifier,
         nonce: transaction.nonce,
         nft_name: transaction.nft_name || null,
+        amount: finalAmount, // Store amount for SFTs
+        token_type: tokenType, // Explicit token type (NFT or SFT), not inferred from amount
         from_user_id: transaction.from_user_id || null,
         to_user_id: transaction.to_user_id || null,
         price_token_identifier: transaction.price_token_identifier || null,
@@ -273,6 +385,10 @@ async function getNFTTransactionHistory(guildId, userId, collection = null, limi
 
 async function createListing(guildId, listingId, listingData) {
   try {
+    const amount = listingData.amount || 1;
+    // CRITICAL: Use explicit tokenType from listingData, don't infer from amount
+    // 1 SFT is still SFT, not NFT! Must be passed explicitly from balance/listing source
+    const tokenType = listingData.tokenType === 'SFT' ? 'SFT' : 'NFT';
     const { error } = await supabase
       .from('nft_listings')
       .insert({
@@ -283,6 +399,8 @@ async function createListing(guildId, listingId, listingData) {
         collection: listingData.collection,
         identifier: listingData.identifier,
         nonce: listingData.nonce,
+        amount: amount,
+        token_type: tokenType,
         nft_name: listingData.nftName || null,
         nft_image_url: listingData.nftImageUrl || null,
         title: listingData.title,
@@ -324,9 +442,12 @@ async function getListing(guildId, listingId) {
       guildId: data.guild_id,
       sellerId: data.seller_id,
       sellerTag: data.seller_tag,
+      buyerId: data.buyer_id || null,
       collection: data.collection,
       identifier: data.identifier,
       nonce: data.nonce,
+      amount: data.amount || 1,
+      tokenType: data.token_type || 'NFT',
       nftName: data.nft_name,
       nftImageUrl: data.nft_image_url,
       title: data.title,
@@ -369,9 +490,12 @@ async function getActiveListings(guildId, collection = null) {
       guildId: row.guild_id,
       sellerId: row.seller_id,
       sellerTag: row.seller_tag,
+      buyerId: row.buyer_id || null,
       collection: row.collection,
       identifier: row.identifier,
       nonce: row.nonce,
+      amount: row.amount || 1,
+      tokenType: row.token_type || 'NFT',
       nftName: row.nft_name,
       nftImageUrl: row.nft_image_url,
       title: row.title,
@@ -399,6 +523,7 @@ async function updateListing(guildId, listingId, updates) {
     
     if (updates.status !== undefined) updateData.status = updates.status;
     if (updates.soldAt !== undefined) updateData.sold_at = updates.soldAt;
+    if (updates.buyerId !== undefined) updateData.buyer_id = updates.buyerId;
     if (updates.messageId !== undefined) updateData.message_id = updates.messageId;
     if (updates.threadId !== undefined) updateData.thread_id = updates.threadId;
     if (updates.channelId !== undefined) updateData.channel_id = updates.channelId;
@@ -441,9 +566,12 @@ async function getUserListings(guildId, userId, status = 'ACTIVE') {
       guildId: row.guild_id,
       sellerId: row.seller_id,
       sellerTag: row.seller_tag,
+      buyerId: row.buyer_id || null,
       collection: row.collection,
       identifier: row.identifier,
       nonce: row.nonce,
+      amount: row.amount || 1,
+      tokenType: row.token_type || 'NFT',
       nftName: row.nft_name,
       nftImageUrl: row.nft_image_url,
       title: row.title,

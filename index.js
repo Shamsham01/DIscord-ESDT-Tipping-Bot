@@ -209,6 +209,7 @@ async function checkCommunityFundBalances(guildId, numberOfTransfers = 1) {
     let rewardBalanceHuman = '0';
     let rewardPriceUsd = 0;
     let rewardDecimals = 8;
+    let rewardFetchFailed = false;
     try {
       const rewardResponse = await fetch(`https://api.multiversx.com/accounts/${walletAddress}/tokens/${REWARD_IDENTIFIER}`);
       if (rewardResponse.ok) {
@@ -218,10 +219,27 @@ async function checkCommunityFundBalances(guildId, numberOfTransfers = 1) {
         rewardPriceUsd = rewardData.price || 0;
         rewardBalanceHuman = new BigNumber(rewardBalanceWei).dividedBy(new BigNumber(10).pow(rewardDecimals)).toString();
       } else {
-        errors.push(`Failed to fetch REWARD balance: ${rewardResponse.status} ${rewardResponse.statusText}`);
+        // If REWARD token not found (404), balance is 0, but we still need to check price
+        if (rewardResponse.status === 404) {
+          rewardBalanceHuman = '0';
+          // Try to get price from token metadata API
+          try {
+            const priceResponse = await fetch(`https://api.multiversx.com/tokens/${REWARD_IDENTIFIER}`);
+            if (priceResponse.ok) {
+              const priceData = await priceResponse.json();
+              rewardPriceUsd = priceData.price || 0;
+            }
+          } catch (priceError) {
+            console.error('[BALANCE-CHECK] Error fetching REWARD price:', priceError.message);
+          }
+        } else {
+          errors.push(`Failed to fetch REWARD balance: ${rewardResponse.status} ${rewardResponse.statusText}`);
+          rewardFetchFailed = true;
+        }
       }
     } catch (error) {
       errors.push(`Error fetching REWARD balance: ${error.message}`);
+      rewardFetchFailed = true;
     }
     
     // 3. Get Virtual Account REWARD balance from Supabase
@@ -349,22 +367,52 @@ async function checkCommunityFundBalances(guildId, numberOfTransfers = 1) {
     
     // 6. Calculate required REWARD based on usage fee
     let requiredRewardHuman = '0';
+    let rewardPriceAvailable = false;
+    
+    // Try to get REWARD price if not already fetched
+    if (rewardPriceUsd <= 0) {
+      try {
+        const priceResponse = await fetch(`https://api.multiversx.com/tokens/${REWARD_IDENTIFIER}`);
+        if (priceResponse.ok) {
+          const priceData = await priceResponse.json();
+          rewardPriceUsd = priceData.price || 0;
+        }
+      } catch (priceError) {
+        console.error('[BALANCE-CHECK] Error fetching REWARD price:', priceError.message);
+      }
+    }
+    
     if (rewardPriceUsd > 0) {
       const requiredRewardUsd = USAGE_FEE_USD * numberOfTransfers;
       requiredRewardHuman = new BigNumber(requiredRewardUsd).dividedBy(rewardPriceUsd).toString();
+      rewardPriceAvailable = true;
     } else {
-      errors.push('REWARD token price not available, cannot calculate required amount.');
+      errors.push('REWARD token price not available, cannot calculate required amount. Transfer cannot proceed without REWARD price information.');
     }
     
     // 7. Check if balances are sufficient
     const egldSufficient = new BigNumber(egldBalanceWei).isGreaterThanOrEqualTo(new BigNumber(requiredEgldWei));
-    const rewardSufficient = new BigNumber(availableRewardHuman).isGreaterThanOrEqualTo(new BigNumber(requiredRewardHuman));
+    
+    // REWARD check: must have price available AND sufficient balance
+    // If price is not available or fetch failed, fail the check
+    let rewardSufficient = false;
+    if (rewardFetchFailed) {
+      // If REWARD balance fetch failed, we cannot verify balance - fail the check
+      rewardSufficient = false;
+      errors.push('REWARD balance check failed. Cannot verify if sufficient REWARD is available.');
+    } else if (!rewardPriceAvailable) {
+      // If price is not available, we cannot calculate required amount - fail the check
+      rewardSufficient = false;
+    } else {
+      // Normal check: compare available REWARD with required REWARD
+      rewardSufficient = new BigNumber(availableRewardHuman).isGreaterThanOrEqualTo(new BigNumber(requiredRewardHuman));
+    }
     
     if (!egldSufficient) {
       errors.push(`Insufficient EGLD: Have ${egldBalanceHuman} EGLD, need ${requiredEgld} EGLD (${numberOfTransfers} transfer(s) × ${EGLD_PER_TX} EGLD)`);
     }
     
-    if (!rewardSufficient) {
+    if (!rewardSufficient && rewardPriceAvailable && !rewardFetchFailed) {
       errors.push(`Insufficient REWARD: Have ${availableRewardHuman} REWARD available (${rewardBalanceHuman} on-chain - ${virtualAccountRewardBalance} in Virtual Account - ${houseBalanceRewardTotal} in House Balance), need ${requiredRewardHuman} REWARD (${numberOfTransfers} transfer(s) × $${USAGE_FEE_USD} ÷ $${rewardPriceUsd.toFixed(8)} per REWARD)`);
     }
     
@@ -1513,9 +1561,192 @@ async function transferNFT(recipientWallet, tokenIdentifier, tokenNonce, project
   }
 }
 
-// Transfer NFT from Community Fund to user wallet
-async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, tokenNonce, projectName, guildId) {
+// Transfer SFT from Community Fund to user wallet
+async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenNonce, amount, projectName, guildId) {
   try {
+    if (!API_BASE_URL || !API_TOKEN) {
+      throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
+    }
+
+    const projects = await getProjects(guildId);
+    const project = projects[projectName];
+    
+    if (!project) {
+      throw new Error(`Project "${projectName}" not found. Use /register-project to add it.`);
+    }
+
+    if (!project.walletPem || project.walletPem.trim().length === 0) {
+      console.error(`[WITHDRAW-SFT] Project "${projectName}" has empty PEM. Wallet address: ${project.walletAddress}`);
+      throw new Error(`Project "${projectName}" has no wallet configured or PEM is empty. Please reconfigure the Community Fund using /set-community-fund.`);
+    }
+    
+    // Validate PEM format
+    if (!project.walletPem.includes('BEGIN') || !project.walletPem.includes('END')) {
+      console.error(`[WITHDRAW-SFT] Project "${projectName}" has invalid PEM format. PEM length: ${project.walletPem.length} characters`);
+      throw new Error(`Project "${projectName}" has an invalid PEM format. Please reconfigure the Community Fund using /set-community-fund.`);
+    }
+    
+    // Log PEM info for debugging (no sensitive content)
+    console.log(`[WITHDRAW-SFT] Using PEM for project "${projectName}". PEM length: ${project.walletPem.length} characters`);
+    
+    // Restore PEM line breaks if needed
+    let pemToSend = project.walletPem;
+    if (!pemToSend.includes('\n')) {
+      // Replace the spaces between the header/footer and base64 with line breaks
+      pemToSend = pemToSend
+        .replace(/-----BEGIN ([A-Z ]+)-----\s*/, '-----BEGIN $1-----\n')
+        .replace(/\s*-----END ([A-Z ]+)-----/, '\n-----END $1-----')
+        .replace(/ ([A-Za-z0-9+/=]{64})/g, '\n$1') // Break base64 into lines of 64 chars
+        .replace(/ ([A-Za-z0-9+/=]+)-----END/, '\n$1-----END'); // Final line before footer
+    }
+    
+    // Validate PEM after processing
+    if (!pemToSend || pemToSend.trim().length === 0) {
+      console.error(`[WITHDRAW-SFT] PEM became empty after processing for project "${projectName}"`);
+      throw new Error(`PEM processing failed for project "${projectName}". Please reconfigure the Community Fund.`);
+    }
+
+    // Convert amount to string
+    const amountStr = amount.toString();
+
+    const requestBody = {
+      walletPem: pemToSend,
+      recipient: recipientWallet,
+      tokenTicker: tokenTicker,  // Collection ticker (e.g., "XPACHIEVE-5a0519")
+      tokenNonce: Number(tokenNonce),  // Nonce (e.g., 15)
+      amount: amountStr  // Amount to transfer
+    };
+    
+    const fullEndpoint = API_BASE_URL.endsWith('/') 
+      ? `${API_BASE_URL}execute/sftTransfer` 
+      : `${API_BASE_URL}/execute/sftTransfer`;
+    
+    console.log(`[WITHDRAW-SFT] Transferring SFT ${tokenTicker}#${tokenNonce} (amount: ${amountStr}) to: ${recipientWallet} using Community Fund: ${projectName}`);
+    console.log(`[WITHDRAW-SFT] API endpoint: ${fullEndpoint}`);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    
+    try {
+      const response = await fetch(fullEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${API_TOKEN}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      const responseText = await response.text();
+      console.log(`[WITHDRAW-SFT] API response status: ${response.status}`);
+      console.log(`[WITHDRAW-SFT] API response for SFT transfer: ${responseText}`);
+      
+      let parsedResponse;
+      try {
+        parsedResponse = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error('[WITHDRAW-SFT] Error parsing API response:', parseError.message);
+        parsedResponse = { success: response.ok, message: responseText };
+      }
+      
+      let txHash = null;
+      let txStatus = null;
+      
+      if (parsedResponse.txHash) {
+        txHash = parsedResponse.txHash;
+      } else if (parsedResponse.result && parsedResponse.result.txHash) {
+        txHash = parsedResponse.result.txHash;
+      } else if (parsedResponse.data && parsedResponse.data.txHash) {
+        txHash = parsedResponse.data.txHash;
+      } else if (parsedResponse.transaction && parsedResponse.transaction.txHash) {
+        txHash = parsedResponse.transaction.txHash;
+      }
+      
+      // Check for transaction status in the response
+      if (parsedResponse.result && parsedResponse.result.status) {
+        txStatus = parsedResponse.result.status;
+      } else if (parsedResponse.status) {
+        txStatus = parsedResponse.status;
+      }
+      
+      const errorMessage = parsedResponse.error || 
+                          (parsedResponse.result && parsedResponse.result.error) ||
+                          (parsedResponse.data && parsedResponse.data.error) ||
+                          (!response.ok ? `API error (${response.status})` : null);
+      
+      // Only treat as success if status is 'success', HTTP is OK, and txHash exists
+      const isApiSuccess = (response.ok || parsedResponse.success === true) && txStatus === 'success' && !!txHash;
+      
+      const result = {
+        success: isApiSuccess,
+        txHash: txHash,
+        errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
+        rawResponse: parsedResponse,
+        httpStatus: response.status
+      };
+      
+      if (result.success) {
+        console.log(`[WITHDRAW-SFT] Successfully sent SFT ${tokenTicker}#${tokenNonce} (amount: ${amountStr}) to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
+      } else {
+        console.error(`[WITHDRAW-SFT] API reported failure for SFT transfer: ${errorMessage || 'Unknown error'}`);
+        if (txHash) {
+          console.log(`[WITHDRAW-SFT] Transaction hash was returned (${txHash}), but transaction failed (status: ${txStatus}).`);
+        }
+      }
+      
+      return result;
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      
+      if (fetchError.name === 'AbortError') {
+        console.error('[WITHDRAW-SFT] SFT transfer API request timed out after 60 seconds');
+        throw new Error('API request timed out after 60 seconds');
+      }
+      throw fetchError;
+    }
+  } catch (error) {
+    console.error(`[WITHDRAW-SFT] Error transferring SFT:`, error.message);
+    throw error;
+  }
+}
+
+// Transfer NFT from Community Fund to user wallet
+// Auto-detects SFT vs NFT based on token_type from database (bulletproof detection)
+async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, tokenNonce, projectName, guildId, amount = 1, tokenType = null) {
+  try {
+    // Convert amount to number
+    const amountNum = typeof amount === 'string' ? parseInt(amount, 10) : Number(amount);
+    const finalAmount = isNaN(amountNum) || amountNum <= 0 ? 1 : amountNum;
+    
+    // If tokenType not provided, try to infer from amount (fallback for backward compatibility)
+    // But prefer explicit tokenType parameter when available
+    let detectedTokenType = tokenType;
+    if (!detectedTokenType) {
+      // Fallback: use amount-based detection (not bulletproof, but better than nothing)
+      detectedTokenType = finalAmount > 1 ? 'SFT' : 'NFT';
+    }
+    
+    // Use token_type for reliable detection: if SFT, use SFT endpoint
+    if (detectedTokenType === 'SFT') {
+      console.log(`[WITHDRAW-NFT] Detected SFT (token_type: ${detectedTokenType}, amount: ${finalAmount}), routing to SFT transfer endpoint`);
+      // Extract collection ticker from identifier (e.g., "XPACHIEVE-5a0519-0f" -> "XPACHIEVE-5a0519")
+      // The identifier format is typically COLLECTION-NONCE, so we need to extract collection
+      let collectionTicker = tokenIdentifier;
+      if (tokenIdentifier.includes('-')) {
+        const parts = tokenIdentifier.split('-');
+        // Remove the last part (nonce) to get collection ticker
+        // For "XPACHIEVE-5a0519-0f", we want "XPACHIEVE-5a0519"
+        if (parts.length >= 2) {
+          collectionTicker = parts.slice(0, -1).join('-');
+        }
+      }
+      return await transferSFTFromCommunityFund(recipientWallet, collectionTicker, tokenNonce, finalAmount, projectName, guildId);
+    }
+    
+    // NFT transfer (amount = 1)
     if (!API_BASE_URL || !API_TOKEN) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
     }
@@ -1686,6 +1917,23 @@ client.on('interactionCreate', async (interaction) => {
         await dbVirtualAccounts.getUserAccount(guildId, interaction.user.id, interaction.user.username);
         
         console.log(`Wallet for user ${interaction.user.tag} (${interaction.user.id}) in guild ${guildId} set to: ${wallet}`);
+        
+        // Process any pending transactions (NFTs/tokens sent before registration)
+        try {
+          const blockchainListener = require('./blockchain-listener');
+          const pendingResult = await blockchainListener.processPendingTransactionsForWallet(
+            guildId,
+            interaction.user.id,
+            wallet
+          );
+          
+          if (pendingResult.processed > 0) {
+            console.log(`[SET-WALLET] Processed ${pendingResult.processed} pending transaction(s) for user ${interaction.user.id}`);
+          }
+        } catch (pendingError) {
+          console.error(`[SET-WALLET] Error processing pending transactions:`, pendingError.message);
+          // Don't fail wallet registration if pending processing fails
+        }
         
         // Get Community Fund wallet address and QR code
         let communityFundAddress = null;
@@ -2848,6 +3096,17 @@ client.on('interactionCreate', async (interaction) => {
       const tokenTicker = interaction.options.getString('token-ticker');
       const startingAmount = interaction.options.getString('starting-amount');
       const minBidIncrease = interaction.options.getString('min-bid-increase');
+      const amountOption = interaction.options.getNumber('amount');
+      const amount = amountOption && amountOption > 0 ? amountOption : 1;
+      
+      // Validate amount
+      if (amount <= 0 || !Number.isInteger(amount)) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid amount!**\n\nAmount must be a positive integer.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
       
       const guildId = interaction.guildId;
       const userId = interaction.user.id;
@@ -2888,12 +3147,67 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         
+        // CRITICAL: Calculate available balance (total - active auctions - active listings)
+        const totalBalance = nft.amount || 1;
+        
+        // Get active auctions for this NFT (collection + nonce) by this user
+        const dbAuctions = require('./db/auctions');
+        const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, sellerId, collection, nft.nonce);
+        const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+        
+        // Get active listings for this NFT (collection + nonce) by this user
+        const activeListings = await virtualAccountsNFT.getUserListings(guildId, sellerId, 'ACTIVE');
+        const listingsForThisNFT = activeListings.filter(listing => 
+          listing.collection === collection && listing.nonce === nft.nonce
+        );
+        const lockedInListings = listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
+        
+        // Calculate available balance
+        const availableBalance = totalBalance - lockedInAuctions - lockedInListings;
+        
+        // Check if user has sufficient available balance
+        if (amount > availableBalance) {
+          const balanceTokenType = nft.token_type || 'NFT';
+          const lockedTotal = lockedInAuctions + lockedInListings;
+          
+          let errorMessage = `❌ **Insufficient available balance!**\n\n`;
+          errorMessage += `**Total Balance:** ${totalBalance} ${balanceTokenType}(s)\n`;
+          if (lockedInAuctions > 0) {
+            errorMessage += `**Locked in Auctions:** ${lockedInAuctions} ${balanceTokenType}(s)\n`;
+          }
+          if (lockedInListings > 0) {
+            errorMessage += `**Locked in Listings:** ${lockedInListings} ${balanceTokenType}(s)\n`;
+          }
+          errorMessage += `**Available:** ${availableBalance} ${balanceTokenType}(s)\n`;
+          errorMessage += `**Trying to auction:** ${amount} ${balanceTokenType}(s)`;
+          
+          await interaction.editReply({ 
+            content: errorMessage, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
         // Use NFT data from virtual account
+        // IMPORTANT: Use token_type from database (bulletproof), only fallback to amount if token_type is truly missing
+        // If token_type is NULL/undefined, check if we can infer from amount, but prefer explicit token_type
+        const nftTokenType = nft.token_type;
+        const inferredTokenType = amount > 1 ? 'SFT' : 'NFT';
+        const finalTokenType = nftTokenType || inferredTokenType;
+        
+        // Log for debugging
+        if (!nftTokenType) {
+          console.log(`[AUCTIONS] Warning: NFT ${collection}#${nft.nonce} has no token_type set. Inferring from amount: ${amount} -> ${inferredTokenType}`);
+        } else {
+          console.log(`[AUCTIONS] Using token_type from database: ${nftTokenType} for NFT ${collection}#${nft.nonce}`);
+        }
+        
         nftDetails = {
           nonce: nft.nonce,
           identifier: nft.identifier || `${collection}-${nft.nonce}`,
           collection: collection,
-          name: nft.nft_name || `${collection}#${nft.nonce}`
+          name: nft.nft_name || `${collection}#${nft.nonce}`,
+          tokenType: finalTokenType
         };
         
         // Validate token is in Community Fund's supported tokens
@@ -3111,10 +3425,12 @@ client.on('interactionCreate', async (interaction) => {
         ? `${minBidIncrease} ${tokenTicker} (≈ $${minBidIncreaseUsd})`
         : `${minBidIncrease} ${tokenTicker}`;
       
-      // Create auction embed
+      // Create auction embed (use token_type from nftDetails if available)
+      const embedTokenType = nftDetails.tokenType || (amount > 1 ? 'SFT' : 'NFT');
+      const amountText = amount > 1 ? ` (${amount}x)` : '';
       const auctionEmbed = new EmbedBuilder()
         .setTitle(title)
-        .setDescription(`${description}\n\n**NFT:** ${nftName}\n**Collection:** ${collection}\n**Nonce:** ${nftDetails.nonce}`)
+        .setDescription(`${description}\n\n**${embedTokenType}:** ${nftName}${amountText}\n**Collection:** ${collection}\n**Nonce:** ${nftDetails.nonce}`)
         .addFields([
           { name: 'Starting Amount', value: startingAmountDisplay, inline: true },
           { name: 'Current Bid', value: currentBidDisplay, inline: true },
@@ -3172,6 +3488,10 @@ client.on('interactionCreate', async (interaction) => {
       // Store auction data in database
       console.log(`[AUCTIONS] Storing auction ${auctionId} in guild ${guildId}`);
       
+      // Determine token type: use from nftDetails if available (virtual account), otherwise infer from amount
+      // Use the same tokenType we used for the embed
+      const dbTokenType = nftDetails.tokenType || (amount > 1 ? 'SFT' : 'NFT');
+      
       await dbAuctions.createAuction(guildId, auctionId, {
         creatorId: interaction.user.id,
         creatorTag: interaction.user.tag,
@@ -3182,6 +3502,8 @@ client.on('interactionCreate', async (interaction) => {
         nftName,
         nftIdentifier: nftDetails.identifier || `${collection}-${nftDetails.nonce}`,
         nftNonce: nftDetails.nonce,
+        amount: amount,
+        tokenType: dbTokenType,
         nftImageUrl,
         title,
         description,
@@ -6806,17 +7128,46 @@ client.on('interactionCreate', async (interaction) => {
       console.log(`[CHECK-BALANCE DEBUG] Retrieved balances:`, balances);
       
       if (Object.keys(balances).length === 0) {
+        // Get Community Fund wallet address
+        let communityFundAddress = null;
+        try {
+          const projects = await getProjects(guildId);
+          const communityFundProjectName = getCommunityFundProjectName();
+          const communityFundProject = projects[communityFundProjectName];
+          
+          if (communityFundProject && communityFundProject.walletAddress) {
+            communityFundAddress = communityFundProject.walletAddress;
+          }
+        } catch (error) {
+          console.error(`[CHECK-BALANCE-ESDT] Error getting Community Fund address:`, error.message);
+        }
+        
         const embed = new EmbedBuilder()
           .setTitle('💰 Virtual Account Balance')
           .setDescription('You have no tokens in your virtual account yet.')
           .addFields([
-            { name: '💡 How to get started', value: 'Make a transfer to any Community Fund wallet address to top up your virtual account!', inline: false },
-            { name: '🔍 Debug Info', value: `Guild ID: ${guildId}\nUser ID: ${userId}`, inline: false }
+            { name: '💡 How to get started', value: 'Make a transfer to the Community Fund wallet address below to top up your virtual account!', inline: false }
           ])
           .setColor('#FF9900')
           .setThumbnail('https://i.ibb.co/bTmZbDK/Crypto-Wallet-Logo.png')
           .setTimestamp()
           .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        // Add Community Fund address if available
+        if (communityFundAddress) {
+          embed.addFields([
+            { name: '💰 Community Fund Deposit Address', value: `\`${communityFundAddress}\``, inline: false }
+          ]);
+        } else {
+          embed.addFields([
+            { name: '⚠️ Note', value: 'Community Fund address not configured. Please contact an administrator.', inline: false }
+          ]);
+        }
+        
+        // Add debug info
+        embed.addFields([
+          { name: '🔍 Debug Info', value: `Guild ID: ${guildId}\nUser ID: ${userId}`, inline: false }
+        ]);
         
         await interaction.editReply({ embeds: [embed] });
         return;
@@ -7028,17 +7379,42 @@ client.on('interactionCreate', async (interaction) => {
       const nftBalances = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collection || null);
       
       if (!nftBalances || nftBalances.length === 0) {
+        // Get Community Fund wallet address
+        let communityFundAddress = null;
+        try {
+          const projects = await getProjects(guildId);
+          const communityFundProjectName = getCommunityFundProjectName();
+          const communityFundProject = projects[communityFundProjectName];
+          
+          if (communityFundProject && communityFundProject.walletAddress) {
+            communityFundAddress = communityFundProject.walletAddress;
+          }
+        } catch (error) {
+          console.error(`[CHECK-BALANCE-NFT] Error getting Community Fund address:`, error.message);
+        }
+        
         const embed = new EmbedBuilder()
           .setTitle('🖼️ NFT Virtual Account Balance')
           .setDescription(collection 
             ? `You have no NFTs in collection "${collection}" yet.`
             : 'You have no NFTs in your virtual account yet.')
           .addFields([
-            { name: '💡 How to get started', value: 'Send NFTs to any Community Fund wallet address to add them to your virtual account!', inline: false }
+            { name: '💡 How to get started', value: 'Send NFTs to the Community Fund wallet address below to add them to your virtual account!', inline: false }
           ])
           .setColor('#FF9900')
           .setTimestamp()
           .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        // Add Community Fund address if available
+        if (communityFundAddress) {
+          embed.addFields([
+            { name: '💰 Community Fund Deposit Address', value: `\`${communityFundAddress}\``, inline: false }
+          ]);
+        } else {
+          embed.addFields([
+            { name: '⚠️ Note', value: 'Community Fund address not configured. Please contact an administrator.', inline: false }
+          ]);
+        }
         
         await interaction.editReply({ embeds: [embed] });
         return;
@@ -7065,15 +7441,28 @@ client.on('interactionCreate', async (interaction) => {
       // Add fields for each collection
       const collections = Object.keys(collectionsMap).sort();
       let fieldCount = 0;
+      let totalNFTs = 0;
+      let totalSFTs = 0;
       
       for (const coll of collections) {
         if (fieldCount >= 25) break; // Discord embed limit
         
         const nfts = collectionsMap[coll];
-        const nftNames = nfts.map(nft => nft.nft_name || `${coll}#${nft.nonce}`).slice(0, 10);
+        const nftDisplayList = nfts.map(nft => {
+          const amount = nft.amount || 1;
+          const tokenType = nft.token_type || (amount > 1 ? 'SFT' : 'NFT');
+          const nftName = nft.nft_name || `${coll}#${nft.nonce}`;
+          if (tokenType === 'SFT') {
+            totalSFTs += amount;
+            return `${nftName} (${amount}x SFT)`;
+          } else {
+            totalNFTs += 1;
+            return nftName;
+          }
+        }).slice(0, 10);
         const remainingCount = nfts.length > 10 ? `\n... and ${nfts.length - 10} more` : '';
         
-        let fieldValue = `**Count:** ${nfts.length}\n**NFTs:**\n${nftNames.join('\n')}${remainingCount}`;
+        let fieldValue = `**Count:** ${nfts.length}\n**NFTs/SFTs:**\n${nftDisplayList.join('\n')}${remainingCount}`;
         
         embed.addFields({
           name: `📦 ${coll}`,
@@ -7085,10 +7474,14 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Add total count
-      const totalNFTs = nftBalances.length;
+      const totalItems = nftBalances.length;
+      const summaryText = totalSFTs > 0 
+        ? `**Total Items:** ${totalItems}\n**NFTs:** ${totalNFTs}\n**SFTs:** ${totalSFTs} (total quantity)\n**Collections:** ${collections.length}`
+        : `**Total NFTs:** ${totalItems}\n**Collections:** ${collections.length}`;
+      
       embed.addFields({
         name: '📊 Summary',
-        value: `**Total NFTs:** ${totalNFTs}\n**Collections:** ${collections.length}`,
+        value: summaryText,
         inline: false
       });
       
@@ -7642,10 +8035,14 @@ client.on('interactionCreate', async (interaction) => {
       
       // Create beautiful embed
       const nftDisplayName = nft.nft_name || `${collection}#${nft.nonce}`;
+      const amount = nft.amount || 1;
+      // Use token_type from database for reliable detection (bulletproof)
+      const tokenType = nft.token_type || (amount > 1 ? 'SFT' : 'NFT');
+      const amountText = amount > 1 ? ` (${amount}x)` : '';
       const explorerUrl = `https://explorer.multiversx.com/nfts/${nft.identifier}/transactions`;
       const embed = new EmbedBuilder()
-        .setTitle(`🖼️ ${nftDisplayName}`)
-        .setDescription(`**Collection:** ${collection}\n**Identifier:** [${nft.identifier}](${explorerUrl})\n**Nonce:** ${nft.nonce}`)
+        .setTitle(`🖼️ ${nftDisplayName}${amountText}`)
+        .setDescription(`**Type:** ${tokenType}\n**Collection:** ${collection}\n**Identifier:** [${nft.identifier}](${explorerUrl})\n**Nonce:** ${nft.nonce}`)
         .setColor(0x00FF00)
         .setTimestamp()
         .setFooter({ text: `Owned by ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL() });
@@ -7786,8 +8183,19 @@ client.on('interactionCreate', async (interaction) => {
       const priceAmount = interaction.options.getString('price-amount');
       const listingType = interaction.options.getString('listing-type') || 'fixed_price';
       const expiresInHours = interaction.options.getNumber('expires-in');
+      const amountOption = interaction.options.getNumber('amount');
+      const amount = amountOption && amountOption > 0 ? amountOption : 1;
       
-      // Validate user owns the NFT
+      // Validate amount
+      if (amount <= 0 || !Number.isInteger(amount)) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid amount!**\n\nAmount must be a positive integer.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Validate user owns the NFT/SFT
       const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collection);
       
       if (!userNFTs || userNFTs.length === 0) {
@@ -7812,7 +8220,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Verify NFT still exists in user's balance
+      // Verify NFT/SFT still exists in user's balance and check sufficient amount
       const verifyNFT = await virtualAccountsNFT.getUserNFTBalance(guildId, userId, collection, nft.nonce);
       if (!verifyNFT) {
         await interaction.editReply({ 
@@ -7822,13 +8230,50 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Check if this NFT is already listed for sale
+      // CRITICAL: Calculate available balance (total - active auctions - active listings)
+      const totalBalance = verifyNFT.amount || 1;
+      
+      // Get active auctions for this NFT (collection + nonce) by this user
+      const dbAuctions = require('./db/auctions');
+      const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId, collection, nft.nonce);
+      const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+      
+      // Get active listings for this NFT (collection + nonce) by this user
       const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
-      const alreadyListed = activeListings.find(listing => 
+      const listingsForThisNFT = activeListings.filter(listing => 
         listing.collection === collection && listing.nonce === nft.nonce
       );
+      const lockedInListings = listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
       
-      if (alreadyListed) {
+      // Calculate available balance
+      const availableBalance = totalBalance - lockedInAuctions - lockedInListings;
+      
+      // Check if user has sufficient available balance
+      if (amount > availableBalance) {
+        const balanceTokenType = verifyNFT.token_type || 'NFT';
+        const lockedTotal = lockedInAuctions + lockedInListings;
+        
+        let errorMessage = `❌ **Insufficient available balance!**\n\n`;
+        errorMessage += `**Total Balance:** ${totalBalance} ${balanceTokenType}(s)\n`;
+        if (lockedInAuctions > 0) {
+          errorMessage += `**Locked in Auctions:** ${lockedInAuctions} ${balanceTokenType}(s)\n`;
+        }
+        if (lockedInListings > 0) {
+          errorMessage += `**Locked in Listings:** ${lockedInListings} ${balanceTokenType}(s)\n`;
+        }
+        errorMessage += `**Available:** ${availableBalance} ${balanceTokenType}(s)\n`;
+        errorMessage += `**Trying to list:** ${amount} ${balanceTokenType}(s)`;
+        
+        await interaction.editReply({ 
+          content: errorMessage, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Check if this NFT is already listed for sale (informational, but we allow multiple listings if balance allows)
+      // Note: We still check this to prevent duplicate listings, but the balance check above is the main validation
+      if (listingsForThisNFT.length > 0) {
         await interaction.editReply({ 
           content: `❌ **NFT already listed!**\n\nThis NFT "${nftName}" (${collection}#${nft.nonce}) is already listed for sale.\n\nYou can only list each NFT once. Please cancel the existing listing first if you want to create a new one.`, 
           flags: [MessageFlags.Ephemeral] 
@@ -7939,10 +8384,16 @@ client.on('interactionCreate', async (interaction) => {
         ? `${priceAmount} ${displayTicker} (≈ $${priceUsd.toFixed(2)})`
         : `${priceAmount} ${displayTicker}`;
       
+      // CRITICAL: Use actual token_type from balance, don't infer from amount
+      // 1 SFT is still SFT, not NFT! Must use explicit token_type from database
+      const nftTokenType = verifyNFT.token_type || 'NFT';
+      const amountText = amount > 1 ? ` (${amount}x)` : '';
+      const nftDisplayName = nft.nft_name || `${collection}#${nft.nonce}`;
+      
       // Create listing embed
       const listingEmbed = new EmbedBuilder()
         .setTitle(title)
-        .setDescription(`${description}\n\n**NFT:** ${nft.nft_name || `${collection}#${nft.nonce}`}\n**Collection:** ${collection}\n**Nonce:** ${nft.nonce}`)
+        .setDescription(`${description}\n\n**${nftTokenType}:** ${nftDisplayName}${amountText}\n**Collection:** ${collection}\n**Nonce:** ${nft.nonce}`)
         .addFields([
           { name: '💰 Price', value: priceDisplay, inline: true },
           { name: '📋 Listing Type', value: listingType === 'fixed_price' ? 'Fixed Price' : 'Accept Offers', inline: true },
@@ -7988,11 +8439,14 @@ client.on('interactionCreate', async (interaction) => {
         .setStyle(ButtonStyle.Success);
       buttons.push(buyButton);
       
-      const offerButton = new ButtonBuilder()
-        .setCustomId(`nft-offer:${listingId}`)
-        .setLabel('Make Offer')
-        .setStyle(ButtonStyle.Primary);
-      buttons.push(offerButton);
+      // Only show offer button for accept_offers listings
+      if (listingType === 'accept_offers') {
+        const offerButton = new ButtonBuilder()
+          .setCustomId(`nft-offer:${listingId}`)
+          .setLabel('Make Offer')
+          .setStyle(ButtonStyle.Primary);
+        buttons.push(offerButton);
+      }
       
       const cancelButton = new ButtonBuilder()
         .setCustomId(`nft-listing-cancel:${listingId}`)
@@ -8079,13 +8533,17 @@ client.on('interactionCreate', async (interaction) => {
         throw new Error('Failed to create listing message. Please try again.');
       }
       
-      // Create listing in database
+      // CRITICAL: Use actual token_type from balance, don't infer from amount
+      // 1 SFT is still SFT, not NFT! Must use explicit token_type from database
+      const listingTokenType = verifyNFT.token_type || 'NFT';
       await virtualAccountsNFT.createListing(guildId, listingId, {
         sellerId: userId,
         sellerTag: interaction.user.tag,
         collection: collection,
         identifier: nft.identifier,
         nonce: nft.nonce,
+        amount: amount,
+        tokenType: listingTokenType,
         nftName: nft.nft_name,
         nftImageUrl: nft.nft_image_url,
         title: title,
@@ -8103,11 +8561,11 @@ client.on('interactionCreate', async (interaction) => {
       
       // Post initial message in thread
       if (thread) {
-        await thread.send(`📢 **Listing created!**\n\nThis NFT is now available for purchase. Use the buttons above to buy or make an offer.`);
+        await thread.send(`📢 **Listing created!**\n\nThis ${tokenType} is now available for purchase. Use the buttons above to buy or make an offer.`);
       }
       
       await interaction.editReply({ 
-        content: `✅ **Listing created successfully!**\n\nYour NFT "${nft.nft_name || `${collection}#${nft.nonce}`}" is now listed for ${priceAmount} ${displayTicker}.`, 
+        content: `✅ **Listing created successfully!**\n\nYour ${tokenType} "${nftDisplayName}${amountText}" is now listed for ${priceAmount} ${displayTicker}.`, 
         flags: [MessageFlags.Ephemeral] 
       });
       
@@ -8132,6 +8590,17 @@ client.on('interactionCreate', async (interaction) => {
       const userId = interaction.user.id;
       const collection = interaction.options.getString('collection');
       const nftName = interaction.options.getString('nft-name');
+      const amountOption = interaction.options.getNumber('amount');
+      const amount = amountOption && amountOption > 0 ? amountOption : 1;
+      
+      // Validate amount
+      if (amount <= 0 || !Number.isInteger(amount)) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid amount!**\n\nAmount must be a positive integer.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
       
       // Get user's registered wallet
       const userWallet = await getUserWallet(userId, guildId);
@@ -8151,7 +8620,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Validate user owns the NFT
+      // Validate user owns the NFT/SFT
       const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collection);
       
       if (!userNFTs || userNFTs.length === 0) {
@@ -8176,6 +8645,18 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      // Check user has sufficient amount
+      const currentAmount = nft.amount || 1;
+      if (amount > currentAmount) {
+        // Use token_type from database for reliable detection
+        const tokenType = nft.token_type || (currentAmount > 1 ? 'SFT' : 'NFT');
+        await interaction.editReply({ 
+          content: `❌ **Insufficient balance!**\n\nYou have ${currentAmount} ${tokenType}(s), trying to withdraw ${amount}.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
       // Get Community Fund project
       const communityFundProjectName = getCommunityFundProjectName();
       const projects = await getProjects(guildId);
@@ -8189,7 +8670,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Check Community Fund balances (1 transfer for NFT withdraw)
+      // Check Community Fund balances (1 transfer for NFT/SFT withdraw)
       const balanceCheck = await checkCommunityFundBalances(guildId, 1);
       if (!balanceCheck.sufficient) {
         const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/withdraw-nft');
@@ -8198,28 +8679,36 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       const nftDisplayName = nft.nft_name || `${collection}#${nft.nonce}`;
+      // Use token_type from database for reliable detection (bulletproof)
+      const tokenType = nft.token_type || (amount > 1 ? 'SFT' : 'NFT');
+      const amountText = amount > 1 ? ` (${amount}x)` : '';
       
       await interaction.editReply({ 
-        content: `🔄 **Processing withdrawal...**\n\n**NFT:** ${nftDisplayName}\n**Collection:** ${collection}\n**Nonce:** ${nft.nonce}\n**Recipient:** \`${userWallet}\``, 
+        content: `🔄 **Processing withdrawal...**\n\n**${tokenType}:** ${nftDisplayName}${amountText}\n**Collection:** ${collection}\n**Nonce:** ${nft.nonce}\n**Recipient:** \`${userWallet}\``, 
         flags: [MessageFlags.Ephemeral] 
       });
       
-      console.log(`[WITHDRAW-NFT] User ${interaction.user.tag} (${userId}) withdrawing NFT ${nftDisplayName} (${collection}#${nft.nonce}) to ${userWallet}`);
+      console.log(`[WITHDRAW-NFT] User ${interaction.user.tag} (${userId}) withdrawing ${tokenType} ${nftDisplayName}${amountText} (${collection}#${nft.nonce}) to ${userWallet}`);
       
-      // Transfer NFT from Community Fund to user wallet
+      // Transfer NFT/SFT from Community Fund to user wallet (use token_type from database)
       const transferResult = await transferNFTFromCommunityFund(
         userWallet,
         collection,
         nft.nonce,
         communityFundProjectName,
-        guildId
+        guildId,
+        amount,
+        tokenType
       );
       
       if (transferResult.success) {
-        // Remove NFT from virtual account
-        await virtualAccountsNFT.removeNFTFromAccount(guildId, userId, collection, nft.nonce);
+        // Remove NFT/SFT from virtual account (handles partial removal)
+        await virtualAccountsNFT.removeNFTFromAccount(guildId, userId, collection, nft.nonce, amount);
         
         // Create transaction record
+        const amountTextDesc = amount > 1 ? ` (${amount}x)` : '';
+        // Get token_type from balance (most reliable source)
+        const balanceTokenType = nft.token_type || tokenType;
         await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
           id: `withdraw_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
           type: 'withdraw',
@@ -8227,10 +8716,12 @@ client.on('interactionCreate', async (interaction) => {
           identifier: collection,
           nonce: nft.nonce,
           nft_name: nftDisplayName,
+          amount: amount, // Store amount for SFTs
+          token_type: balanceTokenType, // Use actual token_type from balance, not inferred from amount
           price_token_identifier: null,
           price_amount: null,
           timestamp: Date.now(),
-          description: `Withdrew ${nftDisplayName} to wallet ${userWallet}`,
+          description: `Withdrew ${balanceTokenType} ${nftDisplayName}${amountTextDesc} to wallet ${userWallet}`,
           tx_hash: transferResult.txHash
         });
         
@@ -8243,10 +8734,10 @@ client.on('interactionCreate', async (interaction) => {
           : 'Transaction hash not available';
         
         const successEmbed = new EmbedBuilder()
-          .setTitle('✅ NFT Withdrawal Successful!')
-          .setDescription(`Your NFT has been successfully withdrawn to your registered wallet.`)
+          .setTitle(`✅ ${tokenType} Withdrawal Successful!`)
+          .setDescription(`Your ${tokenType} has been successfully withdrawn to your registered wallet.`)
           .addFields([
-            { name: 'NFT', value: nftDisplayName, inline: true },
+            { name: tokenType, value: `${nftDisplayName}${amountText}`, inline: true },
             { name: 'Collection', value: collection, inline: true },
             { name: 'Nonce', value: String(nft.nonce), inline: true },
             { name: 'Recipient Wallet', value: `\`${userWallet}\``, inline: false },
@@ -8259,13 +8750,13 @@ client.on('interactionCreate', async (interaction) => {
         
         await interaction.editReply({ embeds: [successEmbed], flags: [MessageFlags.Ephemeral] });
         
-        console.log(`[WITHDRAW-NFT] Successfully withdrew NFT ${nftDisplayName} (${collection}#${nft.nonce}) for user ${interaction.user.tag} (${userId})`);
+        console.log(`[WITHDRAW-NFT] Successfully withdrew ${tokenType} ${nftDisplayName}${amountText} (${collection}#${nft.nonce}) for user ${interaction.user.tag} (${userId})`);
       } else {
         await interaction.editReply({ 
           content: `❌ **Withdrawal failed!**\n\n**Error:** ${transferResult.errorMessage || 'Unknown error'}\n\nPlease try again or contact an administrator if the issue persists.`, 
           flags: [MessageFlags.Ephemeral] 
         });
-        console.error(`[WITHDRAW-NFT] Failed to withdraw NFT for user ${interaction.user.tag} (${userId}): ${transferResult.errorMessage}`);
+        console.error(`[WITHDRAW-NFT] Failed to withdraw ${tokenType} for user ${interaction.user.tag} (${userId}): ${transferResult.errorMessage}`);
       }
       
     } catch (error) {
@@ -8410,11 +8901,20 @@ client.on('interactionCreate', async (interaction) => {
       const usageFeeReward = parseFloat(balanceCheck.requiredReward || '0');
       const neededToWithdraw = Math.max(0, -difference) + Math.ceil(usageFeeReward * 100) / 100; // Round up usage fee
       
+      // Calculate REWARD status
+      const egldStatus = new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(balanceCheck.requiredEgld)) ? '✅ Sufficient' : '❌ Insufficient';
+      const availableReward = parseFloat(balanceCheck.rewardBalanceAvailable || '0');
+      const requiredReward = parseFloat(balanceCheck.requiredReward || '0');
+      const rewardStatus = new BigNumber(availableReward).isGreaterThanOrEqualTo(new BigNumber(requiredReward)) ? '✅ Sufficient' : '❌ Insufficient';
+      
       // Add simplified balance information
       embed.addFields([
         { name: '💰 EGLD Balance', value: `${balanceCheck.egldBalance} EGLD`, inline: true },
         { name: '📊 Required EGLD', value: `${balanceCheck.requiredEgld} EGLD`, inline: true },
-        { name: '✅ EGLD Status', value: new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(balanceCheck.requiredEgld)) ? '✅ Sufficient' : '❌ Insufficient', inline: true },
+        { name: '✅ EGLD Status', value: egldStatus, inline: true },
+        { name: '💼 REWARD Available', value: `${formatReward(balanceCheck.rewardBalanceAvailable)} REWARD`, inline: true },
+        { name: '💵 Required REWARD', value: `${formatReward(Math.ceil(requiredReward * 100) / 100)} REWARD`, inline: true },
+        { name: '✅ REWARD Status', value: rewardStatus, inline: true },
         { name: '💼 Total in Wallet (On-Chain)', value: `${formatReward(balanceCheck.rewardBalanceOnChain)} REWARD`, inline: false },
         { name: '📦 Total in Virtual Accounts', value: `${formatReward(totalInVirtualAccounts)} REWARD\n• Virtual Accounts: ${formatReward(virtualAccountReward)}\n• House Balance: ${formatReward(houseBalanceReward)}`, inline: false },
         { name: '📊 Difference', value: `${formatReward(difference)} REWARD`, inline: true },
@@ -9034,6 +9534,14 @@ client.on('interactionCreate', async (interaction) => {
       const collection = interaction.options.getString('collection');
       const nftName = interaction.options.getString('nft-name');
       const memo = interaction.options.getString('memo') || 'No memo provided';
+      const amountOption = interaction.options.getNumber('amount');
+      const amount = amountOption && amountOption > 0 ? amountOption : 1;
+      
+      // Validate amount
+      if (amount <= 0 || !Number.isInteger(amount)) {
+        await interaction.editReply({ content: '❌ Invalid amount. Amount must be a positive integer.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
       
       const guildId = interaction.guildId;
       const fromUserId = interaction.user.id;
@@ -9106,7 +9614,7 @@ client.on('interactionCreate', async (interaction) => {
         nonce = matchingNFT.nonce;
       }
       
-      // Verify user owns the NFT
+      // Verify user owns the NFT/SFT and has sufficient amount
       const nftBalance = await virtualAccountsNFT.getUserNFTBalance(guildId, fromUserId, collection, nonce);
       if (!nftBalance) {
         await interaction.editReply({ 
@@ -9116,26 +9624,42 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Transfer NFT between users
+      // Check sufficient balance for SFTs
+      const currentAmount = nftBalance.amount || 1;
+      if (amount > currentAmount) {
+        // Use token_type from database for reliable detection
+        const tokenType = nftBalance.token_type || (currentAmount > 1 ? 'SFT' : 'NFT');
+        await interaction.editReply({ 
+          content: `❌ **Insufficient balance!**\n\nYou have ${currentAmount} ${tokenType}(s), trying to tip ${amount}.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Transfer NFT/SFT between users
       const transferResult = await virtualAccountsNFT.transferNFTBetweenUsers(
         guildId,
         fromUserId,
         targetUserId,
         collection,
         nonce,
-        null // No price data for tips
+        null, // No price data for tips
+        amount
       );
       
       if (transferResult.success) {
         const nftDisplayName = nftBalance.nft_name || `${collection}#${nonce}`;
+        // Use token_type from database for reliable detection (bulletproof)
+        const tokenType = nftBalance.token_type || (amount > 1 ? 'SFT' : 'NFT');
+        const amountText = amount > 1 ? ` (${amount}x)` : '';
         const communityFundProjectName = getCommunityFundProjectName();
         const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
         
         const embed = new EmbedBuilder()
-          .setTitle('🖼️ NFT Tip Sent!')
-          .setDescription(`Successfully tipped **${nftDisplayName}** (${collection}#${nonce}) to ${targetUser ? `<@${targetUserId}>` : userTag}`)
+          .setTitle(`🖼️ ${tokenType} Tip Sent!`)
+          .setDescription(`Successfully tipped **${nftDisplayName}${amountText}** (${collection}#${nonce}) to ${targetUser ? `<@${targetUserId}>` : userTag}`)
           .addFields([
-            { name: '🖼️ NFT', value: nftDisplayName, inline: true },
+            { name: `🖼️ ${tokenType}`, value: `${nftDisplayName}${amountText}`, inline: true },
             { name: '📦 Collection', value: collection, inline: true },
             { name: '🔢 Nonce', value: String(nonce), inline: true },
             { name: '📝 Memo', value: memo, inline: false }
@@ -9151,10 +9675,10 @@ client.on('interactionCreate', async (interaction) => {
         try {
           if (targetUser) {
             const recipientEmbed = new EmbedBuilder()
-              .setTitle('🖼️ You Received an NFT Tip!')
-              .setDescription(`You received **${nftDisplayName}** (${collection}#${nonce}) from ${interaction.user.tag}`)
+              .setTitle(`🖼️ You Received a ${tokenType} Tip!`)
+              .setDescription(`You received **${nftDisplayName}${amountText}** (${collection}#${nonce}) from ${interaction.user.tag}`)
               .addFields([
-                { name: '🖼️ NFT', value: nftDisplayName, inline: true },
+                { name: `🖼️ ${tokenType}`, value: `${nftDisplayName}${amountText}`, inline: true },
                 { name: '📦 Collection', value: collection, inline: true },
                 { name: '🔢 Nonce', value: String(nonce), inline: true },
                 { name: '📝 Memo', value: memo, inline: false }
@@ -9172,7 +9696,7 @@ client.on('interactionCreate', async (interaction) => {
         
       } else {
         await interaction.editReply({ 
-          content: `❌ **NFT tip failed!** ${transferResult.error || 'Unknown error'}`, 
+          content: `❌ **${tokenType} tip failed!** ${transferResult.error || 'Unknown error'}`, 
           flags: [MessageFlags.Ephemeral] 
         });
       }
@@ -10331,6 +10855,13 @@ client.on('interactionCreate', async (interaction) => {
       
       console.log('[AUTOCOMPLETE] create-auction collection: Source value:', source);
       
+      // Validate source is set
+      if (!source) {
+        console.log('[AUTOCOMPLETE] create-auction collection: No source selected');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
       // If source is Virtual Account, fetch from user's virtual account NFT balances
       if (source === 'virtual_account') {
         try {
@@ -10368,100 +10899,208 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
       
-      // Otherwise, use project wallet logic
-      const projects = await getProjects(guildId);
-      const selectedProject = interaction.options.getString('project-name');
-      
-      if (!selectedProject || !projects[selectedProject]) {
-        console.log('[AUTOCOMPLETE] create-auction collection: No project selected or project not found');
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const project = projects[selectedProject];
-      const walletAddress = project.walletAddress;
-      
-      if (!walletAddress) {
-        console.log('[AUTOCOMPLETE] create-auction collection: No wallet address for project');
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
-      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
-      console.log('[AUTOCOMPLETE] create-auction collection: Fetching from', nftsUrl);
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000);
-      
-      const response = await fetch(nftsUrl, {
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        console.error(`[AUTOCOMPLETE] create-auction collection: API error ${response.status} ${response.statusText}`);
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const responseData = await response.json();
-      console.log('[AUTOCOMPLETE] create-auction collection: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
-      
-      // Handle paginated response (check for data property) or direct array
-      let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
-      
-      if (!Array.isArray(allItems) || allItems.length === 0) {
-        console.log('[AUTOCOMPLETE] create-auction collection: No NFTs/SFTs found');
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      console.log(`[AUTOCOMPLETE] create-auction collection: Found ${allItems.length} items from API`);
-      
-      // Extract unique collections that have actual NFTs (NonFungibleESDT) with media
-      const collectionsMap = new Map();
-      
-      allItems.forEach(item => {
-        // Only include collections that have NFTs (not SFTs) and have media URLs
-        if (item.type === 'NonFungibleESDT' && 
-            item.collection && 
-            item.media && 
-            item.media.length > 0 && 
-            item.media[0].url) {
+      // If source is Project Wallet, fetch from project's wallet via API
+      if (source === 'project_wallet') {
+        try {
+          const projects = await getProjects(guildId);
+          const selectedProject = interaction.options.getString('project-name');
           
-          if (!collectionsMap.has(item.collection)) {
-            // Extract collection name from first NFT in collection or use ticker
-            const collectionName = item.name?.split('#')[0]?.trim() || 
-                                  item.collection.split('-')[0] || 
-                                  item.collection;
-            const ticker = item.ticker || item.collection.split('-')[0] || '';
+          // If a specific project is selected, fetch from that project only
+          if (selectedProject && projects[selectedProject]) {
+            const project = projects[selectedProject];
+            const walletAddress = project.walletAddress;
             
-            collectionsMap.set(item.collection, {
-              identifier: item.collection,
-              name: collectionName,
-              ticker: ticker
+            if (!walletAddress) {
+              console.log('[AUTOCOMPLETE] create-auction collection: No wallet address for project:', selectedProject);
+              await safeRespond(interaction, []);
+              return;
+            }
+            
+            // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
+            const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
+            console.log('[AUTOCOMPLETE] create-auction collection: Fetching from', nftsUrl);
+            
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            
+            const response = await fetch(nftsUrl, {
+              signal: controller.signal
             });
+            
+            clearTimeout(timeoutId);
+            
+            if (!response.ok) {
+              console.error(`[AUTOCOMPLETE] create-auction collection: API error ${response.status} ${response.statusText}`);
+              await safeRespond(interaction, []);
+              return;
+            }
+            
+            const responseData = await response.json();
+            console.log('[AUTOCOMPLETE] create-auction collection: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
+            
+            // Handle paginated response (check for data property) or direct array
+            let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+            
+            if (!Array.isArray(allItems) || allItems.length === 0) {
+              console.log('[AUTOCOMPLETE] create-auction collection: No NFTs/SFTs found');
+              await safeRespond(interaction, []);
+              return;
+            }
+            
+            console.log(`[AUTOCOMPLETE] create-auction collection: Found ${allItems.length} items from API`);
+            
+            // Extract unique collections that have actual NFTs (NonFungibleESDT) with media
+            const collectionsMap = new Map();
+            
+            allItems.forEach(item => {
+              // Only include collections that have NFTs (not SFTs) and have media URLs
+              if (item.type === 'NonFungibleESDT' && 
+                  item.collection && 
+                  item.media && 
+                  item.media.length > 0 && 
+                  item.media[0].url) {
+                
+                if (!collectionsMap.has(item.collection)) {
+                  // Extract collection name from first NFT in collection or use ticker
+                  const collectionName = item.name?.split('#')[0]?.trim() || 
+                                        item.collection.split('-')[0] || 
+                                        item.collection;
+                  const ticker = item.ticker || item.collection.split('-')[0] || '';
+                  
+                  collectionsMap.set(item.collection, {
+                    identifier: item.collection,
+                    name: collectionName,
+                    ticker: ticker
+                  });
+                }
+              }
+            });
+            
+            const collections = Array.from(collectionsMap.values());
+            console.log(`[AUTOCOMPLETE] create-auction collection: Extracted ${collections.length} unique NFT collections (excluded SFTs and items without media)`);
+            
+            const choices = collections.map(collection => ({
+              name: `${collection.name}${collection.ticker ? ` (${collection.ticker})` : ''}`,
+              value: collection.identifier // Always use full identifier
+            })).filter(choice => choice.value);
+            
+            const filtered = choices.filter(choice =>
+              choice.name.toLowerCase().includes(focusedValue.toLowerCase()) ||
+              choice.value.toLowerCase().includes(focusedValue.toLowerCase())
+            );
+            
+            console.log(`[AUTOCOMPLETE] create-auction collection: Returning ${filtered.length} filtered choices`);
+            await safeRespond(interaction, filtered.slice(0, 25));
+            return;
           }
+          
+          // If no project is selected, aggregate collections from all projects
+          console.log('[AUTOCOMPLETE] create-auction collection: No project selected, aggregating from all projects');
+          const communityFundProjectName = getCommunityFundProjectName();
+          const allCollectionsMap = new Map();
+          
+          // Fetch collections from all projects (excluding Community Fund)
+          const projectNames = Object.keys(projects).filter(name => name !== communityFundProjectName);
+          
+          if (projectNames.length === 0) {
+            console.log('[AUTOCOMPLETE] create-auction collection: No projects available');
+            await safeRespond(interaction, []);
+            return;
+          }
+          
+          // Fetch from all projects in parallel (with timeout)
+          const fetchPromises = projectNames.map(async (projectName) => {
+            const project = projects[projectName];
+            if (!project || !project.walletAddress) {
+              return [];
+            }
+            
+            try {
+              const nftsUrl = `https://api.multiversx.com/accounts/${project.walletAddress}/nfts`;
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 3000); // Shorter timeout for parallel requests
+              
+              const response = await fetch(nftsUrl, {
+                signal: controller.signal
+              });
+              
+              clearTimeout(timeoutId);
+              
+              if (!response.ok) {
+                console.error(`[AUTOCOMPLETE] create-auction collection: API error for ${projectName}: ${response.status}`);
+                return [];
+              }
+              
+              const responseData = await response.json();
+              let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+              
+              return allItems || [];
+            } catch (error) {
+              if (error.name !== 'AbortError') {
+                console.error(`[AUTOCOMPLETE] create-auction collection: Error fetching from ${projectName}:`, error.message);
+              }
+              return [];
+            }
+          });
+          
+          const allResults = await Promise.all(fetchPromises);
+          const allItems = allResults.flat();
+          
+          console.log(`[AUTOCOMPLETE] create-auction collection: Found ${allItems.length} total items from ${projectNames.length} projects`);
+          
+          // Extract unique collections from all projects
+          allItems.forEach(item => {
+            // Only include collections that have NFTs (not SFTs) and have media URLs
+            if (item.type === 'NonFungibleESDT' && 
+                item.collection && 
+                item.media && 
+                item.media.length > 0 && 
+                item.media[0].url) {
+              
+              if (!allCollectionsMap.has(item.collection)) {
+                // Extract collection name from first NFT in collection or use ticker
+                const collectionName = item.name?.split('#')[0]?.trim() || 
+                                      item.collection.split('-')[0] || 
+                                      item.collection;
+                const ticker = item.ticker || item.collection.split('-')[0] || '';
+                
+                allCollectionsMap.set(item.collection, {
+                  identifier: item.collection,
+                  name: collectionName,
+                  ticker: ticker
+                });
+              }
+            }
+          });
+          
+          const collections = Array.from(allCollectionsMap.values());
+          console.log(`[AUTOCOMPLETE] create-auction collection: Extracted ${collections.length} unique NFT collections from all projects`);
+          
+          const choices = collections.map(collection => ({
+            name: `${collection.name}${collection.ticker ? ` (${collection.ticker})` : ''}`,
+            value: collection.identifier
+          })).filter(choice => choice.value);
+          
+          const filtered = choices.filter(choice =>
+            choice.name.toLowerCase().includes(focusedValue.toLowerCase()) ||
+            choice.value.toLowerCase().includes(focusedValue.toLowerCase())
+          );
+          
+          console.log(`[AUTOCOMPLETE] create-auction collection: Returning ${filtered.length} filtered choices from all projects`);
+          await safeRespond(interaction, filtered.slice(0, 25));
+          return;
+        } catch (projectError) {
+          if (projectError.name !== 'AbortError') {
+            console.error('[AUTOCOMPLETE] create-auction collection: Error fetching from Project Wallet:', projectError.message, projectError.stack);
+          }
+          await safeRespond(interaction, []);
+          return;
         }
-      });
+      }
       
-      const collections = Array.from(collectionsMap.values());
-      console.log(`[AUTOCOMPLETE] create-auction collection: Extracted ${collections.length} unique NFT collections (excluded SFTs and items without media)`);
-      
-      const choices = collections.map(collection => ({
-        name: `${collection.name}${collection.ticker ? ` (${collection.ticker})` : ''}`,
-        value: collection.identifier // Always use full identifier
-      })).filter(choice => choice.value);
-      
-      const filtered = choices.filter(choice =>
-        choice.name.toLowerCase().includes(focusedValue.toLowerCase()) ||
-        choice.value.toLowerCase().includes(focusedValue.toLowerCase())
-      );
-      
-      console.log(`[AUTOCOMPLETE] create-auction collection: Returning ${filtered.length} filtered choices`);
-      await safeRespond(interaction, filtered.slice(0, 25));
+      // Unknown source value
+      console.log('[AUTOCOMPLETE] create-auction collection: Unknown source value:', source);
+      await safeRespond(interaction, []);
     } catch (error) {
       if (error.name !== 'AbortError') {
         console.error('[AUTOCOMPLETE] create-auction collection: Error fetching collections:', error.message, error.stack);
@@ -12926,17 +13565,16 @@ client.on('interactionCreate', async (interaction) => {
 
       // Save bid to auction_bids table for historical record
       try {
+        // Get decimals - use stored value or default to 8 if not found
         const storedDecimals = await getStoredTokenDecimals(guildId, auction.tokenTicker);
-        if (storedDecimals !== null) {
-          const bidAmountWei = toBlockchainAmount(quickBidAmount, storedDecimals);
-          await dbAuctions.createBid(guildId, auctionId, {
-            bidderId: interaction.user.id,
-            bidderTag: interaction.user.tag,
-            bidAmountWei: bidAmountWei,
-            txHash: null // Virtual account bid, no blockchain transaction
-          });
-          console.log(`[AUCTIONS] Bid saved to database: ${quickBidAmount} ${auction.tokenTicker} by ${interaction.user.tag}`);
-        }
+        const decimals = storedDecimals !== null ? storedDecimals : 8; // Default to 8 decimals if not found
+        const bidAmountWei = toBlockchainAmount(quickBidAmount, decimals);
+        await dbAuctions.createBid(guildId, auctionId, {
+          bidderId: interaction.user.id,
+          bidderTag: interaction.user.tag,
+          bidAmountWei: bidAmountWei
+        });
+        console.log(`[AUCTIONS] Bid saved to database: ${quickBidAmount} ${auction.tokenTicker} by ${interaction.user.tag}`);
       } catch (bidError) {
         console.error('[AUCTIONS] Error saving bid to database:', bidError.message);
         // Don't fail the bid if database save fails
@@ -13004,11 +13642,21 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Verify seller still owns NFT
+      // Verify seller still owns NFT/SFT and has sufficient amount
       const sellerNFT = await virtualAccountsNFT.getUserNFTBalance(guildId, listing.sellerId, listing.collection, listing.nonce);
       if (!sellerNFT) {
         await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'CANCELLED' });
         await interaction.editReply({ content: '❌ Seller no longer owns this NFT. Listing has been cancelled.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const listingAmount = listing.amount || 1;
+      const sellerAmount = sellerNFT.amount || 1;
+      if (listingAmount > sellerAmount) {
+        // CRITICAL: Use actual token_type from listing, don't infer from amount
+        const tokenType = listing.tokenType || 'NFT';
+        await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'CANCELLED' });
+        await interaction.editReply({ content: `❌ Seller no longer has sufficient ${tokenType} balance. Listing has been cancelled.`, flags: [MessageFlags.Ephemeral] });
         return;
       }
       
@@ -13025,13 +13673,18 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      // CRITICAL: Use actual token_type from listing, don't infer from amount
+      // 1 SFT is still SFT, not NFT! Must use explicit token_type from listing
+      const tokenType = listing.tokenType || 'NFT';
+      const amountText = listingAmount > 1 ? ` (${listingAmount}x)` : '';
+      
       // Deduct ESDT from buyer
       const deductResult = await virtualAccounts.deductFundsFromAccount(
         guildId,
         interaction.user.id,
         listing.priceTokenIdentifier,
         listing.priceAmount,
-        `NFT purchase: ${listing.nftName || `${listing.collection}#${listing.nonce}`}`,
+        `${tokenType} purchase: ${listing.nftName || `${listing.collection}#${listing.nonce}`}${amountText}`,
         'marketplace_purchase'
       );
       
@@ -13051,7 +13704,7 @@ client.on('interactionCreate', async (interaction) => {
         null
       );
       
-      // Transfer NFT
+      // Transfer NFT/SFT with amount
       await virtualAccountsNFT.transferNFTBetweenUsers(
         guildId,
         listing.sellerId,
@@ -13061,28 +13714,33 @@ client.on('interactionCreate', async (interaction) => {
         {
           tokenIdentifier: listing.priceTokenIdentifier,
           amount: listing.priceAmount
-        }
+        },
+        listingAmount
       );
       
       // Update listing status
       await virtualAccountsNFT.updateListing(guildId, listingId, { 
         status: 'SOLD',
-        soldAt: Date.now()
+        soldAt: Date.now(),
+        buyerId: interaction.user.id
       });
       
       // Update listing embed
       await updateNFTListingEmbed(guildId, listingId);
       
-      // Send notifications
+      // Send notifications (use token_type from listing for reliable detection)
+      const nftDisplayName = listing.nftName || `${listing.collection}#${listing.nonce}`;
+      // CRITICAL: Use actual token_type from listing, don't infer from amount
+      const listingTokenType = listing.tokenType || 'NFT';
       try {
         const seller = await client.users.fetch(listing.sellerId);
-        await seller.send(`✅ **Your NFT has been sold!**\n\n**NFT:** ${listing.nftName || `${listing.collection}#${listing.nonce}`}\n**Buyer:** ${interaction.user.tag}\n**Price:** ${listing.priceAmount} ${listing.priceTokenIdentifier.split('-')[0]}`);
+        await seller.send(`✅ **Your ${listingTokenType} has been sold!**\n\n**${listingTokenType}:** ${nftDisplayName}${amountText}\n**Buyer:** ${interaction.user.tag}\n**Price:** ${listing.priceAmount} ${listing.priceTokenIdentifier.split('-')[0]}`);
       } catch (dmError) {
         console.error('[NFT-MARKETPLACE] Could not send DM to seller:', dmError.message);
       }
       
       await interaction.editReply({ 
-        content: `✅ **Purchase successful!**\n\nYou have purchased **${listing.nftName || `${listing.collection}#${listing.nonce}`}** for ${listing.priceAmount} ${listing.priceTokenIdentifier.split('-')[0]}.`, 
+        content: `✅ **Purchase successful!**\n\nYou have purchased **${nftDisplayName}${amountText}** for ${listing.priceAmount} ${listing.priceTokenIdentifier.split('-')[0]}.`, 
         flags: [MessageFlags.Ephemeral] 
       });
       
@@ -13126,6 +13784,12 @@ client.on('interactionCreate', async (interaction) => {
       // Check if user is trying to offer on their own NFT
       if (listing.sellerId === interaction.user.id) {
         await interaction.reply({ content: '❌ You cannot make an offer on your own listing.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check if listing type allows offers
+      if (listing.listingType !== 'accept_offers') {
+        await interaction.reply({ content: '❌ This listing does not accept offers. Please use the "Buy Now" button instead.', flags: [MessageFlags.Ephemeral] });
         return;
       }
       
@@ -13305,6 +13969,9 @@ client.on('interactionCreate', async (interaction) => {
       );
       
       // Transfer NFT
+      // Get listing amount (for SFTs, this is the number of tokens being sold)
+      const listingAmount = offerListing.amount || 1;
+      
       await virtualAccountsNFT.transferNFTBetweenUsers(
         offerGuildId,
         offerListing.sellerId,
@@ -13314,7 +13981,8 @@ client.on('interactionCreate', async (interaction) => {
         {
           tokenIdentifier: offer.priceTokenIdentifier,
           amount: offer.priceAmount
-        }
+        },
+        listingAmount // CRITICAL: Pass the listing amount (number of SFTs/NFTs being transferred)
       );
       
       // Update offer status
@@ -13334,7 +14002,8 @@ client.on('interactionCreate', async (interaction) => {
       // Update listing status
       await virtualAccountsNFT.updateListing(offerGuildId, offerListing.listingId, { 
         status: 'SOLD',
-        soldAt: Date.now()
+        soldAt: Date.now(),
+        buyerId: offer.offererId
       });
       
       // Update embeds
@@ -13474,6 +14143,23 @@ client.on('interactionCreate', async (interaction) => {
         await dbVirtualAccounts.getUserAccount(guildId, interaction.user.id, interaction.user.username);
         
         console.log(`[WALLET-REGISTRATION] Wallet registered via button for user ${interaction.user.tag} (${interaction.user.id}) in guild ${guildId}: ${walletAddress}`);
+        
+        // Process any pending transactions (NFTs/tokens sent before registration)
+        try {
+          const blockchainListener = require('./blockchain-listener');
+          const pendingResult = await blockchainListener.processPendingTransactionsForWallet(
+            guildId,
+            interaction.user.id,
+            walletAddress
+          );
+          
+          if (pendingResult.processed > 0) {
+            console.log(`[WALLET-REGISTRATION] Processed ${pendingResult.processed} pending transaction(s) for user ${interaction.user.id}`);
+          }
+        } catch (pendingError) {
+          console.error(`[WALLET-REGISTRATION] Error processing pending transactions:`, pendingError.message);
+          // Don't fail wallet registration if pending processing fails
+        }
         
         // Get Community Fund wallet address and QR code
         let communityFundAddress = null;
@@ -14053,6 +14739,12 @@ client.on('interactionCreate', async (interaction) => {
             return;
           }
           
+          // Check if listing type allows offers
+          if (listing.listingType !== 'accept_offers') {
+            await interaction.editReply({ content: '❌ This listing does not accept offers. Please use the "Buy Now" button instead.', flags: [MessageFlags.Ephemeral] });
+            return;
+          }
+          
           const offerAmountInput = interaction.fields.getTextInputValue('offer-amount');
           
           // Validate offer amount
@@ -14098,6 +14790,9 @@ client.on('interactionCreate', async (interaction) => {
           });
           
           // Create transaction record for offerer
+          const listingAmount = listing.amount || 1; // Get listing amount for SFTs
+          // Get token_type from listing (most reliable source)
+          const listingTokenType = listing.tokenType || (listingAmount > 1 ? 'SFT' : 'NFT');
           await virtualAccountsNFT.addNFTTransaction(guildId, interaction.user.id, {
             id: `nft_offer_${offerId}`,
             type: 'offer',
@@ -14105,6 +14800,8 @@ client.on('interactionCreate', async (interaction) => {
             identifier: listing.identifier,
             nonce: listing.nonce,
             nft_name: listing.nftName,
+            amount: listingAmount, // Store amount for SFTs
+            token_type: listingTokenType, // Use actual token_type from listing, not inferred from amount
             price_token_identifier: listing.priceTokenIdentifier,
             price_amount: offerAmountBN.toString(),
             timestamp: Date.now(),
@@ -14344,17 +15041,16 @@ client.on('interactionCreate', async (interaction) => {
 
           // Save bid to auction_bids table for historical record
           try {
+            // Get decimals - use stored value or default to 8 if not found
             const storedDecimals = await getStoredTokenDecimals(guildId, auction.tokenTicker);
-            if (storedDecimals !== null) {
-              const bidAmountWei = toBlockchainAmount(bidAmountBN.toString(), storedDecimals);
-              await dbAuctions.createBid(guildId, auctionId, {
-                bidderId: interaction.user.id,
-                bidderTag: interaction.user.tag,
-                bidAmountWei: bidAmountWei,
-                txHash: null // Virtual account bid, no blockchain transaction
-              });
-              console.log(`[AUCTIONS] Bid saved to database: ${bidAmountBN.toString()} ${auction.tokenTicker} by ${interaction.user.tag}`);
-            }
+            const decimals = storedDecimals !== null ? storedDecimals : 8; // Default to 8 decimals if not found
+            const bidAmountWei = toBlockchainAmount(bidAmountBN.toString(), decimals);
+            await dbAuctions.createBid(guildId, auctionId, {
+              bidderId: interaction.user.id,
+              bidderTag: interaction.user.tag,
+              bidAmountWei: bidAmountWei
+            });
+            console.log(`[AUCTIONS] Bid saved to database: ${bidAmountBN.toString()} ${auction.tokenTicker} by ${interaction.user.tag}`);
           } catch (bidError) {
             console.error('[AUCTIONS] Error saving bid to database:', bidError.message);
             // Don't fail the bid if database save fails
@@ -15856,9 +16552,14 @@ async function updateNFTListingEmbed(guildId, listingId) {
       ? `${listing.priceAmount} ${tokenTicker} (≈ $${priceUsd.toFixed(2)})`
       : `${listing.priceAmount} ${tokenTicker}`;
 
+    const amount = listing.amount || 1;
+    const tokenType = amount > 1 ? 'SFT' : 'NFT';
+    const amountText = amount > 1 ? ` (${amount}x)` : '';
+    const nftDisplayName = listing.nftName || `${listing.collection}#${listing.nonce}`;
+
     const listingEmbed = new EmbedBuilder()
       .setTitle(listing.title)
-      .setDescription(`${listing.description || ''}\n\n**NFT:** ${listing.nftName || `${listing.collection}#${listing.nonce}`}\n**Collection:** ${listing.collection}\n**Nonce:** ${listing.nonce}`)
+      .setDescription(`${listing.description || ''}\n\n**${tokenType}:** ${nftDisplayName}${amountText}\n**Collection:** ${listing.collection}\n**Nonce:** ${listing.nonce}`)
       .addFields([
         { name: '💰 Price', value: priceDisplay, inline: true },
         { name: '📋 Listing Type', value: listing.listingType === 'fixed_price' ? 'Fixed Price' : 'Accept Offers', inline: true },
@@ -15919,11 +16620,14 @@ async function updateNFTListingEmbed(guildId, listingId) {
         .setStyle(ButtonStyle.Success);
       buttons.push(buyButton);
       
-      const offerButton = new ButtonBuilder()
-        .setCustomId(`nft-offer:${listingId}`)
-        .setLabel('Make Offer')
-        .setStyle(ButtonStyle.Primary);
-      buttons.push(offerButton);
+      // Only show offer button for accept_offers listings
+      if (listing.listingType === 'accept_offers') {
+        const offerButton = new ButtonBuilder()
+          .setCustomId(`nft-offer:${listingId}`)
+          .setLabel('Make Offer')
+          .setStyle(ButtonStyle.Primary);
+        buttons.push(offerButton);
+      }
       
       const cancelButton = new ButtonBuilder()
         .setCustomId(`nft-listing-cancel:${listingId}`)
@@ -16004,9 +16708,14 @@ async function updateAuctionEmbed(guildId, auctionId) {
       ? `${auction.minBidIncrease} ${auction.tokenTicker} (≈ $${minBidIncreaseUsd})`
       : `${auction.minBidIncrease} ${auction.tokenTicker}`;
 
+    const amount = auction.amount || 1;
+    // Use token_type from database for reliable detection (bulletproof)
+    const tokenType = auction.tokenType || (amount > 1 ? 'SFT' : 'NFT');
+    const amountText = amount > 1 ? ` (${amount}x)` : '';
+    
     const auctionEmbed = new EmbedBuilder()
-      .setTitle(auction.title)
-      .setDescription(`${auction.description}\n\n**NFT:** ${auction.nftName}\n**Collection:** ${auction.collection}\n**Nonce:** ${auction.nftNonce}`)
+        .setTitle(auction.title)
+        .setDescription(`${auction.description}\n\n**${tokenType}:** ${auction.nftName}${amountText}\n**Collection:** ${auction.collection}\n**Nonce:** ${auction.nftNonce}`)
       .addFields([
         { name: 'Starting Amount', value: startingAmountDisplay, inline: true },
         { name: 'Current Bid', value: currentBidText, inline: true },
@@ -16146,7 +16855,8 @@ async function processAuctionClosure(guildId, auctionId) {
       }
 
       try {
-        // Transfer NFT from seller's VA to winner's VA
+        const auctionAmount = auction.amount || 1;
+        // Transfer NFT/SFT from seller's VA to winner's VA
         await virtualAccountsNFT.transferNFTBetweenUsers(
           guildId,
           auction.sellerId,
@@ -16156,7 +16866,8 @@ async function processAuctionClosure(guildId, auctionId) {
           {
             tokenIdentifier: tokenIdentifier,
             amount: auction.currentBid
-          }
+          },
+          auctionAmount
         );
         
         // Credit tokens to seller's virtual account
@@ -16171,13 +16882,14 @@ async function processAuctionClosure(guildId, auctionId) {
         );
 
         transferResult = { success: true, txHash: null };
-        console.log(`[AUCTIONS] Successfully transferred NFT from seller ${auction.sellerId} to winner ${auction.highestBidderId} via virtual accounts`);
+        const tokenType = auctionAmount > 1 ? 'SFT' : 'NFT';
+        console.log(`[AUCTIONS] Successfully transferred ${tokenType} from seller ${auction.sellerId} to winner ${auction.highestBidderId} via virtual accounts`);
       } catch (vaError) {
-        console.error(`[AUCTIONS] Error transferring NFT between virtual accounts:`, vaError);
+        console.error(`[AUCTIONS] Error transferring NFT/SFT between virtual accounts:`, vaError);
         transferResult = { success: false, errorMessage: vaError.message, txHash: null };
       }
     } else {
-      // Project Wallet Auction: Transfer NFT via blockchain
+      // Project Wallet Auction: Transfer NFT/SFT via blockchain
       const userWallets = await getUserWallets(guildId);
       const winnerWallet = userWallets[auction.highestBidderId];
 
@@ -16202,13 +16914,15 @@ async function processAuctionClosure(guildId, auctionId) {
         return;
       }
 
-      // Transfer NFT via blockchain
-      transferResult = await transferNFT(
+      const auctionAmount = auction.amount || 1;
+      // Transfer NFT/SFT via blockchain (auto-detects SFT vs NFT based on amount)
+      transferResult = await transferNFTFromCommunityFund(
         winnerWallet,
         auction.collection,
         auction.nftNonce,
         auction.projectName,
-        guildId
+        guildId,
+        auctionAmount
       );
 
       // For project wallet auctions, track earnings for house balance
@@ -16235,9 +16949,14 @@ async function processAuctionClosure(guildId, auctionId) {
         ? `[${transferResult.txHash}](${explorerUrl})`
         : isVirtualAccountAuction ? 'Virtual Account Transfer' : 'Not available';
 
+      const auctionAmount = auction.amount || 1;
+      // Use token_type from database for reliable detection (bulletproof)
+      const tokenType = auction.tokenType || (auctionAmount > 1 ? 'SFT' : 'NFT');
+      const amountText = auctionAmount > 1 ? ` (${auctionAmount}x)` : '';
+      
       const successEmbed = new EmbedBuilder()
-        .setTitle('🎉 Auction Complete - NFT Transferred!')
-        .setDescription(`Congratulations <@${auction.highestBidderId}>! You won the auction for **${auction.nftName}**!`)
+        .setTitle(`🎉 Auction Complete - ${tokenType} Transferred!`)
+        .setDescription(`Congratulations <@${auction.highestBidderId}>! You won the auction for **${auction.nftName}${amountText}**!`)
         .addFields([
           { name: 'Winner', value: `<@${auction.highestBidderId}>`, inline: true },
           { name: 'Final Bid', value: `${auction.currentBid} ${auction.tokenTicker}`, inline: true },
@@ -16262,8 +16981,57 @@ async function processAuctionClosure(guildId, auctionId) {
 
       await message.reply({ embeds: [successEmbed] });
 
+      // Send DM notification to highest bidder
+      try {
+        const winnerUser = await client.users.fetch(auction.highestBidderId);
+        if (winnerUser) {
+          // Get project logo URL
+          const projectName = isVirtualAccountAuction ? 'Community Fund' : auction.projectName;
+          const projectLogoUrl = await getProjectLogoUrl(guildId, projectName);
+          
+          const dmEmbed = new EmbedBuilder()
+            .setTitle(`🎉 You Won the Auction!`)
+            .setDescription(`Congratulations! You won the auction for **${auction.nftName}${amountText}**!`)
+            .addFields([
+              { name: 'Auction Title', value: auction.title || auction.nftName, inline: false },
+              { name: 'NFT/SFT Name', value: auction.nftName, inline: true },
+              { name: 'Collection', value: auction.collection, inline: true },
+              { name: 'Nonce', value: String(auction.nftNonce), inline: true },
+              { name: 'Final Bid', value: `${auction.currentBid} ${auction.tokenTicker}`, inline: true },
+              { name: 'Balance Before', value: `${balanceBefore} ${auction.tokenTicker}`, inline: true },
+              { name: 'Balance After', value: `${balanceAfter} ${auction.tokenTicker}`, inline: true }
+            ])
+            .setColor(0x00FF00)
+            .setThumbnail(projectLogoUrl)
+            .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+            .setTimestamp();
+
+          if (transferResult.txHash) {
+            const explorerUrl = `https://explorer.multiversx.com/transactions/${transferResult.txHash}`;
+            dmEmbed.addFields([{ name: 'Transaction Hash', value: `[${transferResult.txHash}](${explorerUrl})`, inline: false }]);
+          } else if (isVirtualAccountAuction) {
+            dmEmbed.addFields([{ name: 'Transfer Type', value: 'Virtual Account Transfer', inline: false }]);
+          }
+
+          if (isVirtualAccountAuction && auction.sellerId) {
+            dmEmbed.addFields([{ name: 'Seller', value: `<@${auction.sellerId}>`, inline: true }]);
+          }
+
+          if (auction.nftImageUrl) {
+            dmEmbed.setImage(auction.nftImageUrl);
+          }
+
+          await winnerUser.send({ embeds: [dmEmbed] });
+          console.log(`[AUCTIONS] Sent DM notification to winner ${winnerUser.tag} (${auction.highestBidderId}) for auction ${auctionId}`);
+        }
+      } catch (dmError) {
+        // User might have DMs disabled or blocked the bot
+        console.error(`[AUCTIONS] Failed to send DM to winner ${auction.highestBidderId}:`, dmError.message);
+      }
+
       if (thread) {
-        await thread.send(`✅ **NFT successfully transferred to winner!** Check the main channel for details.`);
+        const tokenType = auctionAmount > 1 ? 'SFT' : 'NFT';
+        await thread.send(`✅ **${tokenType} successfully transferred to winner!** Check the main channel for details.`);
       }
     } else {
       // Refund the deduction (using identifier)

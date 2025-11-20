@@ -29,6 +29,8 @@ async function getAuction(guildId, auctionId) {
       nftName: data.nft_name,
       nftIdentifier: data.nft_identifier,
       nftNonce: data.nft_nonce,
+      amount: data.amount || 1,
+      tokenType: data.token_type || 'NFT',
       nftImageUrl: data.nft_image_url,
       title: data.title,
       description: data.description,
@@ -84,6 +86,8 @@ async function getAuctionsByGuild(guildId) {
         nftName: row.nft_name,
         nftIdentifier: row.nft_identifier,
         nftNonce: row.nft_nonce,
+        amount: row.amount || 1,
+        tokenType: row.token_type || 'NFT',
         nftImageUrl: row.nft_image_url,
         title: row.title,
         description: row.description,
@@ -133,6 +137,8 @@ async function getActiveAuctions(guildId) {
       nftName: row.nft_name,
       nftIdentifier: row.nft_identifier,
       nftNonce: row.nft_nonce,
+      amount: row.amount || 1,
+      tokenType: row.token_type || 'NFT',
       nftImageUrl: row.nft_image_url,
       title: row.title,
       description: row.description,
@@ -194,10 +200,14 @@ async function createAuction(guildId, auctionId, auctionData) {
       created_at: auctionData.createdAt || Date.now()
     };
 
-    // Try to include seller_id (only new column needed)
+    // Try to include seller_id, amount, and token_type (new columns)
+    const amount = auctionData.amount || 1;
+    const tokenType = auctionData.tokenType || (amount > 1 ? 'SFT' : 'NFT');
     let insertWithSellerId = {
       ...insertData,
-      seller_id: auctionData.sellerId || null
+      seller_id: auctionData.sellerId || null,
+      amount: amount,
+      token_type: tokenType
     };
 
     let { error } = await supabase
@@ -288,8 +298,8 @@ async function createBid(guildId, auctionId, bidData) {
         guild_id: guildId,
         bidder_id: bidData.bidderId,
         bidder_tag: bidData.bidderTag || null,
-        bid_amount_wei: bidData.bidAmountWei,
-        tx_hash: bidData.txHash || null // Make tx_hash optional for virtual account bids
+        bid_amount_wei: bidData.bidAmountWei
+        // Note: tx_hash removed - all bids are virtual account bids, no blockchain transactions
       });
     
     if (error) throw error;
@@ -324,10 +334,48 @@ async function getBidsByAuction(guildId, auctionId) {
   }
 }
 
+async function getUserActiveAuctions(guildId, userId, collection = null, nonce = null) {
+  try {
+    let query = supabase
+      .from('auctions')
+      .select('*')
+      .eq('guild_id', guildId)
+      .eq('status', 'ACTIVE')
+      .or(`creator_id.eq.${userId},seller_id.eq.${userId}`); // Get auctions where user is creator or seller
+    
+    if (collection) {
+      query = query.eq('collection', collection);
+    }
+    
+    if (nonce !== null) {
+      query = query.eq('nft_nonce', nonce);
+    }
+    
+    const { data, error } = await query.order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    
+    return (data || []).map(row => ({
+      auctionId: row.auction_id,
+      guildId: row.guild_id,
+      creatorId: row.creator_id,
+      sellerId: row.seller_id,
+      collection: row.collection,
+      nftNonce: row.nft_nonce,
+      amount: row.amount || 1,
+      tokenType: row.token_type || 'NFT'
+    }));
+  } catch (error) {
+    console.error('[DB] Error getting user active auctions:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   getAuction,
   getAuctionsByGuild,
   getActiveAuctions,
+  getUserActiveAuctions,
   createAuction,
   updateAuction,
   createBid,

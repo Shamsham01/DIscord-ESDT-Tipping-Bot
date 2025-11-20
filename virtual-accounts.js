@@ -35,6 +35,35 @@ async function getAllUserBalances(guildId, userId) {
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") or ticker for backward compatibility
 async function addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHash, source = 'deposit', username = null) {
   try {
+    // CRITICAL: Check for duplicate transaction by tx_hash BEFORE processing
+    // This is a redundant safety check (main check happens in processTransaction)
+    // but ensures we never process duplicates even if called from other code paths
+    if (txHash) {
+      const dbVirtualAccounts = require('./db/virtual-accounts');
+      const supabase = require('./supabase-client');
+      
+      const { data: existingTx, error: checkError } = await supabase
+        .from('virtual_account_transactions')
+        .select('id, user_id, token, amount, type')
+        .eq('tx_hash', txHash)
+        .eq('guild_id', guildId)
+        .eq('user_id', userId)
+        .limit(1)
+        .maybeSingle(); // Use maybeSingle() to avoid error if no record found
+      
+      if (checkError && checkError.code !== 'PGRST116') { // PGRST116 = no rows found, which is OK
+        console.error(`[VIRTUAL] ⚠️ Error checking ESDT duplicate in addFundsToAccount:`, checkError.message);
+        // Continue processing if database check fails (fail-open)
+      } else if (existingTx) {
+        console.log(`[VIRTUAL] ⚠️ Transaction ${txHash} already processed (found in database), skipping`);
+        console.log(`[VIRTUAL] ℹ️ Already processed: user=${existingTx.user_id}, token=${existingTx.token}, amount=${existingTx.amount}, type=${existingTx.type}`);
+        return {
+          success: false,
+          error: 'Transaction already processed'
+        };
+      }
+    }
+    
     // Get current account to find existing token key
     const account = await getUserAccount(guildId, userId, username);
     const balances = account.balances || {};

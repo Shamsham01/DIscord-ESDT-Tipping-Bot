@@ -199,8 +199,11 @@ async function getAllCommunityFundWallets() {
 async function fetchLatestTransactions(walletAddress, fromTimestamp) {
   try {
     // Fetch transactions after the last known timestamp for this wallet
-    // Removed function filter to capture both ESDTTransfer and ESDTNFTTransfer
-    const url = `${API_BASE_URL}/accounts/${walletAddress}/transactions?size=1&receiver=${walletAddress}&status=success&order=desc&after=${fromTimestamp}`;
+    // Note: This endpoint captures both ESDT transfers (FungibleESDT) and NFT transfers (NonFungibleESDT/SemiFungibleESDT)
+    // The receiver filter ensures we only get incoming transfers to the Community Fund wallet
+    // No function filter is needed - the API returns all transaction types, and we filter by transfer.type in processTransaction()
+    // Fetch the 2 NEWEST transactions (order=desc) to handle cases where 2 people make transactions in the same second
+    const url = `${API_BASE_URL}/accounts/${walletAddress}/transactions?size=2&receiver=${walletAddress}&status=success&order=desc&after=${fromTimestamp}`;
     
     console.log(`[BLOCKCHAIN] 🔗 Fetching: ${url}`);
     
@@ -217,8 +220,27 @@ async function fetchLatestTransactions(walletAddress, fromTimestamp) {
     }
     
     const data = await response.json();
-    console.log(`[BLOCKCHAIN] 📊 Response data:`, JSON.stringify(data, null, 2));
-    return data;
+    
+    // Log transaction types found for debugging
+    if (data && Array.isArray(data) && data.length > 0) {
+      const transferTypes = [];
+      data.forEach(tx => {
+        if (tx.action && tx.action.arguments && tx.action.arguments.transfers) {
+          tx.action.arguments.transfers.forEach(t => {
+            if (!transferTypes.includes(t.type)) transferTypes.push(t.type);
+          });
+        }
+      });
+      console.log(`[BLOCKCHAIN] 📊 Found ${data.length} transaction(s) with transfer types: ${transferTypes.join(', ')}`);
+    }
+    
+    // Reverse the array to process chronologically (oldest first)
+    // API returns newest first (desc), but we want to process oldest first to maintain chronological order
+    if (data && Array.isArray(data) && data.length > 0) {
+      return data.reverse();
+    }
+    
+    return data || [];
   } catch (error) {
     console.error(`[BLOCKCHAIN] Error fetching transactions for ${walletAddress}:`, error.message);
     return null;
@@ -228,6 +250,12 @@ async function fetchLatestTransactions(walletAddress, fromTimestamp) {
 // Process a blockchain transaction
 async function processTransaction(transaction, guildId, projectName) {
   try {
+    // CRITICAL: Validate txHash exists before processing
+    if (!transaction.txHash) {
+      console.error(`[BLOCKCHAIN] ❌ Transaction missing txHash, cannot process:`, transaction);
+      return { processed: false, reason: 'Missing transaction hash' };
+    }
+    
     console.log(`[BLOCKCHAIN] 🔍 Processing transaction for ${projectName}:`, {
       txHash: transaction.txHash,
       sender: transaction.sender,
@@ -238,9 +266,59 @@ async function processTransaction(transaction, guildId, projectName) {
       hasTransfers: !!(transaction.action && transaction.action.arguments && transaction.action.arguments.transfers)
     });
     
-    // Check if we've already processed this transaction
+    // CRITICAL: Check in-memory cache first (fast check for current session)
     if (processedTransactions.has(transaction.txHash)) {
-      return { processed: false, reason: 'Already processed' };
+      console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate transaction ${transaction.txHash} (in-memory cache)`);
+      return { processed: false, reason: 'Already processed (in-memory)' };
+    }
+    
+    // CRITICAL: Check database for duplicates BEFORE any processing
+    // This is bulletproof and survives crashes/restarts
+    try {
+      // Check NFT transactions table
+      const { data: existingNftTx, error: nftCheckError } = await supabase
+        .from('virtual_account_nft_transactions')
+        .select('id, user_id, collection, nonce, type, tx_hash')
+        .eq('tx_hash', transaction.txHash)
+        .limit(1)
+        .maybeSingle(); // Use maybeSingle() to avoid error if no record found
+      
+      if (nftCheckError && nftCheckError.code !== 'PGRST116') { // PGRST116 = no rows found, which is OK
+        console.error(`[BLOCKCHAIN] ⚠️ Error checking NFT transactions for duplicate:`, nftCheckError.message);
+        // Continue processing if database check fails (fail-open to avoid missing transactions)
+      } else if (existingNftTx) {
+        console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate transaction ${transaction.txHash} (found in NFT transactions)`);
+        console.log(`[BLOCKCHAIN] ℹ️ Already processed: user=${existingNftTx.user_id}, collection=${existingNftTx.collection}, nonce=${existingNftTx.nonce}, type=${existingNftTx.type}`);
+        // Add to in-memory cache to avoid future database queries
+        processedTransactions.add(transaction.txHash);
+        return { processed: false, reason: 'Already processed (database - NFT)' };
+      }
+      
+      // Check ESDT transactions table
+      const { data: existingEsdtTx, error: esdtCheckError } = await supabase
+        .from('virtual_account_transactions')
+        .select('id, user_id, token, amount, type, tx_hash')
+        .eq('tx_hash', transaction.txHash)
+        .limit(1)
+        .maybeSingle(); // Use maybeSingle() to avoid error if no record found
+      
+      if (esdtCheckError && esdtCheckError.code !== 'PGRST116') { // PGRST116 = no rows found, which is OK
+        console.error(`[BLOCKCHAIN] ⚠️ Error checking ESDT transactions for duplicate:`, esdtCheckError.message);
+        // Continue processing if database check fails (fail-open to avoid missing transactions)
+      } else if (existingEsdtTx) {
+        console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate transaction ${transaction.txHash} (found in ESDT transactions)`);
+        console.log(`[BLOCKCHAIN] ℹ️ Already processed: user=${existingEsdtTx.user_id}, token=${existingEsdtTx.token}, amount=${existingEsdtTx.amount}, type=${existingEsdtTx.type}`);
+        // Add to in-memory cache to avoid future database queries
+        processedTransactions.add(transaction.txHash);
+        return { processed: false, reason: 'Already processed (database - ESDT)' };
+      }
+      
+      console.log(`[BLOCKCHAIN] ✅ Transaction ${transaction.txHash} not found in database, proceeding with processing`);
+    } catch (dbCheckError) {
+      console.error(`[BLOCKCHAIN] ⚠️ Critical error during database duplicate check:`, dbCheckError.message);
+      // Fail-open: Continue processing if database check fails completely
+      // This prevents missing transactions due to temporary database issues
+      // But log the error so we can investigate
     }
     
     // Timestamp validation is now handled by the API call with 'after' parameter
@@ -259,7 +337,16 @@ async function processTransaction(transaction, guildId, projectName) {
     const transfers = transaction.action.arguments.transfers;
     const results = [];
     
+    console.log(`[BLOCKCHAIN] Found ${transfers.length} transfer(s) in transaction ${transaction.txHash}`);
+    
     for (const transfer of transfers) {
+      console.log(`[BLOCKCHAIN] Processing transfer type: ${transfer.type}`, {
+        hasCollection: !!transfer.collection,
+        hasIdentifier: !!transfer.identifier,
+        hasNonce: transfer.nonce !== undefined,
+        hasTicker: !!transfer.ticker,
+        hasToken: !!transfer.token
+      });
       if (transfer.type === 'FungibleESDT') {
         // Extract token identifier (full identifier like "USDC-c76f1f")
         // Priority: identifier > token > ticker (for backward compatibility)
@@ -309,42 +396,103 @@ async function processTransaction(transaction, guildId, projectName) {
           });
         }
       } else if (transfer.type === 'NonFungibleESDT' || transfer.type === 'SemiFungibleESDT') {
-        // Process NFT transfer
-        const collection = transfer.collection || transfer.ticker;
-        const identifier = transfer.identifier;
+        // Process NFT/SFT transfer
+        // Extract collection - try multiple possible fields
+        let collection = transfer.collection || transfer.ticker || transfer.token;
+        const identifier = transfer.identifier || transfer.token;
         
-        // Extract nonce from identifier (format: COLLECTION-NONCE where nonce is hex)
-        // Example: BASTURDS-2a4c51-0318 -> nonce is 0318 (hex) = 792 (decimal)
+        // Extract nonce - prioritize direct nonce field, then try to extract from identifier
         let nonce = null;
-        if (identifier && identifier.includes('-')) {
-          const parts = identifier.split('-');
-          if (parts.length >= 2) {
-            // Nonce is the last part after the last hyphen
-            const nonceHex = parts[parts.length - 1];
-            // Convert hex to decimal
-            nonce = parseInt(nonceHex, 16);
+        
+        // First, try to get nonce directly from transfer object (most reliable)
+        if (transfer.nonce !== undefined && transfer.nonce !== null) {
+          if (typeof transfer.nonce === 'string') {
+            // Try parsing as hex first, then decimal
+            nonce = transfer.nonce.startsWith('0x') 
+              ? parseInt(transfer.nonce, 16) 
+              : (isNaN(parseInt(transfer.nonce, 16)) ? parseInt(transfer.nonce, 10) : parseInt(transfer.nonce, 16));
+          } else {
+            nonce = Number(transfer.nonce);
           }
         }
         
-        // Fallback: try to get nonce from transfer object if available
-        if (!nonce && transfer.nonce !== undefined) {
-          nonce = typeof transfer.nonce === 'string' ? parseInt(transfer.nonce, 16) : transfer.nonce;
+        // If nonce not found, try to extract from identifier
+        // Format examples: 
+        // - COLLECTION-NONCE (e.g., "BASTURDS-2a4c51-0318" -> nonce is "0318")
+        // - COLLECTION#NONCE (less common)
+        if (!nonce && identifier) {
+          if (identifier.includes('-')) {
+            const parts = identifier.split('-');
+            if (parts.length >= 2) {
+              // Nonce is typically the last part after the last hyphen
+              const nonceHex = parts[parts.length - 1];
+              // Try parsing as hex first
+              const parsedHex = parseInt(nonceHex, 16);
+              if (!isNaN(parsedHex)) {
+                nonce = parsedHex;
+              } else {
+                // Try parsing as decimal
+                const parsedDec = parseInt(nonceHex, 10);
+                if (!isNaN(parsedDec)) {
+                  nonce = parsedDec;
+                }
+              }
+            }
+          }
+          
+          // Also try extracting collection from identifier if not found
+          // Format: COLLECTION-NONCE, extract everything before the last hyphen
+          if (!collection && identifier.includes('-')) {
+            const parts = identifier.split('-');
+            if (parts.length >= 2) {
+              // Collection is everything except the last part (nonce)
+              collection = parts.slice(0, -1).join('-');
+            }
+          }
         }
         
+        // Extract amount for SFTs (SemiFungibleESDT has amount field)
+        let amount = '1'; // Default for NFTs
+        if (transfer.type === 'SemiFungibleESDT') {
+          // SFTs have amount in value field (in wei/base units)
+          if (transfer.value) {
+            // Convert from wei/base units to human-readable amount
+            // For SFTs, value is typically already in base units (like 1000000000000000000 for 1)
+            // But we need to check if there's a decimals field or if it's already human-readable
+            const decimals = transfer.decimals || 0;
+            if (decimals > 0) {
+              const amountBN = new BigNumber(transfer.value);
+              amount = amountBN.dividedBy(new BigNumber(10).pow(decimals)).toString();
+            } else {
+              // If no decimals, assume it's already human-readable or treat as base units
+              // Most SFTs don't use decimals, so value might be the actual amount
+              amount = transfer.value.toString();
+            }
+          } else if (transfer.amount) {
+            amount = transfer.amount.toString();
+          }
+          console.log(`[BLOCKCHAIN] SFT transfer detected with amount: ${amount}`);
+        }
+        
+        // Validate required fields
         if (!nonce || !identifier || !collection) {
           console.error(`[BLOCKCHAIN] Invalid NFT transfer data:`, {
             collection,
             identifier,
             nonce,
-            transfer
+            transferType: transfer.type,
+            transfer: JSON.stringify(transfer, null, 2)
           });
           continue;
         }
         
-        console.log(`[BLOCKCHAIN] Processing NFT transfer: ${identifier} (${collection}#${nonce}) to ${projectName} in guild ${guildId}`);
+        console.log(`[BLOCKCHAIN] Extracted NFT data: collection=${collection}, identifier=${identifier}, nonce=${nonce}, amount=${amount}`);
+        
+        const transferType = transfer.type === 'SemiFungibleESDT' ? 'SFT' : 'NFT';
+        console.log(`[BLOCKCHAIN] Processing ${transferType} transfer: ${identifier} (${collection}#${nonce})${transfer.type === 'SemiFungibleESDT' ? ` amount: ${amount}` : ''} to ${projectName} in guild ${guildId}`);
         console.log(`[BLOCKCHAIN] Sender: ${transaction.sender}, Receiver: ${transaction.receiver}`);
         
-        // Process NFT deposit
+        // Process NFT/SFT deposit (pass token type from blockchain transaction)
         const nftDepositResult = await processNFTDeposit(
           guildId,
           transaction.sender,
@@ -353,7 +501,9 @@ async function processTransaction(transaction, guildId, projectName) {
           identifier,
           nonce,
           transaction.txHash,
-          projectName
+          projectName,
+          amount,
+          transferType
         );
         
         if (nftDepositResult && nftDepositResult.success) {
@@ -396,12 +546,48 @@ async function processTransaction(transaction, guildId, projectName) {
 }
 
 // Process NFT deposit from blockchain
-async function processNFTDeposit(guildId, senderWallet, receiverWallet, collection, identifier, nonce, txHash, projectName) {
+async function processNFTDeposit(guildId, senderWallet, receiverWallet, collection, identifier, nonce, txHash, projectName, amount = 1, tokenType = 'NFT') {
   try {
     if (!virtualAccountsNFT) {
       console.error('[BLOCKCHAIN] NFT virtual accounts module not loaded');
       return { success: false, error: 'NFT module not available' };
     }
+    
+    // CRITICAL: Validate txHash exists
+    if (!txHash) {
+      console.error(`[BLOCKCHAIN] ❌ NFT deposit missing txHash, cannot process`);
+      return { success: false, error: 'Missing transaction hash' };
+    }
+    
+    // CRITICAL: Database duplicate check (redundant safety layer)
+    // Main check happens in processTransaction() before calling this function
+    if (txHash) {
+      const { data: existingTx, error: checkError } = await supabase
+        .from('virtual_account_nft_transactions')
+        .select('id, user_id, collection, nonce, type')
+        .eq('tx_hash', txHash)
+        .limit(1)
+        .maybeSingle(); // Use maybeSingle() to avoid error if no record found
+      
+      if (checkError && checkError.code !== 'PGRST116') { // PGRST116 = no rows found, which is OK
+        console.error(`[BLOCKCHAIN] ⚠️ Error checking NFT duplicate in processNFTDeposit:`, checkError.message);
+        // Continue processing if database check fails (fail-open to avoid missing transactions)
+      } else if (existingTx) {
+        console.log(`[BLOCKCHAIN] ⚠️ Transaction ${txHash} already processed (found in database), skipping`);
+        console.log(`[BLOCKCHAIN] ℹ️ Already processed for user ${existingTx.user_id}, collection ${existingTx.collection}, nonce ${existingTx.nonce}`);
+        return {
+          success: false,
+          error: 'Transaction already processed'
+        };
+      }
+    }
+    
+    // Convert amount to number if string
+    const amountNum = typeof amount === 'string' ? parseFloat(amount) : Number(amount);
+    const finalAmount = isNaN(amountNum) || amountNum <= 0 ? 1 : amountNum;
+    
+    // Validate token type (must be 'NFT' or 'SFT')
+    const validTokenType = (tokenType === 'SFT' || tokenType === 'NFT') ? tokenType : 'NFT';
     
     // Load server data to find user by wallet address
     const dbServerData = require('./db/server-data');
@@ -425,10 +611,12 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
     }
     
     if (!userId) {
-      console.log(`[BLOCKCHAIN] No user found for wallet ${senderWallet} in guild ${guildId}`);
+      console.log(`[BLOCKCHAIN] ⚠️ No user found for wallet ${senderWallet} in guild ${guildId}`);
+      console.log(`[BLOCKCHAIN] ℹ️ NFT deposit will be skipped. User must register wallet with /set-wallet before sending NFTs.`);
+      console.log(`[BLOCKCHAIN] ℹ️ Transaction hash: ${txHash || 'N/A'}`);
       return {
         success: false,
-        error: 'User not found for wallet address'
+        error: 'User not found for wallet address. Please register wallet with /set-wallet before sending NFTs.'
       };
     }
     
@@ -469,17 +657,20 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
       // Continue without metadata - we'll use basic info
     }
     
-    // Add NFT to user's virtual account
+    // Add NFT/SFT to user's virtual account with amount and token type
     await virtualAccountsNFT.addNFTToAccount(
       guildId,
       userId,
       collection,
       identifier,
       nonce,
-      nftMetadata
+      nftMetadata,
+      finalAmount,
+      validTokenType
     );
     
     // Create transaction record
+    const amountText = finalAmount > 1 ? ` (${finalAmount}x)` : '';
     await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
       id: `nft_deposit_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       type: 'deposit',
@@ -487,20 +678,24 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
       identifier: identifier,
       nonce: nonce,
       nft_name: nftMetadata.nft_name,
+      amount: finalAmount, // Store amount for SFTs
+      token_type: validTokenType, // Use actual token_type from blockchain transfer, not inferred from amount
       tx_hash: txHash,
       source: 'blockchain_deposit',
       timestamp: Date.now(),
-      description: `NFT deposit: ${nftMetadata.nft_name || identifier}`
+      description: `${validTokenType} deposit: ${nftMetadata.nft_name || identifier}${amountText}`
     });
     
-    console.log(`[BLOCKCHAIN] Successfully added NFT ${identifier} to user ${userId}'s virtual account`);
+    console.log(`[BLOCKCHAIN] Successfully added ${validTokenType} ${identifier}${amountText} to user ${userId}'s virtual account`);
     
     return {
       success: true,
       userId: userId,
       nft: identifier,
       collection: collection,
-      nonce: nonce
+      nonce: nonce,
+      amount: finalAmount,
+      tokenType: validTokenType
     };
     
   } catch (error) {
@@ -563,31 +758,53 @@ async function pollBlockchain() {
         const transactions = await fetchLatestTransactions(wallet.address, walletTimestamp);
         
         if (transactions && Array.isArray(transactions) && transactions.length > 0) {
-          console.log(`[BLOCKCHAIN] 📋 Found ${transactions.length} transactions for ${wallet.projectName}`);
-          const latestTransaction = transactions[0]; // With order=desc, newest is first
+          console.log(`[BLOCKCHAIN] 📋 Found ${transactions.length} transaction(s) for ${wallet.projectName}`);
           
-          if (latestTransaction && latestTransaction.txHash) {
-            console.log(`[BLOCKCHAIN] 🔍 Processing transaction: ${latestTransaction.txHash}`);
-            console.log(`[BLOCKCHAIN] 📅 Transaction timestamp: ${latestTransaction.timestamp}`);
+          let latestTimestamp = walletTimestamp;
+          let processedCount = 0;
+          let skippedCount = 0;
+          
+          // Process ALL transactions in chronological order (oldest first)
+          for (const transaction of transactions) {
+            if (!transaction.txHash) {
+              console.log(`[BLOCKCHAIN] ⚠️ Skipping transaction without txHash:`, transaction);
+              continue;
+            }
+            
+            console.log(`[BLOCKCHAIN] 🔍 Processing transaction: ${transaction.txHash}`);
+            console.log(`[BLOCKCHAIN] 📅 Transaction timestamp: ${transaction.timestamp}`);
             console.log(`[BLOCKCHAIN] 🏁 Wallet last timestamp: ${walletTimestamp}`);
             
-            const result = await processTransaction(latestTransaction, wallet.guildId, wallet.projectName);
+            const result = await processTransaction(transaction, wallet.guildId, wallet.projectName);
             
             if (result.processed) {
-              console.log(`[BLOCKCHAIN] ✅ Processed transaction ${latestTransaction.txHash} for ${wallet.projectName}`);
+              processedCount++;
+              console.log(`[BLOCKCHAIN] ✅ Processed transaction ${transaction.txHash} for ${wallet.projectName}`);
               
-              // Update timestamp for this wallet (saves to Supabase immediately)
-              await updateWalletTimestamp(wallet.address, latestTransaction.timestamp, currentTimestamps);
+              // Track the latest timestamp processed
+              if (transaction.timestamp > latestTimestamp) {
+                latestTimestamp = transaction.timestamp;
+              }
             } else {
+              skippedCount++;
               // Log why transaction wasn't processed (for debugging)
               if (result.reason === 'Already processed') {
-                console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate transaction ${latestTransaction.txHash} for ${wallet.projectName}`);
+                console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate transaction ${transaction.txHash} for ${wallet.projectName}`);
               } else {
                 console.log(`[BLOCKCHAIN] ❌ Transaction not processed: ${result.reason || 'Unknown reason'}`);
               }
             }
-          } else {
-            console.log(`[BLOCKCHAIN] ⚠️ No txHash found in transaction:`, latestTransaction);
+            
+            // Small delay between processing transactions to avoid overwhelming the API
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          
+          // Update timestamp to the latest processed transaction (or keep current if none were processed)
+          if (latestTimestamp > walletTimestamp) {
+            await updateWalletTimestamp(wallet.address, latestTimestamp, currentTimestamps);
+            console.log(`[BLOCKCHAIN] 📅 Updated timestamp for ${wallet.projectName} to ${latestTimestamp} (processed ${processedCount}, skipped ${skippedCount})`);
+          } else if (processedCount === 0 && skippedCount > 0) {
+            console.log(`[BLOCKCHAIN] 📅 No new transactions processed for ${wallet.projectName} (all ${skippedCount} were duplicates or failed)`);
           }
         } else if (transactions && Array.isArray(transactions) && transactions.length === 0) {
           // Empty wallet - this is normal, no need to log every time
@@ -850,6 +1067,119 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
+// Process pending transactions for a newly registered wallet
+// This handles cases where user sent NFTs/tokens before registering
+async function processPendingTransactionsForWallet(guildId, userId, walletAddress) {
+  try {
+    console.log(`[BLOCKCHAIN] 🔍 Processing pending transactions for newly registered wallet ${walletAddress} (user ${userId})`);
+    
+    // Get Community Fund wallet address
+    const dbServerData = require('./db/server-data');
+    const supabaseClient = require('./supabase-client');
+    
+    // Get community fund project name from guild settings
+    const { data: guildSetting, error: settingsError } = await supabaseClient
+      .from('guild_settings')
+      .select('community_fund_project')
+      .eq('guild_id', guildId)
+      .single();
+    
+    if (settingsError || !guildSetting || !guildSetting.community_fund_project) {
+      console.log(`[BLOCKCHAIN] No Community Fund configured for guild ${guildId}`);
+      return { processed: 0, errors: [] };
+    }
+    
+    // Get the Community Fund project (always use "Community Fund" as the project name)
+    const communityFundProject = await dbServerData.getProject(guildId, 'Community Fund');
+    
+    if (!communityFundProject || !communityFundProject.walletAddress) {
+      console.log(`[BLOCKCHAIN] No Community Fund wallet found for guild ${guildId}`);
+      return { processed: 0, errors: [] };
+    }
+    
+    const communityFundAddress = communityFundProject.walletAddress;
+    const communityFundProjectName = guildSetting.community_fund_project;
+    
+    // Fetch transactions from last 30 days (to catch old deposits)
+    const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
+    const url = `${API_BASE_URL}/accounts/${communityFundAddress}/transactions?size=100&receiver=${communityFundAddress}&sender=${walletAddress}&status=success&order=asc&after=${thirtyDaysAgo}`;
+    
+    console.log(`[BLOCKCHAIN] 🔗 Fetching pending transactions: ${url}`);
+    
+    const response = await fetch(url);
+    if (!response.ok) {
+      if (response.status === 404) {
+        console.log(`[BLOCKCHAIN] No pending transactions found for wallet ${walletAddress}`);
+        return { processed: 0, errors: [] };
+      }
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    const transactions = await response.json();
+    if (!Array.isArray(transactions) || transactions.length === 0) {
+      console.log(`[BLOCKCHAIN] No pending transactions found for wallet ${walletAddress}`);
+      return { processed: 0, errors: [] };
+    }
+    
+    console.log(`[BLOCKCHAIN] Found ${transactions.length} potential pending transaction(s) for wallet ${walletAddress}`);
+    
+    let processedCount = 0;
+    const errors = [];
+    
+    // Process each transaction
+    for (const transaction of transactions) {
+      if (!transaction.txHash) continue;
+      
+      // Check if already processed (by tx_hash)
+      const { data: existingTx } = await supabase
+        .from('virtual_account_nft_transactions')
+        .select('id')
+        .eq('tx_hash', transaction.txHash)
+        .limit(1)
+        .single();
+      
+      // Also check ESDT transactions
+      const { data: existingEsdtTx } = await supabase
+        .from('virtual_account_transactions')
+        .select('id')
+        .eq('tx_hash', transaction.txHash)
+        .limit(1)
+        .single();
+      
+      if (existingTx || existingEsdtTx) {
+        console.log(`[BLOCKCHAIN] ⏭️ Transaction ${transaction.txHash} already processed, skipping`);
+        continue;
+      }
+      
+      // Process the transaction
+      console.log(`[BLOCKCHAIN] 🔄 Processing pending transaction ${transaction.txHash}`);
+      const result = await processTransaction(transaction, guildId, communityFundProjectName);
+      
+      if (result.processed) {
+        processedCount++;
+        console.log(`[BLOCKCHAIN] ✅ Processed pending transaction ${transaction.txHash}`);
+      } else {
+        const errorMsg = result.error || result.reason || 'Unknown error';
+        errors.push({ txHash: transaction.txHash, error: errorMsg });
+        console.log(`[BLOCKCHAIN] ❌ Failed to process pending transaction ${transaction.txHash}: ${errorMsg}`);
+      }
+      
+      // Small delay between processing
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    console.log(`[BLOCKCHAIN] ✅ Processed ${processedCount} pending transaction(s) for wallet ${walletAddress}`);
+    if (errors.length > 0) {
+      console.log(`[BLOCKCHAIN] ⚠️ ${errors.length} transaction(s) failed:`, errors);
+    }
+    
+    return { processed: processedCount, errors };
+  } catch (error) {
+    console.error(`[BLOCKCHAIN] Error processing pending transactions for wallet ${walletAddress}:`, error.message);
+    return { processed: 0, errors: [{ error: error.message }] };
+  }
+}
+
 // Export functions
 module.exports = {
   startBlockchainListener,
@@ -858,7 +1188,8 @@ module.exports = {
   pollBlockchain,
   initializeWalletTimestamp,
   removeWalletTimestamp,
-  cleanupOrphanedTimestamps
+  cleanupOrphanedTimestamps,
+  processPendingTransactionsForWallet
 };
 
 // Start listener if this file is run directly
