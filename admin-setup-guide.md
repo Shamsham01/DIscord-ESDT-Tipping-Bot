@@ -6,6 +6,18 @@ description: Complete guide for admins to set up and configure the ESDT Tipping 
 
 This comprehensive guide will walk you through setting up the ESDT Tipping Bot for your Discord server.
 
+***
+
+### Prepare Supported Tokens List
+
+* Make a list of all ESDT tokens you want the bot to support, separated by commas.
+* Example: `WEGLD-bd4d79,USDC-c76f1f,REWARD-cf6eac,UTK-2f80e9`
+* You will need this list when registering a project wallet.
+
+***
+
+###
+
 ## Channel Permissions
 
 Before you start, ensure the bot has the following permissions in the channels where it will operate.
@@ -15,10 +27,8 @@ Before you start, ensure the bot has the following permissions in the channels w
 1. **View Channel** - Bot needs to see the channel
 2. **Send Messages** - Bot needs to send messages and embeds
 3. **Embed Links** - Bot needs to create rich embeds for games and activities
-4. **Create Public Threads** - Required for football betting matches (bot creates threads for each match)
+4. **Create Public Threads** - Required for games and activities (bot creates threads)
 5. **Send Messages in Threads** - Bot needs to post in threads
-6. **Read Message History** - Bot needs to read previous messages
-7. **Use External Emojis** - For better visual presentation
 
 ### How to Set Permissions
 
@@ -255,6 +265,10 @@ You can update multiple fields at once:
    * Community Fund can only have `qr-code-url`
 3. **Both are optional** but recommended for better user experience
 
+{% hint style="success" %}
+Tip: Best way to create wallet QR code is to copy Community Fund wallet address, paste it in chatGPT and ask it to generate QR code for give wallet address.
+{% endhint %}
+
 ***
 
 ## Understanding House Balance
@@ -435,8 +449,9 @@ This creates a lottery with:
 
 Now that you've set up your projects and Community Fund, you can:
 
-1. **Run Activities**: Set up lotteries, football betting, auctions, and RPS games
-2. **Manage Users**: Help users register wallets and top up their accounts
-3. **Monitor Activity**: Use admin commands to track balances and activity
+1. **Ask your Community:** to register their wallets with `/set-wallet` command.
+2. **Run Activities**: Set up lotteries, football betting, auctions, and RPS games
+3. **Manage Users**: Help users register wallets and top up their accounts
+4. **Monitor Activity**: Use admin commands to track balances and activity
 
 See the [Running Activities](running-activities.md) guide for details on setting up games and activities.

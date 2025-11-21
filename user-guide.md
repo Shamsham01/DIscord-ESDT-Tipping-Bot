@@ -92,7 +92,6 @@ The bot automatically:
 
 * ✅ **Stores all incoming transfers** from non-registered wallets
 * ✅ **Automatically credits your account** when you register your wallet
-* ✅ **Processes transactions from the last 30 days** when you register
 
 **How it works**:
 

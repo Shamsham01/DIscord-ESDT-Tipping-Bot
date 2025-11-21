@@ -1,5 +1,7 @@
 ---
-description: Guide for running lotteries, football betting, NFT/SFT auctions, and Rock Paper Scissors games
+description: >-
+  Guide for running lotteries, football betting, NFT/SFT auctions, and Rock
+  Paper Scissors games
 ---
 
 # Running Activities
@@ -18,17 +20,18 @@ Lotteries allow users to buy tickets with a chance to win prizes.
 
 #### Parameters Explained
 
-- **`winning-numbers`**: How many numbers users need to match to win (e.g., `3`)
-- **`total-numbers`**: Total pool of numbers to choose from (e.g., `50`)
-- **`token`**: Token ticker for tickets (e.g., `REWARD-cf6eac`)
-- **`ticket-price`**: Price per ticket in tokens (e.g., `10`)
-- **`drawing-frequency`**: When to draw winners:
-  - `daily` - Every 24 hours
-  - `weekly` - Once per week
-  - `manual` - Admin triggers draw manually
-- **`house-commission`** (Optional): Percentage the house takes (e.g., `5` for 5%)
-- **`channel`** (Optional): Channel to post lottery (default: current channel)
-- **`initial-prize-pool`** (Optional): Starting prize pool from Lottery House
+* **`winning-numbers`**: How many numbers users need to match to win (e.g., `3`)
+* **`total-numbers`**: Total pool of numbers to choose from (e.g., `50`)
+* **`token`**: Token ticker for tickets (e.g., `REWARD-cf6eac`)
+* **`ticket-price`**: Price per ticket in tokens (e.g., `10`)
+* **`drawing-frequency`**: When to draw winners:
+  * `hourly` - every 1 hour
+  * `daily` - Every 24 hours
+  * `weekly` - Once per week
+  * `monthly` - Once per month
+* **`house-commission`** (Optional): Percentage the house takes (e.g., `5` for 5%)
+* **`channel`** (Optional): Channel to post lottery (default: current channel)
+* **`initial-prize-pool`** (Optional): Starting prize pool from Lottery House
 
 #### Example
 
@@ -37,12 +40,13 @@ Lotteries allow users to buy tickets with a chance to win prizes.
 ```
 
 This creates:
-- Match 3 out of 50 numbers
-- 10 REWARD tokens per ticket
-- Daily drawings
-- 5% house commission
-- Posted in #lottery channel
-- 1000 tokens initial prize pool (from Lottery House)
+
+* Match 3 out of 50 numbers
+* 10 REWARD tokens per ticket
+* Daily drawings
+* 5% house commission
+* Posted in #lottery channel
+* 1000 tokens initial prize pool (from Lottery House)
 
 ### How Lotteries Work
 
@@ -55,20 +59,23 @@ This creates:
 
 ### Managing Lotteries
 
-- **View Active Lotteries**: Check the lottery embed in the channel
-- **Manual Draw**: Use button on lottery embed to trigger draw early
-- **View Results**: Click "View Results" button on lottery embed
+* **View Active Tickets**: Click button to see the list of current live tickets (in-play)
+* **View Results**: Click button to see results (works only when lottery ends)
+* `/my-lottery-stats`  - Shows lottery statistics
+* `/my-expired-tickes`  - Shows all expired tickets ever bought
+* `/my-active-tickets`  - same as using button **View Active Tickets**
 
-### Using House Balance for Lotteries
+### Using House Balance for Lotteries (Admins Only)
 
 When creating a lottery, you can fund the initial prize pool from Lottery House by specifying `initial-prize-pool`. The bot will:
+
 1. Check Lottery House balance for that token
 2. Deduct the amount from Lottery House
 3. Add it to the lottery's prize pool
 
 This allows you to seed lotteries with funds from previous lottery commissions.
 
----
+***
 
 ## Football Betting
 
@@ -82,10 +89,10 @@ Football betting allows users to bet on real football matches.
 
 #### Parameters Explained
 
-- **`competition`**: Competition code (e.g., `PL` for Premier League, `CL` for Champions League)
-- **`token`**: Token ticker for bets (e.g., `REWARD-cf6eac`)
-- **`amount`**: Bet amount per match (e.g., `100`)
-- **`channel`** (Optional): Channel to post matches (default: current channel)
+* **`competition`**: Competition code (e.g., `PL` for Premier League, `CL` for Champions League)
+* **`token`**: Token ticker for bets (e.g., `REWARD-cf6eac`)
+* **`amount`**: Bet amount per match (e.g., `100`)
+* **`channel`** (Optional): Channel to post matches (default: current channel)
 
 #### Example
 
@@ -94,8 +101,9 @@ Football betting allows users to bet on real football matches.
 ```
 
 This creates betting opportunities for all Premier League matches with:
-- 100 REWARD tokens per bet
-- Posted in #betting channel
+
+* 100 REWARD tokens per bet
+* Posted in #betting channel
 
 ### How Football Betting Works
 
@@ -109,24 +117,26 @@ This creates betting opportunities for all Premier League matches with:
 ### Betting Options
 
 Users can bet on:
-- **Home Win** (1) - Home team wins
-- **Draw** (X) - Match ends in a draw
-- **Away Win** (2) - Away team wins
+
+* **Home Win** (1) - Home team wins
+* **Draw** (X) - Match ends in a draw
+* **Away Win** (2) - Away team wins
 
 ### Viewing Statistics
 
-- **Leaderboard**: `/leaderboard` - Top bettors
-- **Filtered Leaderboard**: `/leaderboard-filtered` - By date range or competition
-- **Your Stats**: `/my-football-stats` - Your betting statistics and PNL
+* **Leaderboard**: `/leaderboard` - Top bettors
+* **Filtered Leaderboard**: `/leaderboard-filtered` - By date range or competition
+* **Your Stats**: `/my-football-stats` - Your betting statistics and PNL
 
 ### House Balance Integration
 
 When a match has **no winners**, all bets go to the Betting House. This balance can be:
-- Used to fund prizes for special matches
-- Tipped to users via `/house-tip`
-- Viewed with `/house-balance`
 
----
+* Used to fund prizes for special matches
+* Tipped to users via `/house-tip`
+* Viewed with `/house-balance`
+
+***
 
 ## NFT Auctions
 
@@ -142,15 +152,15 @@ NFT auctions allow users to sell NFTs and SFTs (Semi-Fungible Tokens) to the hig
 
 #### Parameters Explained
 
-- **`collection`**: NFT/SFT collection identifier (e.g., `COLLECTION-abc123`)
-- **`nft-name`**: Specific NFT/SFT name (e.g., `NFT-NAME-1`)
-- **`starting-amount`**: Starting bid amount (e.g., `100`)
-- **`duration`**: Auction duration in hours (e.g., `24`)
-- **`token`** (Optional): Token for bidding (default: Community Fund token)
-- **`min-bid-increase`** (Optional): Minimum bid increase (e.g., `10`)
-- **`title`** (Optional): Auction title
-- **`description`** (Optional): Auction description
-- **`amount`** (Optional): Quantity for SFTs (default: 1 for NFTs)
+* **`collection`**: NFT/SFT collection identifier (e.g., `COLLECTION-abc123`)
+* **`nft-name`**: Specific NFT/SFT name (e.g., `NFT-NAME-1`)
+* **`starting-amount`**: Starting bid amount (e.g., `100`)
+* **`duration`**: Auction duration in hours (e.g., `24`)
+* **`token`** (Optional): Token for bidding (default: Community Fund token)
+* **`min-bid-increase`** (Optional): Minimum bid increase (e.g., `10`)
+* **`title`** (Optional): Auction title
+* **`description`** (Optional): Auction description
+* **`amount`** (Optional): Quantity for SFTs (default: 1 for NFTs)
 
 #### Example
 
@@ -159,6 +169,7 @@ NFT auctions allow users to sell NFTs and SFTs (Semi-Fungible Tokens) to the hig
 ```
 
 For SFTs with quantity:
+
 ```
 /create-auction COLLECTION-abc123 SFT-NAME-1 100 24 REWARD-cf6eac 10 "Rare SFT" "Limited edition" amount:5
 ```
@@ -170,21 +181,23 @@ For SFTs with quantity:
 3. **Bid Validation**: Each bid must exceed previous bid + minimum increase
 4. **Auction Ends**: Automatically closes at end time
 5. **Winner Pays**: Highest bidder's balance is deducted
-6. **Seller Receives**: Payment goes to Auction House (or seller's account)
+6. **Seller Receives**: Payment goes to Auction House (for Project Auctions) or seller (Virtual Account Auctions)
 7. **NFT/SFT Transferred**: NFT or SFT sent to winner's wallet (with specified amount for SFTs)
 
 ### Bidding
 
-Users click "Place Bid" button on auction embed and enter bid amount in modal.
+* Users click "Place Bid" button on auction embed and enter bid amount in modal.
+* Users click "Quick Bid" button on auction embed to increase by `minimum-bid-increase` amount
 
 ### House Balance Integration
 
 When an NFT or SFT is sold at auction, the sale amount goes to Auction House. This balance can be:
-- Used to pay NFT/SFT sellers
-- Tipped to users via `/house-tip`
-- Viewed with `/house-balance`
 
----
+* Used to pay NFT/SFT sellers
+* Tipped to users via `/house-tip`
+* Viewed with `/house-balance`
+
+***
 
 ## Rock Paper Scissors
 
@@ -194,32 +207,31 @@ Rock Paper Scissors allows users to challenge each other with token prizes. The 
 
 #### 1. Challenge Creation
 
-- **Challenger**: Initiates the game by choosing a token and amount to wager
-- The challenger uses `/challenge-rps` command with:
+* **Challenger**: Initiates the game by choosing a token and amount to wager
+* The challenger uses `/challenge-rps` command with:
   * The Discord tag of the user they want to challenge
   * The token ticker (e.g., `REWARD-cf6eac`)
   * The bet amount
   * Optional memo
-- The bet amount is automatically deducted from the challenger's Virtual Account balance
-- **No transaction hash needed!** The bot uses Virtual Account balance
+* The bet amount is automatically deducted from the challenger's Virtual Account balance
 
 #### 2. Challenge Notification
 
-- The challenged user is notified in the channel and via DM (if their DMs are open)
-- The notification includes the token, amount, and instructions to join
+* The challenged user is notified in the channel and via DM (if their DMs are open)
+* The notification includes the token, amount, and instructions to join
 
 #### 3. Accepting the Challenge
 
-- The challenged user reviews the token and amount
-- If they accept, they use `/join-rps` command (or click the "Join Challenge" button)
-- The bot automatically deducts the matching bet amount from their Virtual Account balance
-- The bot verifies that both deposits match in token and amount
+* The challenged user reviews the token and amount
+* If they accept, they use `/join-rps` command (or click the "Join Challenge" button)
+* The bot automatically deducts the matching bet amount from their Virtual Account balance
+* The bot verifies that both deposits match in token and amount
 
 #### 4. Game Play
 
-- Once both players have joined and deposited, the game becomes active
-- Players take turns making their moves (rock, paper, or scissors) using the `/play-rps` command
-- The winner is determined by standard RPS rules:
+* Once both players have joined and deposited, the game becomes active
+* Players take turns making their moves (rock, paper, or scissors) using the `/play-rps` command
+* The winner is determined by standard RPS rules:
   * Rock beats Scissors
   * Scissors beats Paper
   * Paper beats Rock
@@ -227,16 +239,16 @@ Rock Paper Scissors allows users to challenge each other with token prizes. The 
 
 #### 5. Prize Distribution
 
-- The winner receives the **total prize** (both players' deposits) directly to their Virtual Account
-- The bot announces the winner in the channel and sends a DM (if possible)
+* The winner receives the **total prize** (both players' deposits) directly to their Virtual Account
+* The bot announces the winner in the channel and sends a DM (if possible)
 
 ### Game Rules & Dynamics
 
-- **Both players must deposit the same amount and token.** The bot enforces this automatically
-- **No self-challenges:** You cannot challenge yourself
-- **Virtual Account Integration:** All bets use Virtual Account balance - no blockchain transactions needed for gameplay
-- **Timeout & Refunds:** If the challenged user does not join within 30 minutes, the challenge expires and the challenger is automatically refunded to their Virtual Account
-- **Transparency:** All moves, results, and prize transfers are announced in the channel for fairness
+* **Both players must deposit the same amount and token.** The bot enforces this automatically
+* **No self-challenges:** You cannot challenge yourself
+* **Virtual Account Integration:** All bets use Virtual Account balance - no blockchain transactions needed for gameplay
+* **Timeout & Refunds:** If the challenged user does not join within 30 minutes, the challenge expires and the challenger is automatically refunded to their Virtual Account
+* **Transparency:** All moves, results, and prize transfers are announced in the channel for fairness
 
 ### Creating a Challenge
 
@@ -253,8 +265,9 @@ Rock Paper Scissors allows users to challenge each other with token prizes. The 
 ### Joining a Challenge
 
 The challenged user can join by:
-- Clicking the "Join Challenge" button on the challenge embed (opens a modal)
-- Or using `/join-rps` command with the challenge ID
+
+* Clicking the "Join Challenge" button on the challenge embed (opens a modal)
+* Or using `/join-rps` command with the challenge ID
 
 **No transaction hash needed!** The bot uses Virtual Account balance automatically.
 
@@ -269,26 +282,28 @@ Shows all active and waiting challenges.
 ### Virtual Account Integration
 
 RPS challenges use Virtual Account balance, so users don't need to:
-- Provide transaction hashes
-- Wait for blockchain confirmations
-- Pay gas fees for each game
-- Make on-chain transfers
+
+* Provide transaction hashes
+* Wait for blockchain confirmations
+* Pay gas fees for each game
+* Make on-chain transfers
 
 The bot automatically:
-- Deducts from Virtual Accounts when challenges are created and joined
-- Credits the winner's Virtual Account with the prize
-- Refunds expired challenges automatically
 
----
+* Deducts from Virtual Accounts when challenges are created and joined
+* Credits the winner's Virtual Account with the prize
+* Refunds expired challenges automatically
+
+***
 
 ## Cleanup Feature
 
 The bot automatically cleans up old messages to keep channels tidy:
 
-- **Finished Listings**: NFT listings that are sold, canceled, or expired are automatically deleted
-- **Ended Auctions**: Completed auctions are automatically removed
-- **Expired Challenges**: RPS challenges that expired are cleaned up
-- **Finished Matches**: Football betting matches that ended are cleaned up
+* **Finished Listings**: NFT listings that are sold, canceled, or expired are automatically deleted
+* **Ended Auctions**: Completed auctions are automatically removed
+* **Expired Challenges**: RPS challenges that expired are cleaned up
+* **Finished Matches**: Football betting matches that ended are cleaned up
 
 This helps maintain clean, organized channels and makes it easier for users to find active listings and activities.
 
@@ -306,16 +321,19 @@ This helps maintain clean, organized channels and makes it easier for users to f
 4. **Clean Browsing**: With the cleanup feature, finished listings are automatically removed, keeping each collection post clean and organized
 
 **Benefits:**
-- ✅ Clean, organized browsing of all listings
-- ✅ Easy to find NFTs by collection
-- ✅ Automatic cleanup keeps posts tidy
-- ✅ Better user experience
+
+* ✅ Clean, organized browsing of all listings
+* ✅ Easy to find NFTs by collection
+* ✅ Automatic cleanup keeps posts tidy
+* ✅ Better user experience
 
 **Limitations:**
-- ❌ No threads are created (users can't comment directly on listings)
-- ❌ Offers are made via DM (not in comments)
+
+* ❌ No threads are created (users can't comment directly on listings)
+* ❌ Offers are made via DM (not in comments)
 
 **Example Structure:**
+
 ```
 #nft-marketplace (Forum Channel)
   ├── OlivePantheon Collection (Post)
@@ -330,63 +348,62 @@ This helps maintain clean, organized channels and makes it easier for users to f
 
 ### For Lotteries
 
-- Start with a reasonable ticket price
-- Set appropriate house commission (5-10% is common)
-- Use House Balance to seed initial prize pools
-- Monitor ticket sales and adjust frequency if needed
+* Start with a reasonable ticket price
+* Set appropriate house commission (5-10% is common)
+* Use House Balance to seed initial prize pools
+* Monitor ticket sales and adjust frequency if needed
 
 ### For Football Betting
 
-- Choose popular competitions for better engagement
-- Set reasonable bet amounts
-- Monitor House Balance from no-winner matches
-- Use filtered leaderboards to track performance
+* Choose popular competitions for better engagement
+* Set reasonable bet amounts
+* Monitor House Balance from no-winner matches
+* Use filtered leaderboards to track performance
 
 ### For Auctions
 
-- Set realistic starting bids
-- Use appropriate minimum bid increases
-- Provide clear descriptions and titles
-- Monitor Auction House balance
-- **Use Forum Channels**: Create a forum channel and make posts for each NFT/SFT collection (see best practices below)
-- **SFT Support**: When auctioning SFTs, specify the `amount` parameter to set the quantity being auctioned
+* Set realistic starting bids
+* Use appropriate minimum bid increases
+* Provide clear descriptions and titles
+* Monitor Auction House balance
+* **Use Forum Channels**: Create a forum channel and make posts for each NFT/SFT collection (see best practices below)
+* **SFT Support**: When auctioning SFTs, specify the `amount` parameter to set the quantity being auctioned
 
 ### For RPS
 
-- Encourage fair play
-- Set reasonable bet amounts
-- Monitor challenge activity
-- Use Virtual Accounts for seamless gameplay
+* Encourage fair play
+* Set reasonable bet amounts
+* Monitor challenge activity
+* Use Virtual Accounts for seamless gameplay
 
----
+***
 
 ## Troubleshooting
 
 ### Lottery Not Drawing
 
-- Check if drawing frequency is set correctly
-- Verify lottery is still active
-- Use manual draw button if needed
+* Check if drawing frequency is set correctly
+* Verify lottery is still active
+* Use manual draw button if needed
 
 ### Football Matches Not Appearing
 
-- Check Football-Data.org API connectivity: `/test-football-api`
-- Verify channel permissions (Create Public Threads)
-- Check competition code is valid
+* Check Football-Data.org API connectivity: `/test-football-api`
+* Verify channel permissions (Create Public Threads)
+* Check competition code is valid
 
 ### Auction Not Closing
 
-- Verify auction end time
-- Check if auction is still active
-- Manually close if needed
+* Verify auction end time
+* Check if auction is still active
+* Manually close if needed
 
 ### RPS Challenge Not Working
 
-- Verify both users have sufficient Virtual Account balance
-- Check Community Fund is set up
-- Ensure users have registered wallets
+* Verify both users have sufficient Virtual Account balance
+* Check Community Fund is set up
+* Ensure users have registered wallets
 
----
+***
 
 For more detailed information on each activity, refer to the specific sections in the documentation.
-

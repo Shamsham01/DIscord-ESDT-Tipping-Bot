@@ -2,7 +2,7 @@
 description: >-
   ESDT Tipping Bot is a Discord bot that enables tipping and transferring any
   ESDT (Electronic Standard Digital Token) issued on the MultiversX blockchain.
-cover: .gitbook/assets/ESDT Tipping Bot Gitbook  Banner.png
+cover: .gitbook/assets/ESDT Bot Gitbook Cover.png
 coverY: 0
 ---
 
@@ -95,13 +95,6 @@ Set it and forget it:
 * **Full Transparency** - See all your transactions, balances, and history
 * **Multiple Activities** - Gaming, betting, trading, tipping—all in one place
 
-### **For Developers:**
-
-* **Clean Architecture** - Well-structured, maintainable codebase
-* **Supabase Integration** - Modern database with encrypted storage
-* **Extensible Design** - Easy to add new features and activities
-* **Comprehensive Logging** - Full visibility into bot operations
-
 ***
 
 ## 🎯 Use Cases
@@ -144,7 +137,7 @@ Set it and forget it:
 
 ### **Wallet Requirements**
 
-Each project wallet needs:
+Each Project and Community wallet needs:
 
 * **EGLD** - For blockchain transaction fees
 * **REWARD tokens** - For MakeX API usage fees ($0.03 per on-chain transfer)

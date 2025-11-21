@@ -13,36 +13,17 @@
      * ✅ Embed Links
      * ✅ Create Public Threads
      * ✅ Send Messages in Threads
-     * ✅ Read Message History
   4. Ensure that users/roles who should interact with the bot can use **slash commands** in that channel.
 
 > ⚠️ **These permissions are required for the bot to function properly!**
 >
-> **Note:** The "Create Public Threads" permission is essential for football betting features, as the bot creates threads for each match.
+> **Note:** The "Create Public Threads" permission is essential for football betting, auctions, listings and lotteries features, as the bot creates threads for most activities.
+
+Welcome! Follow these steps to quickly set up your ESDT Tipping Bot and register new wallets
 
 ***
 
-Welcome! Follow these steps to quickly set up your ESDT Tipping Bot and register new wallets.
-
-***
-
-### 1. Create a New MultiversX Wallet
-
-* Go to: [https://wallet.multiversx.com/create](https://wallet.multiversx.com/create)
-* Follow the instructions to generate a new wallet.
-* **Save your seed phrase and wallet address securely!**
-
-***
-
-### 2. Generate a PEM File
-
-* Go to: [https://subtle-crepe-8124c7.netlify.app/](https://subtle-crepe-8124c7.netlify.app/)
-* Type in all 24 secret words in correct order and click "Generate PEM File" Button.
-* **Download and save the PEM file.**
-
-***
-
-### 3. Prepare Supported Tokens List
+### Prepare Supported Tokens List
 
 * Make a list of all ESDT tokens you want the bot to support, separated by commas.
 * Example: `WEGLD-bd4d79,USDC-c76f1f,REWARD-cf6eac,UTK-2f80e9`
@@ -50,14 +31,6 @@ Welcome! Follow these steps to quickly set up your ESDT Tipping Bot and register
 
 ***
 
-### 4. Use Notepad for Easy Copy & Paste
-
-* Open Notepad (or any text editor).
-* Paste your wallet address, PEM file content, and supported tokens list.
-* This makes it easy to copy/paste info into the bot's registration commands.
-
-***
-
 ### 5. Next Steps
 
-* Ask your Community to register their wallets with `/set-wallet` command.
+* Ask your Community to register their wallets with `/set-wallet` command. This will create Virtual Accounts for the registered users.

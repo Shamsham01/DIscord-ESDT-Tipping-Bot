@@ -87,7 +87,6 @@ description: >-
 * **/debug-server-config** 🔴 Admin — Debug server config.
 * **/debug-user** 🔴 Admin — Debug user info.
 * **/check-community-fund-balance** 🔴 Admin — Check Community Fund balances.
-* **/leaderboard-reset** 🔴 Admin — Reset the leaderboard.
 * **/delete-all-server-data** 🔴 Admin — Delete ALL server data (hard reset).
 
 ***
@@ -99,7 +98,8 @@ description: >-
 ***
 
 **Legend:**
-- 🔴 Admin — Commands marked with this icon require administrator permissions.
+
+* 🔴 Admin — Commands marked with this icon require administrator permissions.
 
 For more details on each command, use `/help` or refer to the [Admin Commands Reference](admin-commands-reference.md) and [User Guide](user-guide.md).
 
