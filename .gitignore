@@ -8,46 +8,6 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-# Runtime data
-server-data.json
-user-wallets-backup-*.json
-current-round-backup-*.json
-
-# Sensitive data files
-virtual-accounts.json
-rps-games.json
-used-tx-hashes.json
-timestamp.json
-
-# Football game data (contains user bets and match data)
-data/bets.json
-data/matches.json
-data/leaderboard.json
-
-# Old/backup files
-old-index.js
-old-register-commands.js
-no-fb-bet-game-index.js
-
-# Logs
-logs
-*.log
-
-# Runtime data
-pids
-*.pid
-*.seed
-*.pid.lock
-
-# Coverage directory used by tools like istanbul
-coverage/
-
-# nyc test coverage
-.nyc_output
-
-# Dependency directories
-node_modules/
 jspm_packages/
 
 # Optional npm cache directory
@@ -62,8 +22,50 @@ jspm_packages/
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variables file
-.env
+# Runtime data (legacy - bot now uses Supabase)
+# Keeping these in case of backup/export scripts
+server-data.json
+user-wallets-backup-*.json
+current-round-backup-*.json
+virtual-accounts.json
+rps-games.json
+used-tx-hashes.json
+timestamp.json
+
+# Football game data (legacy - bot now uses Supabase)
+# Keeping in case data/ directory is created for exports
+data/
+
+# Runtime process files
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Logs
+logs/
+*.log
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# nyc test coverage
+.nyc_output
+
+# Migration scripts (one-time use, already completed)
+# These files don't exist in current version - keeping pattern in case new ones are created
+migrate-*.js
+compare-*.js
+*-migration-*.md
+
+# Test files
+test-*.js
+
+# Alternative/utility scripts (not used by main bot)
+# These files don't exist in current version - keeping pattern in case new ones are created
+register-commands-*.js
+!register-commands.js
+delete-guild-*.js
 
 # IDE files
 .vscode/
@@ -85,17 +87,3 @@ Thumbs.db
 *.backup
 *.backup.*
 *.bak
-
-# Migration scripts (one-time use, already completed)
-migrate-timestamp-to-supabase.js
-compare-and-update-balances.js
-TIMESTAMP_MIGRATION_GUIDE.md
-
-# Test files
-test-*.js
-
-# Alternative/utility scripts (not used by main bot)
-register-commands-batch.js
-register-commands-skip-delete.js
-register-commands-guild.js
-delete-guild-commands.js 

@@ -1,5 +1,5 @@
 ---
-description: Guide for running lotteries, football betting, NFT auctions, and Rock Paper Scissors games
+description: Guide for running lotteries, football betting, NFT/SFT auctions, and Rock Paper Scissors games
 ---
 
 # Running Activities
@@ -130,29 +130,37 @@ When a match has **no winners**, all bets go to the Betting House. This balance 
 
 ## NFT Auctions
 
-NFT auctions allow users to sell NFTs to the highest bidder.
+NFT auctions allow users to sell NFTs and SFTs (Semi-Fungible Tokens) to the highest bidder.
+
+**Note**: The bot supports both NFTs and SFTs. SFTs are similar to NFTs but have a quantity (amount) field. All NFT-related commands work with both NFTs and SFTs.
 
 ### Creating an Auction
 
 ```
-/create-auction collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description]
+/create-auction collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description] [amount]
 ```
 
 #### Parameters Explained
 
-- **`collection`**: NFT collection identifier (e.g., `COLLECTION-abc123`)
-- **`nft-name`**: Specific NFT name (e.g., `NFT-NAME-1`)
+- **`collection`**: NFT/SFT collection identifier (e.g., `COLLECTION-abc123`)
+- **`nft-name`**: Specific NFT/SFT name (e.g., `NFT-NAME-1`)
 - **`starting-amount`**: Starting bid amount (e.g., `100`)
 - **`duration`**: Auction duration in hours (e.g., `24`)
 - **`token`** (Optional): Token for bidding (default: Community Fund token)
 - **`min-bid-increase`** (Optional): Minimum bid increase (e.g., `10`)
 - **`title`** (Optional): Auction title
 - **`description`** (Optional): Auction description
+- **`amount`** (Optional): Quantity for SFTs (default: 1 for NFTs)
 
 #### Example
 
 ```
 /create-auction COLLECTION-abc123 NFT-NAME-1 100 24 REWARD-cf6eac 10 "Rare NFT" "One of a kind collectible"
+```
+
+For SFTs with quantity:
+```
+/create-auction COLLECTION-abc123 SFT-NAME-1 100 24 REWARD-cf6eac 10 "Rare SFT" "Limited edition" amount:5
 ```
 
 ### How Auctions Work
@@ -163,7 +171,7 @@ NFT auctions allow users to sell NFTs to the highest bidder.
 4. **Auction Ends**: Automatically closes at end time
 5. **Winner Pays**: Highest bidder's balance is deducted
 6. **Seller Receives**: Payment goes to Auction House (or seller's account)
-7. **NFT Transferred**: NFT sent to winner's wallet
+7. **NFT/SFT Transferred**: NFT or SFT sent to winner's wallet (with specified amount for SFTs)
 
 ### Bidding
 
@@ -171,8 +179,8 @@ Users click "Place Bid" button on auction embed and enter bid amount in modal.
 
 ### House Balance Integration
 
-When an NFT is sold at auction, the sale amount goes to Auction House. This balance can be:
-- Used to pay NFT sellers
+When an NFT or SFT is sold at auction, the sale amount goes to Auction House. This balance can be:
+- Used to pay NFT/SFT sellers
 - Tipped to users via `/house-tip`
 - Viewed with `/house-balance`
 
@@ -288,13 +296,13 @@ This helps maintain clean, organized channels and makes it easier for users to f
 
 ## Best Practices
 
-### For NFT Listings (Forum Channels)
+### For NFT/SFT Listings (Forum Channels)
 
-**Recommended Setup**: Use Discord Forum Channels for NFT listings
+**Recommended Setup**: Use Discord Forum Channels for NFT and SFT listings
 
 1. **Create a Forum Channel**: Set up a forum channel (not a regular text channel)
-2. **Create Posts per Collection**: Make a separate post for each NFT collection
-3. **List NFTs in Posts**: Users can list NFTs using `/sell-nft` in the collection post
+2. **Create Posts per Collection**: Make a separate post for each NFT/SFT collection
+3. **List NFTs/SFTs in Posts**: Users can list NFTs and SFTs using `/sell-nft` in the collection post
 4. **Clean Browsing**: With the cleanup feature, finished listings are automatically removed, keeping each collection post clean and organized
 
 **Benefits:**
@@ -340,7 +348,8 @@ This helps maintain clean, organized channels and makes it easier for users to f
 - Use appropriate minimum bid increases
 - Provide clear descriptions and titles
 - Monitor Auction House balance
-- **Use Forum Channels**: Create a forum channel and make posts for each NFT collection (see best practices below)
+- **Use Forum Channels**: Create a forum channel and make posts for each NFT/SFT collection (see best practices below)
+- **SFT Support**: When auctioning SFTs, specify the `amount` parameter to set the quantity being auctioned
 
 ### For RPS
 

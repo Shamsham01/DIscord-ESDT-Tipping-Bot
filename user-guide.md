@@ -44,6 +44,12 @@ After registration, you'll receive:
 * QR code (if available)
 * Supported tokens list
 
+**Important**: If you sent tokens to the Community Fund **before** registering your wallet, the bot will automatically:
+
+* ✅ Process all past transactions from your wallet address (last 30 days)
+* ✅ Credit them to your Virtual Account
+* ✅ Show you a confirmation of how many transactions were processed
+
 Your Virtual Account is now created and ready to use!
 
 ***
@@ -79,6 +85,26 @@ The bot automatically:
 * ✅ Updates your balance
 
 **No transaction hash needed!** The bot detects transfers automatically via blockchain listener.
+
+### Safety Feature: Pre-Registration Transfers
+
+**Important**: If you send tokens to the Community Fund wallet **before** registering your wallet, don't worry! The bot has a safety feature that:
+
+* ✅ **Stores all incoming transfers** from non-registered wallets
+* ✅ **Automatically credits your account** when you register your wallet
+* ✅ **Processes transactions from the last 30 days** when you register
+
+**How it works**:
+
+1. You send tokens to Community Fund (before wallet registration)
+2. The bot detects the transfer but can't credit it yet (wallet not registered)
+3. The transaction is stored in the database
+4. When you register your wallet with `/set-wallet`, the bot automatically:
+   * Finds all past transactions from your wallet address
+   * Credits them to your Virtual Account
+   * Shows you a confirmation message
+
+This prevents the common user error of sending funds before registering your wallet!
 
 ### Step 4: Verify Balance
 
@@ -209,54 +235,98 @@ This transfers tokens from your Virtual Account to the specified House Balance p
 
 ***
 
-## NFT Virtual Accounts
+## NFT and SFT Virtual Accounts
 
-The bot also supports NFT Virtual Accounts for managing NFTs.
+The bot supports both **NFTs (Non-Fungible Tokens)** and **SFTs (Semi-Fungible Tokens)** through a unified Virtual Account system. SFTs are similar to NFTs but have a quantity (amount) field, allowing you to own multiple copies of the same token.
 
-### Checking NFT Balance
+**Key Points**:
+
+* ✅ **Unified System**: NFTs and SFTs share the same Virtual Account
+* ✅ **Amount Support**: SFTs show quantity in your balance
+* ✅ **Same Commands**: All NFT commands work with both NFTs and SFTs
+* ✅ **Auto-Detection**: The bot automatically detects whether a token is an NFT or SFT
+
+### Checking NFT/SFT Balance
 
 ```
 /check-balance-nft [collection] [public]
 ```
 
-Shows all NFTs in your Virtual Account.
+Shows all NFTs and SFTs in your Virtual Account. SFTs will display their quantity (amount).
 
-### Viewing NFT Details
+### Viewing NFT/SFT Details
 
 ```
 /show-my-nft collection nft-name [public]
 ```
 
-Shows detailed information about an NFT:
+Shows detailed information about an NFT or SFT:
 
-* NFT image
+* NFT/SFT image
 * Attributes
 * Metadata
 * Collection information
+* Quantity (for SFTs)
 
-### Tipping NFTs
-
-```
-/tip-virtual-nft user collection nft-name [public]
-```
-
-Send an NFT from your Virtual Account to another user's Virtual Account.
-
-### Selling NFTs
+### Tipping NFTs/SFTs
 
 ```
-/sell-nft collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description]
+/tip-virtual-nft user collection nft-name [amount] [public]
 ```
 
-List an NFT for sale on the marketplace.
+Send an NFT or SFT from your Virtual Account to another user's Virtual Account.
 
-### Withdrawing NFTs
+**Parameters**:
+
+* **`amount`** (Optional): Quantity for SFTs (default: 1 for NFTs)
+
+**Example**:
 
 ```
-/withdraw-nft collection nft-name [public]
+/tip-virtual-nft @friend COLLECTION-abc123 NFT-NAME-1
 ```
 
-Withdraw an NFT from your Virtual Account to your registered wallet.
+For SFTs with quantity:
+
+```
+/tip-virtual-nft @friend COLLECTION-abc123 SFT-NAME-1 amount:5
+```
+
+### Selling NFTs/SFTs
+
+```
+/sell-nft collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description] [amount]
+```
+
+List an NFT or SFT for sale on the marketplace.
+
+**Parameters**:
+
+* **`amount`** (Optional): Quantity for SFTs (default: 1 for NFTs)
+
+### Withdrawing NFTs/SFTs
+
+```
+/withdraw-nft collection nft-name [amount] [public]
+```
+
+Withdraw an NFT or SFT from your Virtual Account to your registered wallet.
+
+**Parameters**:
+
+* **`amount`** (Optional): Quantity for SFTs (default: 1 for NFTs, required for SFTs)
+
+**Example**:
+
+```
+/withdraw-nft COLLECTION-abc123 NFT-NAME-1
+```
+
+For SFTs with quantity:
+
+```
+/withdraw-nft COLLECTION-abc123 SFT-NAME-1 amount:10
+```
 
 ***
 

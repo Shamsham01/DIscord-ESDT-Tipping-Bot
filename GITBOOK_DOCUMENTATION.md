@@ -508,29 +508,37 @@ Users can bet on:
 
 ## NFT Auctions
 
-NFT auctions allow users to sell NFTs to the highest bidder.
+NFT auctions allow users to sell NFTs and SFTs (Semi-Fungible Tokens) to the highest bidder.
+
+**Note**: The bot supports both NFTs and SFTs. SFTs are similar to NFTs but have a quantity (amount) field. All NFT-related commands work with both NFTs and SFTs.
 
 ### Creating an Auction
 
 ```
-/create-auction collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description]
+/create-auction collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description] [amount]
 ```
 
 #### Parameters Explained
 
-- **`collection`**: NFT collection identifier (e.g., `COLLECTION-abc123`)
-- **`nft-name`**: Specific NFT name (e.g., `NFT-NAME-1`)
+- **`collection`**: NFT/SFT collection identifier (e.g., `COLLECTION-abc123`)
+- **`nft-name`**: Specific NFT/SFT name (e.g., `NFT-NAME-1`)
 - **`starting-amount`**: Starting bid amount (e.g., `100`)
 - **`duration`**: Auction duration in hours (e.g., `24`)
 - **`token`** (Optional): Token for bidding (default: Community Fund token)
 - **`min-bid-increase`** (Optional): Minimum bid increase (e.g., `10`)
 - **`title`** (Optional): Auction title
 - **`description`** (Optional): Auction description
+- **`amount`** (Optional): Quantity for SFTs (default: 1 for NFTs)
 
 #### Example
 
 ```
 /create-auction COLLECTION-abc123 NFT-NAME-1 100 24 REWARD-cf6eac 10 "Rare NFT" "One of a kind collectible"
+```
+
+For SFTs with quantity:
+```
+/create-auction COLLECTION-abc123 SFT-NAME-1 100 24 REWARD-cf6eac 10 "Rare SFT" "Limited edition" amount:5
 ```
 
 ### How Auctions Work
@@ -541,7 +549,7 @@ NFT auctions allow users to sell NFTs to the highest bidder.
 4. **Auction Ends**: Automatically closes at end time
 5. **Winner Pays**: Highest bidder's balance is deducted
 6. **Seller Receives**: Payment goes to Auction House (or seller's account)
-7. **NFT Transferred**: NFT sent to winner's wallet
+7. **NFT/SFT Transferred**: NFT or SFT sent to winner's wallet (with specified amount for SFTs)
 
 ### Bidding
 
@@ -619,6 +627,11 @@ After registration, you'll receive:
 - QR code (if available)
 - Supported tokens list
 
+**Important**: If you sent tokens to the Community Fund **before** registering your wallet, the bot will automatically:
+- ✅ Process all past transactions from your wallet address (last 30 days)
+- ✅ Credit them to your Virtual Account
+- ✅ Show you a confirmation of how many transactions were processed
+
 Your Virtual Account is now created and ready to use!
 
 ---
@@ -652,6 +665,25 @@ The bot automatically:
 - ✅ Updates your balance
 
 **No transaction hash needed!** The bot detects transfers automatically.
+
+### Safety Feature: Pre-Registration Transfers
+
+**Important**: If you send tokens to the Community Fund wallet **before** registering your wallet, don't worry! The bot has a safety feature that:
+
+- ✅ **Stores all incoming transfers** from non-registered wallets
+- ✅ **Automatically credits your account** when you register your wallet
+- ✅ **Processes transactions from the last 30 days** when you register
+
+**How it works**:
+1. You send tokens to Community Fund (before wallet registration)
+2. The bot detects the transfer but can't credit it yet (wallet not registered)
+3. The transaction is stored in the database
+4. When you register your wallet with `/set-wallet`, the bot automatically:
+   - Finds all past transactions from your wallet address
+   - Credits them to your Virtual Account
+   - Shows you a confirmation message
+
+This prevents the common user error of sending funds before registering your wallet!
 
 ### Step 4: Verify Balance
 
@@ -735,6 +767,92 @@ You can fund House Balance for activities:
 
 ---
 
+## NFT and SFT Virtual Accounts
+
+The bot supports both **NFTs (Non-Fungible Tokens)** and **SFTs (Semi-Fungible Tokens)** through a unified Virtual Account system. SFTs are similar to NFTs but have a quantity (amount) field, allowing you to own multiple copies of the same token.
+
+**Key Points**:
+- ✅ **Unified System**: NFTs and SFTs share the same Virtual Account
+- ✅ **Amount Support**: SFTs show quantity in your balance
+- ✅ **Same Commands**: All NFT commands work with both NFTs and SFTs
+- ✅ **Auto-Detection**: The bot automatically detects whether a token is an NFT or SFT
+
+### Checking NFT/SFT Balance
+
+```
+/check-balance-nft [collection] [public]
+```
+
+Shows all NFTs and SFTs in your Virtual Account. SFTs will display their quantity (amount).
+
+### Viewing NFT/SFT Details
+
+```
+/show-my-nft collection nft-name [public]
+```
+
+Shows detailed information about an NFT or SFT:
+- NFT/SFT image
+- Attributes
+- Metadata
+- Collection information
+- Quantity (for SFTs)
+
+### Tipping NFTs/SFTs
+
+```
+/tip-virtual-nft user collection nft-name [amount] [public]
+```
+
+Send an NFT or SFT from your Virtual Account to another user's Virtual Account.
+
+**Parameters**:
+- **`amount`** (Optional): Quantity for SFTs (default: 1 for NFTs)
+
+**Example**:
+```
+/tip-virtual-nft @friend COLLECTION-abc123 NFT-NAME-1
+```
+
+For SFTs with quantity:
+```
+/tip-virtual-nft @friend COLLECTION-abc123 SFT-NAME-1 amount:5
+```
+
+### Selling NFTs/SFTs
+
+```
+/sell-nft collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description] [amount]
+```
+
+List an NFT or SFT for sale on the marketplace.
+
+**Parameters**:
+- **`amount`** (Optional): Quantity for SFTs (default: 1 for NFTs)
+
+### Withdrawing NFTs/SFTs
+
+```
+/withdraw-nft collection nft-name [amount] [public]
+```
+
+Withdraw an NFT or SFT from your Virtual Account to your registered wallet.
+
+**Parameters**:
+- **`amount`** (Optional): Quantity for SFTs (default: 1 for NFTs, required for SFTs)
+
+**Example**:
+```
+/withdraw-nft COLLECTION-abc123 NFT-NAME-1
+```
+
+For SFTs with quantity:
+```
+/withdraw-nft COLLECTION-abc123 SFT-NAME-1 amount:10
+```
+
+---
+
 # Admin Commands Reference
 
 Complete reference of all admin commands for managing the bot.
@@ -797,13 +915,20 @@ Send ESDT tokens to a user.
 ```
 
 ### `/send-nft`
-Send NFT to a user.
+Send NFT or SFT to a user.
 
-**Usage**: `/send-nft project-name collection nft-name user-tag [memo]`
+**Usage**: `/send-nft project-name collection nft-name user-tag [memo] [amount]`
+
+**Note**: Supports both NFTs and SFTs. For SFTs, specify the `amount` parameter.
 
 **Example**:
 ```
 /send-nft MainWallet COLLECTION-abc123 NFT-NAME @user "Airdrop"
+```
+
+For SFTs:
+```
+/send-nft MainWallet COLLECTION-abc123 SFT-NAME @user "Airdrop" amount:5
 ```
 
 ### `/house-tip`
@@ -849,13 +974,20 @@ Create football matches for betting.
 ```
 
 ### `/create-auction`
-Create an NFT auction.
+Create an NFT or SFT auction.
 
-**Usage**: `/create-auction collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description]`
+**Usage**: `/create-auction collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description] [amount]`
+
+**Note**: Supports both NFTs and SFTs. For SFTs, specify the `amount` parameter to set the quantity being auctioned.
 
 **Example**:
 ```
 /create-auction COLLECTION-abc123 NFT-NAME 100 24 REWARD-cf6eac 10
+```
+
+For SFTs:
+```
+/create-auction COLLECTION-abc123 SFT-NAME 100 24 REWARD-cf6eac 10 "Rare SFT" "Limited edition" amount:5
 ```
 
 ## Monitoring & Debugging

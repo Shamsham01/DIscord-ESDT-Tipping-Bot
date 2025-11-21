@@ -56,7 +56,9 @@ If the bot responds with an embed, permissions are correctly set.
 
 ## Creating Your First Project
 
-A **project** represents a wallet that can send tokens and NFTs to users. You can have multiple projects per server.
+A **project** represents a wallet that can send tokens, NFTs, and SFTs to users. You can have multiple projects per server.
+
+**Note**: The bot supports both NFTs (Non-Fungible Tokens) and SFTs (Semi-Fungible Tokens). SFTs have a quantity (amount) field and can be sent using the same commands as NFTs.
 
 ### Step 1: Register the Project
 
@@ -106,7 +108,7 @@ After registering the project, the bot will:
 * **EGLD** - Required for blockchain transaction fees
 * **REWARD tokens** - Required for MakeX API usage fees ($0.03 per transaction)
 
-Without these, the bot cannot send tokens or NFTs from this wallet.
+Without these, the bot cannot send tokens, NFTs, or SFTs from this wallet.
 
 ### Step 4: Verify Project Registration
 
@@ -278,8 +280,8 @@ House Balance tracks three separate pools:
 
 **Auction House**:
 
-* When an NFT is sold at auction, the sale amount goes to Auction House
-* Example: NFT sells for 500 tokens → 500 tokens to Auction House
+* When an NFT or SFT is sold at auction, the sale amount goes to Auction House
+* Example: NFT/SFT sells for 500 tokens → 500 tokens to Auction House
 
 **Lottery House**:
 
@@ -295,7 +297,7 @@ House Balance tracks three separate pools:
 
 **Auction House**:
 
-* Used to pay NFT sellers when auctions complete
+* Used to pay NFT/SFT sellers when auctions complete
 * Can be tipped to users
 
 **Lottery House**:
@@ -405,7 +407,7 @@ This creates a lottery with:
 
 1. **Create a Generic Discord Profile**: Create a separate Discord account for your project (e.g., "Project Bot Account")
 2. **Register Project Wallet**: Use `/set-wallet` with the generic account to register your Project Wallet address
-3. **Deposit to Community Fund**: Transfer tokens/NFTs to the Community Fund wallet address
+3. **Deposit to Community Fund**: Transfer tokens/NFTs/SFTs to the Community Fund wallet address
 4. **Top Up House Balance**: Use `/virtual-house-topup` with the generic account to transfer from Virtual Account to House Balance
 5. **Fund Lotteries**: Once House Balance is funded, you can use it to sponsor initial prize pools when creating lotteries
 

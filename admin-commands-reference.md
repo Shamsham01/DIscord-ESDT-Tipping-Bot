@@ -75,13 +75,20 @@ Send ESDT tokens to a user.
 ```
 
 ### `/send-nft`
-Send NFT to a user.
+Send NFT or SFT to a user.
 
-**Usage**: `/send-nft project-name collection nft-name user-tag [memo]`
+**Usage**: `/send-nft project-name collection nft-name user-tag [memo] [amount]`
+
+**Note**: Supports both NFTs and SFTs. For SFTs, specify the `amount` parameter.
 
 **Example**:
 ```
 /send-nft MainWallet COLLECTION-abc123 NFT-NAME @user "Airdrop"
+```
+
+For SFTs:
+```
+/send-nft MainWallet COLLECTION-abc123 SFT-NAME @user "Airdrop" amount:5
 ```
 
 ### `/house-tip`
@@ -152,16 +159,19 @@ Create football matches for betting.
 ```
 
 ### `/create-auction`
-Create an NFT auction.
+Create an NFT or SFT auction.
 
-**Usage**: `/create-auction collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description]`
+**Usage**: `/create-auction collection nft-name starting-amount duration [token] [min-bid-increase] [title] [description] [amount]`
+
+**Note**: Supports both NFTs and SFTs. For SFTs, specify the `amount` parameter to set the quantity being auctioned.
 
 **Parameters**:
-- `collection`: NFT collection identifier
-- `nft-name`: Specific NFT name
+- `collection`: NFT/SFT collection identifier
+- `nft-name`: Specific NFT/SFT name
 - `starting-amount`: Starting bid amount
 - `duration`: Auction duration in hours
 - `token` (Optional): Token for bidding
+- `amount` (Optional): Quantity for SFTs (default: 1 for NFTs)
 - `min-bid-increase` (Optional): Minimum bid increase
 - `title` (Optional): Auction title
 - `description` (Optional): Auction description

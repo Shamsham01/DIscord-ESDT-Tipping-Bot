@@ -18,14 +18,16 @@ description: >-
 
 ***
 
-### 🖼️ Virtual Accounts (NFT)
+### 🖼️ Virtual Accounts (NFT & SFT)
 
-* **/check-balance-nft** — View your NFT virtual account balance.
-* **/balance-history-nft** — View your NFT transaction history.
-* **/show-my-nft** — View detailed information about an NFT (image, attributes, metadata).
-* **/tip-virtual-nft** — Tip another user an NFT from your virtual account.
-* **/sell-nft** — List an NFT for sale on the marketplace.
-* **/withdraw-nft** — Withdraw an NFT to your registered wallet.
+* **/check-balance-nft** — View your NFT/SFT virtual account balance (SFTs show quantity).
+* **/balance-history-nft** — View your NFT/SFT transaction history.
+* **/show-my-nft** — View detailed information about an NFT or SFT (image, attributes, metadata).
+* **/tip-virtual-nft** — Tip another user an NFT or SFT from your virtual account (supports amount for SFTs).
+* **/sell-nft** — List an NFT or SFT for sale on the marketplace (supports amount for SFTs).
+* **/withdraw-nft** — Withdraw an NFT or SFT to your registered wallet (supports amount for SFTs).
+
+**Note**: The bot supports both NFTs (Non-Fungible Tokens) and SFTs (Semi-Fungible Tokens). SFTs have a quantity (amount) field and share the same Virtual Account system as NFTs.
 
 ***
 
@@ -48,7 +50,7 @@ description: >-
 ### 🎰 Lottery & Auctions
 
 * **/create-lottery** 🔴 Admin — Create a new lottery game.
-* **/create-auction** 🔴 Admin — Create an NFT auction.
+* **/create-auction** 🔴 Admin — Create an NFT or SFT auction (supports amount for SFTs).
 
 ***
 
@@ -67,7 +69,7 @@ description: >-
 ### 💰 Token & NFT Transfers
 
 * **/send-esdt** 🔴 Admin — Send tokens to a user.
-* **/send-nft** 🔴 Admin — Send NFT to a user.
+* **/send-nft** 🔴 Admin — Send NFT or SFT to a user (supports amount for SFTs).
 * **/house-tip** 🔴 Admin — Tip from house balance.
 * **/list-wallets** — List registered wallets (verify your registration).
 
