@@ -173,6 +173,33 @@ async function getScheduledMatches() {
   }
 }
 
+async function getPausedMatches() {
+  try {
+    const { data, error } = await supabase
+      .from('football_matches')
+      .select('*')
+      .eq('status', 'PAUSED')
+      .order('kickoff_iso', { ascending: true });
+    
+    if (error) throw error;
+    
+    // Return only shared match data (no token/stake - those are in match_guilds)
+    return (data || []).map(row => ({
+      matchId: row.match_id,
+      compCode: row.comp_code,
+      compName: row.comp_name,
+      home: row.home_team,
+      away: row.away_team,
+      kickoffISO: row.kickoff_iso,
+      status: row.status,
+      ftScore: row.ft_score
+    }));
+  } catch (error) {
+    console.error('[DB] Error getting paused matches:', error);
+    throw error;
+  }
+}
+
 async function createMatch(matchData) {
   try {
     // Create match with shared data only (no guild-specific config)
@@ -438,6 +465,7 @@ module.exports = {
   getMatch,
   getMatchesByGuild,
   getScheduledMatches,
+  getPausedMatches,
   createMatch,
   updateMatch,
   createBet,

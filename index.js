@@ -17643,9 +17643,11 @@ async function checkAndUpdateMatchResults() {
     let totalMatches = 0;
     let updatedMatches = 0;
     
-    // Get all unfinished matches from database
+    // Get all unfinished matches from database (including PAUSED matches)
     const scheduledMatches = await dbFootball.getScheduledMatches();
-    const unfinishedMatches = scheduledMatches.filter(match => 
+    const pausedMatches = await dbFootball.getPausedMatches();
+    const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches];
+    const unfinishedMatches = allUnfinishedMatches.filter(match => 
       match.status !== 'FINISHED' && match.compCode
     );
     
@@ -18258,9 +18260,11 @@ let allMatches = [];
 
 // Initialize the match list
 async function initializeMatchList() {
-  // Get all unfinished matches from database
+  // Get all unfinished matches from database (including PAUSED matches)
   const scheduledMatches = await dbFootball.getScheduledMatches();
-  const unfinishedMatches = scheduledMatches.filter(match => 
+  const pausedMatches = await dbFootball.getPausedMatches();
+  const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches];
+  const unfinishedMatches = allUnfinishedMatches.filter(match => 
     match.status !== 'FINISHED' && match.status !== 'CANCELED' && match.status !== 'CANCELLED' && match.compCode
   );
   
