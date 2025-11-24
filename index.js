@@ -11293,54 +11293,136 @@ client.on('interactionCreate', async (interaction) => {
       const projects = await getProjects(guildId);
       const selectedProject = interaction.options.getString('project-name');
       
-      if (!selectedProject || !projects[selectedProject]) {
-        console.log('[AUTOCOMPLETE] create-auction nft-name: Missing project');
+      // If a specific project is selected, fetch from that project only
+      if (selectedProject && projects[selectedProject]) {
+        const project = projects[selectedProject];
+        const walletAddress = project.walletAddress;
+        
+        if (!walletAddress) {
+          console.log('[AUTOCOMPLETE] create-auction nft-name: No wallet address');
+          await safeRespond(interaction, []);
+          return;
+        }
+        
+        // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
+        const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
+        console.log('[AUTOCOMPLETE] create-auction nft-name: Fetching from', nftsUrl);
+        console.log('[AUTOCOMPLETE] create-auction nft-name: Filtering for collection:', selectedCollection);
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+        
+        const response = await fetch(nftsUrl, {
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+          console.error(`[AUTOCOMPLETE] create-auction nft-name: API error ${response.status} ${response.statusText}`);
+          await safeRespond(interaction, []);
+          return;
+        }
+        
+        const responseData = await response.json();
+        console.log('[AUTOCOMPLETE] create-auction nft-name: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
+        
+        // Handle paginated response (check for data property) or direct array
+        let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+        
+        if (!Array.isArray(allItems) || allItems.length === 0) {
+          console.log('[AUTOCOMPLETE] create-auction nft-name: No NFTs found or invalid format');
+          await safeRespond(interaction, []);
+          return;
+        }
+        
+        console.log(`[AUTOCOMPLETE] create-auction nft-name: Found ${allItems.length} items from API`);
+        
+        // Filter to only include actual NFTs (NonFungibleESDT) from the selected collection
+        // Also ensure they have media URLs (required for auctions)
+        const actualNFTs = allItems.filter(item => {
+          // Only include NonFungibleESDT type (exclude SemiFungibleESDT)
+          const isNFT = item.type === 'NonFungibleESDT';
+          
+          // Must have media URL (required for auction display)
+          const hasMedia = item.media && item.media.length > 0 && item.media[0].url;
+          
+          // Match collection exactly (case-insensitive)
+          const matchesCollection = item.collection && 
+            (item.collection.toLowerCase() === selectedCollection.toLowerCase() ||
+             item.collection === selectedCollection);
+          
+          return isNFT && hasMedia && matchesCollection;
+        });
+        
+        console.log(`[AUTOCOMPLETE] create-auction nft-name: Filtered to ${actualNFTs.length} NFTs from collection "${selectedCollection}" (excluded ${allItems.length - actualNFTs.length} SFTs/other collections/items without media)`);
+        
+        const choices = actualNFTs.map(nft => ({
+          name: nft.name || nft.identifier || 'Unnamed NFT',
+          value: nft.name || nft.identifier
+        })).filter(choice => choice.value); // Filter out invalid entries
+        
+        const filtered = choices.filter(choice =>
+          choice.name.toLowerCase().includes(focusedValue.toLowerCase())
+        );
+        
+        console.log(`[AUTOCOMPLETE] create-auction nft-name: Returning ${filtered.length} filtered choices`);
+        await safeRespond(interaction, filtered.slice(0, 25));
+        return;
+      }
+      
+      // If no project is selected, aggregate NFTs from all projects that have the selected collection
+      console.log('[AUTOCOMPLETE] create-auction nft-name: No project selected, aggregating from all projects');
+      const communityFundProjectName = getCommunityFundProjectName();
+      
+      // Fetch NFTs from all projects (excluding Community Fund)
+      const projectNames = Object.keys(projects).filter(name => name !== communityFundProjectName);
+      
+      if (projectNames.length === 0) {
+        console.log('[AUTOCOMPLETE] create-auction nft-name: No projects available');
         await safeRespond(interaction, []);
         return;
       }
       
-      const project = projects[selectedProject];
-      const walletAddress = project.walletAddress;
-      
-      if (!walletAddress) {
-        console.log('[AUTOCOMPLETE] create-auction nft-name: No wallet address');
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
-      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
-      console.log('[AUTOCOMPLETE] create-auction nft-name: Fetching from', nftsUrl);
-      console.log('[AUTOCOMPLETE] create-auction nft-name: Filtering for collection:', selectedCollection);
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000);
-      
-      const response = await fetch(nftsUrl, {
-        signal: controller.signal
+      // Fetch from all projects in parallel (with timeout)
+      const fetchPromises = projectNames.map(async (projectName) => {
+        const project = projects[projectName];
+        if (!project || !project.walletAddress) {
+          return [];
+        }
+        
+        try {
+          const nftsUrl = `https://api.multiversx.com/accounts/${project.walletAddress}/nfts`;
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3000); // Shorter timeout for parallel requests
+          
+          const response = await fetch(nftsUrl, {
+            signal: controller.signal
+          });
+          
+          clearTimeout(timeoutId);
+          
+          if (!response.ok) {
+            console.error(`[AUTOCOMPLETE] create-auction nft-name: API error for ${projectName}: ${response.status}`);
+            return [];
+          }
+          
+          const responseData = await response.json();
+          let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+          
+          return allItems || [];
+        } catch (error) {
+          if (error.name !== 'AbortError') {
+            console.error(`[AUTOCOMPLETE] create-auction nft-name: Error fetching from ${projectName}:`, error.message);
+          }
+          return [];
+        }
       });
       
-      clearTimeout(timeoutId);
+      const allResults = await Promise.all(fetchPromises);
+      const allItems = allResults.flat();
       
-      if (!response.ok) {
-        console.error(`[AUTOCOMPLETE] create-auction nft-name: API error ${response.status} ${response.statusText}`);
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const responseData = await response.json();
-      console.log('[AUTOCOMPLETE] create-auction nft-name: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
-      
-      // Handle paginated response (check for data property) or direct array
-      let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
-      
-      if (!Array.isArray(allItems) || allItems.length === 0) {
-        console.log('[AUTOCOMPLETE] create-auction nft-name: No NFTs found or invalid format');
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      console.log(`[AUTOCOMPLETE] create-auction nft-name: Found ${allItems.length} items from API`);
+      console.log(`[AUTOCOMPLETE] create-auction nft-name: Found ${allItems.length} total items from ${projectNames.length} projects`);
       
       // Filter to only include actual NFTs (NonFungibleESDT) from the selected collection
       // Also ensure they have media URLs (required for auctions)
@@ -11359,7 +11441,7 @@ client.on('interactionCreate', async (interaction) => {
         return isNFT && hasMedia && matchesCollection;
       });
       
-      console.log(`[AUTOCOMPLETE] create-auction nft-name: Filtered to ${actualNFTs.length} NFTs from collection "${selectedCollection}" (excluded ${allItems.length - actualNFTs.length} SFTs/other collections/items without media)`);
+      console.log(`[AUTOCOMPLETE] create-auction nft-name: Filtered to ${actualNFTs.length} NFTs from collection "${selectedCollection}" across all projects`);
       
       const choices = actualNFTs.map(nft => ({
         name: nft.name || nft.identifier || 'Unnamed NFT',
@@ -11370,7 +11452,7 @@ client.on('interactionCreate', async (interaction) => {
         choice.name.toLowerCase().includes(focusedValue.toLowerCase())
       );
       
-      console.log(`[AUTOCOMPLETE] create-auction nft-name: Returning ${filtered.length} filtered choices`);
+      console.log(`[AUTOCOMPLETE] create-auction nft-name: Returning ${filtered.length} filtered choices from all projects`);
       await safeRespond(interaction, filtered.slice(0, 25));
     } catch (error) {
       if (error.name !== 'AbortError') {
