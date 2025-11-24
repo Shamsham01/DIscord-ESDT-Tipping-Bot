@@ -11509,29 +11509,54 @@ client.on('interactionCreate', async (interaction) => {
           const selectedProject = interaction.options.getString('project-name');
           console.log('[AUTOCOMPLETE] Selected project:', selectedProject);
           
-          if (!selectedProject || !projects[selectedProject]) {
-            console.log('[AUTOCOMPLETE] No project selected or project not found');
-            console.log('[AUTOCOMPLETE] Selected project value:', selectedProject);
-            console.log('[AUTOCOMPLETE] Available project names:', Object.keys(projects));
-            await safeRespond(interaction, []);
-            return;
-          }
-          
-          const project = projects[selectedProject];
-          console.log('[AUTOCOMPLETE] Project data:', {
-            name: selectedProject,
-            hasSupportedTokens: !!project.supportedTokens,
-            supportedTokensType: typeof project.supportedTokens,
-            supportedTokensValue: project.supportedTokens
-          });
-          
-          // Handle both string (comma-separated) and array formats
-          if (project.supportedTokens) {
-            if (Array.isArray(project.supportedTokens)) {
-              supportedTokens = project.supportedTokens;
-            } else if (typeof project.supportedTokens === 'string') {
-              supportedTokens = project.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+          // If a specific project is selected, use its supported tokens
+          if (selectedProject && projects[selectedProject]) {
+            const project = projects[selectedProject];
+            console.log('[AUTOCOMPLETE] Project data:', {
+              name: selectedProject,
+              hasSupportedTokens: !!project.supportedTokens,
+              supportedTokensType: typeof project.supportedTokens,
+              supportedTokensValue: project.supportedTokens
+            });
+            
+            // Handle both string (comma-separated) and array formats
+            if (project.supportedTokens) {
+              if (Array.isArray(project.supportedTokens)) {
+                supportedTokens = project.supportedTokens;
+              } else if (typeof project.supportedTokens === 'string') {
+                supportedTokens = project.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+              }
             }
+          } else {
+            // If no project is selected, aggregate supported tokens from all projects (excluding Community Fund)
+            console.log('[AUTOCOMPLETE] No project selected, aggregating tokens from all projects');
+            const communityFundProjectName = getCommunityFundProjectName();
+            const allTokensSet = new Set();
+            
+            Object.keys(projects).forEach(projectName => {
+              if (projectName === communityFundProjectName) {
+                return; // Skip Community Fund
+              }
+              
+              const project = projects[projectName];
+              if (project && project.supportedTokens) {
+                let projectTokens = [];
+                if (Array.isArray(project.supportedTokens)) {
+                  projectTokens = project.supportedTokens;
+                } else if (typeof project.supportedTokens === 'string') {
+                  projectTokens = project.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+                }
+                
+                projectTokens.forEach(token => {
+                  if (token) {
+                    allTokensSet.add(token);
+                  }
+                });
+              }
+            });
+            
+            supportedTokens = Array.from(allTokensSet);
+            console.log('[AUTOCOMPLETE] Aggregated tokens from all projects:', supportedTokens);
           }
         }
         
