@@ -248,7 +248,8 @@ async function fetchLatestTransactions(walletAddress, fromTimestamp) {
 }
 
 // Process a blockchain transaction
-async function processTransaction(transaction, guildId, projectName) {
+// userId: Optional - if provided, use it directly for NFT deposits instead of looking up by wallet address
+async function processTransaction(transaction, guildId, projectName, userId = null) {
   try {
     // CRITICAL: Validate txHash exists before processing
     if (!transaction.txHash) {
@@ -493,6 +494,7 @@ async function processTransaction(transaction, guildId, projectName) {
         console.log(`[BLOCKCHAIN] Sender: ${transaction.sender}, Receiver: ${transaction.receiver}`);
         
         // Process NFT/SFT deposit (pass token type from blockchain transaction)
+        // Pass userId if provided (for pending transaction processing)
         const nftDepositResult = await processNFTDeposit(
           guildId,
           transaction.sender,
@@ -503,7 +505,8 @@ async function processTransaction(transaction, guildId, projectName) {
           transaction.txHash,
           projectName,
           amount,
-          transferType
+          transferType,
+          userId
         );
         
         if (nftDepositResult && nftDepositResult.success) {
@@ -546,7 +549,8 @@ async function processTransaction(transaction, guildId, projectName) {
 }
 
 // Process NFT deposit from blockchain
-async function processNFTDeposit(guildId, senderWallet, receiverWallet, collection, identifier, nonce, txHash, projectName, amount = 1, tokenType = 'NFT') {
+// userId: Optional - if provided, use it directly instead of looking up by wallet address
+async function processNFTDeposit(guildId, senderWallet, receiverWallet, collection, identifier, nonce, txHash, projectName, amount = 1, tokenType = 'NFT', userId = null) {
   try {
     if (!virtualAccountsNFT) {
       console.error('[BLOCKCHAIN] NFT virtual accounts module not loaded');
@@ -589,35 +593,40 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
     // Validate token type (must be 'NFT' or 'SFT')
     const validTokenType = (tokenType === 'SFT' || tokenType === 'NFT') ? tokenType : 'NFT';
     
-    // Load server data to find user by wallet address
-    const dbServerData = require('./db/server-data');
-    const userWallets = await dbServerData.getUserWallets(guildId);
-    
-    if (!userWallets || Object.keys(userWallets).length === 0) {
-      console.log(`[BLOCKCHAIN] No user wallets found for guild ${guildId}`);
-      return {
-        success: false,
-        error: 'Guild not found or no user wallets configured'
-      };
-    }
-    
-    // Find user by wallet address
-    let userId = null;
-    for (const [uid, wallet] of Object.entries(userWallets)) {
-      if (wallet.toLowerCase() === senderWallet.toLowerCase()) {
-        userId = uid;
-        break;
-      }
-    }
-    
+    // If userId is provided (e.g., from pending transaction processing), use it directly
+    // Otherwise, look up user by wallet address
     if (!userId) {
-      console.log(`[BLOCKCHAIN] ⚠️ No user found for wallet ${senderWallet} in guild ${guildId}`);
-      console.log(`[BLOCKCHAIN] ℹ️ NFT deposit will be skipped. User must register wallet with /set-wallet before sending NFTs.`);
-      console.log(`[BLOCKCHAIN] ℹ️ Transaction hash: ${txHash || 'N/A'}`);
-      return {
-        success: false,
-        error: 'User not found for wallet address. Please register wallet with /set-wallet before sending NFTs.'
-      };
+      // Load server data to find user by wallet address
+      const dbServerData = require('./db/server-data');
+      const userWallets = await dbServerData.getUserWallets(guildId);
+      
+      if (!userWallets || Object.keys(userWallets).length === 0) {
+        console.log(`[BLOCKCHAIN] No user wallets found for guild ${guildId}`);
+        return {
+          success: false,
+          error: 'Guild not found or no user wallets configured'
+        };
+      }
+      
+      // Find user by wallet address
+      for (const [uid, wallet] of Object.entries(userWallets)) {
+        if (wallet.toLowerCase() === senderWallet.toLowerCase()) {
+          userId = uid;
+          break;
+        }
+      }
+      
+      if (!userId) {
+        console.log(`[BLOCKCHAIN] ⚠️ No user found for wallet ${senderWallet} in guild ${guildId}`);
+        console.log(`[BLOCKCHAIN] ℹ️ NFT deposit will be skipped. User must register wallet with /set-wallet before sending NFTs.`);
+        console.log(`[BLOCKCHAIN] ℹ️ Transaction hash: ${txHash || 'N/A'}`);
+        return {
+          success: false,
+          error: 'User not found for wallet address. Please register wallet with /set-wallet before sending NFTs.'
+        };
+      }
+    } else {
+      console.log(`[BLOCKCHAIN] Using provided userId ${userId} for wallet ${senderWallet} (pending transaction processing)`);
     }
     
     console.log(`[BLOCKCHAIN] Found user ${userId} for wallet ${senderWallet} in guild ${guildId}`);
@@ -1152,8 +1161,9 @@ async function processPendingTransactionsForWallet(guildId, userId, walletAddres
       }
       
       // Process the transaction
-      console.log(`[BLOCKCHAIN] 🔄 Processing pending transaction ${transaction.txHash}`);
-      const result = await processTransaction(transaction, guildId, communityFundProjectName);
+      // Pass userId so NFT deposits can use it directly instead of looking up by wallet address
+      console.log(`[BLOCKCHAIN] 🔄 Processing pending transaction ${transaction.txHash} for user ${userId}`);
+      const result = await processTransaction(transaction, guildId, communityFundProjectName, userId);
       
       if (result.processed) {
         processedCount++;

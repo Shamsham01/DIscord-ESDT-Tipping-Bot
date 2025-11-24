@@ -1672,18 +1672,43 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
         txStatus = parsedResponse.status;
       }
       
+      // Normalize txStatus - handle if it's an object
+      let txStatusString = null;
+      if (txStatus) {
+        if (typeof txStatus === 'string') {
+          txStatusString = txStatus;
+        } else if (typeof txStatus === 'object') {
+          // If status is an object, try to extract a meaningful status
+          txStatusString = txStatus.status || txStatus.value || JSON.stringify(txStatus);
+          console.log(`[WITHDRAW-SFT] Status is an object, extracted: ${txStatusString}`);
+        } else {
+          txStatusString = String(txStatus);
+        }
+      }
+      
       const errorMessage = parsedResponse.error || 
                           (parsedResponse.result && parsedResponse.result.error) ||
                           (parsedResponse.data && parsedResponse.data.error) ||
                           (!response.ok ? `API error (${response.status})` : null);
       
-      // Only treat as success if status is 'success', HTTP is OK, and txHash exists
-      const isApiSuccess = (response.ok || parsedResponse.success === true) && txStatus === 'success' && !!txHash;
+      // Success criteria: 
+      // 1. HTTP response is OK AND
+      // 2. We have a txHash (transaction was submitted) AND
+      // 3. Either status is 'success' OR no explicit error message
+      // If we have a txHash and HTTP is OK, the transaction was submitted successfully
+      // The actual blockchain status can be checked via explorer
+      const hasTxHash = !!txHash;
+      const isHttpOk = response.ok || parsedResponse.success === true;
+      const isStatusSuccess = txStatusString === 'success' || txStatusString === 'Success' || txStatusString === 'SUCCESS';
+      const hasNoError = !errorMessage;
+      
+      // Consider successful if: HTTP OK + has txHash + (status success OR no error)
+      const isApiSuccess = isHttpOk && hasTxHash && (isStatusSuccess || hasNoError);
       
       const result = {
         success: isApiSuccess,
         txHash: txHash,
-        errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
+        errorMessage: errorMessage || (txStatusString && !isStatusSuccess && hasNoError ? `Transaction status: ${txStatusString}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status
       };
@@ -1732,18 +1757,54 @@ async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, to
     // Use token_type for reliable detection: if SFT, use SFT endpoint
     if (detectedTokenType === 'SFT') {
       console.log(`[WITHDRAW-NFT] Detected SFT (token_type: ${detectedTokenType}, amount: ${finalAmount}), routing to SFT transfer endpoint`);
-      // Extract collection ticker from identifier (e.g., "XPACHIEVE-5a0519-0f" -> "XPACHIEVE-5a0519")
-      // The identifier format is typically COLLECTION-NONCE, so we need to extract collection
+      
+      // Extract collection ticker from identifier
+      // The tokenIdentifier might be:
+      // 1. Full identifier with nonce: "OOXTCK-08aa7c-02" -> extract "OOXTCK-08aa7c"
+      // 2. Collection ticker only: "OOXTCK-08aa7c" -> use as is
       let collectionTicker = tokenIdentifier;
+      
+      // Check if identifier contains nonce appended (format: COLLECTION-NONCE)
+      // If tokenIdentifier has 3+ parts separated by '-', the last part is likely the nonce
+      let extractedNonce = null;
       if (tokenIdentifier.includes('-')) {
         const parts = tokenIdentifier.split('-');
-        // Remove the last part (nonce) to get collection ticker
-        // For "XPACHIEVE-5a0519-0f", we want "XPACHIEVE-5a0519"
-        if (parts.length >= 2) {
+        // If we have 3+ parts, the last part is likely the nonce
+        // Example: "OOXTCK-08aa7c-02" -> ["OOXTCK", "08aa7c", "02"]
+        if (parts.length >= 3) {
+          // Extract collection ticker by removing the last part (nonce)
           collectionTicker = parts.slice(0, -1).join('-');
+          extractedNonce = parts[parts.length - 1];
+          console.log(`[WITHDRAW-NFT] Extracted collection ticker "${collectionTicker}" and nonce "${extractedNonce}" from identifier "${tokenIdentifier}"`);
         }
       }
-      return await transferSFTFromCommunityFund(recipientWallet, collectionTicker, tokenNonce, finalAmount, projectName, guildId);
+      
+      // Use provided nonce if available, otherwise use extracted nonce
+      const nonceToUse = tokenNonce !== null && tokenNonce !== undefined ? tokenNonce : extractedNonce;
+      
+      // Ensure tokenNonce is properly converted to number
+      // Handle hex nonces (e.g., "02" in hex = 2, "0f" in hex = 15)
+      let nonceValue = nonceToUse;
+      if (nonceToUse !== null && nonceToUse !== undefined) {
+        if (typeof nonceToUse === 'string') {
+          // Try parsing as hex first (common format for nonces in MultiversX)
+          const hexValue = parseInt(nonceToUse, 16);
+          if (!isNaN(hexValue) && /^[0-9a-f]+$/i.test(nonceToUse)) {
+            nonceValue = hexValue;
+          } else {
+            // Fall back to decimal
+            const decValue = parseInt(nonceToUse, 10);
+            nonceValue = isNaN(decValue) ? Number(nonceToUse) : decValue;
+          }
+        } else {
+          nonceValue = Number(nonceToUse);
+        }
+      } else {
+        throw new Error('Nonce is required for SFT transfer but was not provided');
+      }
+      
+      console.log(`[WITHDRAW-NFT] Using collection ticker: "${collectionTicker}", nonce: ${nonceValue} (original: ${tokenNonce}, extracted: ${extractedNonce})`);
+      return await transferSFTFromCommunityFund(recipientWallet, collectionTicker, nonceValue, finalAmount, projectName, guildId);
     }
     
     // NFT transfer (amount = 1)
@@ -1851,18 +1912,43 @@ async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, to
         txStatus = parsedResponse.status;
       }
       
+      // Normalize txStatus - handle if it's an object
+      let txStatusString = null;
+      if (txStatus) {
+        if (typeof txStatus === 'string') {
+          txStatusString = txStatus;
+        } else if (typeof txStatus === 'object') {
+          // If status is an object, try to extract a meaningful status
+          txStatusString = txStatus.status || txStatus.value || JSON.stringify(txStatus);
+          console.log(`[WITHDRAW-NFT] Status is an object, extracted: ${txStatusString}`);
+        } else {
+          txStatusString = String(txStatus);
+        }
+      }
+      
       const errorMessage = parsedResponse.error || 
                           (parsedResponse.result && parsedResponse.result.error) ||
                           (parsedResponse.data && parsedResponse.data.error) ||
                           (!response.ok ? `API error (${response.status})` : null);
       
-      // Only treat as success if status is 'success', HTTP is OK, and txHash exists
-      const isApiSuccess = (response.ok || parsedResponse.success === true) && txStatus === 'success' && !!txHash;
+      // Success criteria: 
+      // 1. HTTP response is OK AND
+      // 2. We have a txHash (transaction was submitted) AND
+      // 3. Either status is 'success' OR no explicit error message
+      // If we have a txHash and HTTP is OK, the transaction was submitted successfully
+      // The actual blockchain status can be checked via explorer
+      const hasTxHash = !!txHash;
+      const isHttpOk = response.ok || parsedResponse.success === true;
+      const isStatusSuccess = txStatusString === 'success' || txStatusString === 'Success' || txStatusString === 'SUCCESS';
+      const hasNoError = !errorMessage;
+      
+      // Consider successful if: HTTP OK + has txHash + (status success OR no error)
+      const isApiSuccess = isHttpOk && hasTxHash && (isStatusSuccess || hasNoError);
       
       const result = {
         success: isApiSuccess,
         txHash: txHash,
-        errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
+        errorMessage: errorMessage || (txStatusString && !isStatusSuccess && hasNoError ? `Transaction status: ${txStatusString}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status
       };
@@ -5692,11 +5778,21 @@ client.on('interactionCreate', async (interaction) => {
       // Count finished matches - check multiple indicators:
       // 1. Matches with status FINISHED
       let finishedMatchesByStatus = 0;
+      let matchesNotFound = 0;
       for (const matchId of userMatchIds) {
         const match = await dbFootball.getMatch(matchId);
-        if (match && match.status === 'FINISHED') {
+        if (!match) {
+          matchesNotFound++;
+          console.log(`[MY-STATS] Match ${matchId} not found in database`);
+          continue;
+        }
+        if (match.status === 'FINISHED') {
           finishedMatchesByStatus++;
         }
+      }
+      
+      if (matchesNotFound > 0) {
+        console.log(`[MY-STATS] Warning: ${matchesNotFound} match(es) not found in database out of ${userMatchIds.length} total matches`);
       }
       
       // 2. Count unique match IDs where at least one bet from that match has a prize
@@ -5724,23 +5820,66 @@ client.on('interactionCreate', async (interaction) => {
       
       const finishedMatchesByPrizes = matchesWithPrizes.size;
       
-      // Use the higher count (covers both cases: matches still in data and cleaned up matches)
-      // Also ensure we count at least as many matches as wins (since wins = finished matches where user won)
-      const finishedMatches = Math.max(
-        finishedMatchesByStatus,
-        finishedMatchesByPrizes,
-        userData.wins || 0 // At minimum, if they have wins, they played in that many finished matches
-      );
+      // Prioritize status-based count (most reliable)
+      // Only use prize-based count as fallback for matches that don't exist in database anymore
+      // This prevents counting unfinished matches that might have prizes set incorrectly
+      let finishedMatches = finishedMatchesByStatus;
+      
+      // If status count is less than prize count, it might mean some matches were cleaned up
+      // But we should verify: only count prizes for matches that don't exist in database
+      if (finishedMatchesByPrizes > finishedMatchesByStatus) {
+        // Check if the extra matches from prize count are actually missing from database
+        const matchesWithPrizesButNoStatus = [];
+        for (const matchId of matchesWithPrizes) {
+          const match = await dbFootball.getMatch(matchId);
+          if (!match) {
+            // Match doesn't exist in database, but has prizes - likely cleaned up finished match
+            matchesWithPrizesButNoStatus.push(matchId);
+          }
+        }
+        
+        // Only add matches that don't exist in database (cleaned up finished matches)
+        if (matchesWithPrizesButNoStatus.length > 0) {
+          console.log(`[MY-STATS] Found ${matchesWithPrizesButNoStatus.length} finished match(es) with prizes but missing from database (likely cleaned up)`);
+          finishedMatches = finishedMatchesByStatus + matchesWithPrizesButNoStatus.length;
+        } else {
+          // All matches exist in database, so status count is authoritative
+          console.log(`[MY-STATS] Prize count (${finishedMatchesByPrizes}) > status count (${finishedMatchesByStatus}), but all matches exist in DB - using status count`);
+          finishedMatches = finishedMatchesByStatus;
+        }
+      }
+      
+      // Ensure finished matches is at least the number of wins (sanity check)
+      // This handles edge cases where match status might not be updated but prizes were distributed
+      if (finishedMatches < (userData.wins || 0)) {
+        console.log(`[MY-STATS] Warning: finishedMatches (${finishedMatches}) < wins (${userData.wins}), using wins as minimum`);
+        finishedMatches = userData.wins || 0;
+      }
       
       // Calculate win rate: wins / finished matches * 100
       const winRate = finishedMatches > 0 
         ? ((userData.wins || 0) / finishedMatches * 100).toFixed(1)
         : '0.0';
       
+      // Debug logging
+      console.log(`[MY-STATS] User ${interaction.user.id} stats:`, {
+        totalMatches: userMatchIds.length,
+        finishedMatchesByStatus,
+        finishedMatchesByPrizes,
+        finishedMatches,
+        wins: userData.wins || 0,
+        winRate
+      });
+      
       // Points and Wins
+      // Clarify the display: show "X wins out of Y finished matches" instead of ambiguous "X/Y finished"
+      const finishedMatchesText = finishedMatches > 0 
+        ? ` (${userData.wins || 0} wins out of ${finishedMatches} finished matches)`
+        : ' (no finished matches yet)';
+      
       embed.addFields({
         name: '📈 Performance',
-        value: `**Points:** ${userData.points || 0}\n**Wins:** ${userData.wins || 0}\n**Win Rate:** ${winRate}%${finishedMatches > 0 ? ` (${userData.wins || 0}/${finishedMatches} finished)` : ' (no finished matches yet)'}`,
+        value: `**Points:** ${userData.points || 0}\n**Wins:** ${userData.wins || 0}\n**Win Rate:** ${winRate}%${finishedMatchesText}`,
         inline: true
       });
 
