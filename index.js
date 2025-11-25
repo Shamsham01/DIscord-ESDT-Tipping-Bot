@@ -11829,12 +11829,12 @@ client.on('interactionCreate', async (interaction) => {
       for (const token of allTokens) {
         let balance = new BigNumber(0);
         
-        if (houseType === 'auction') {
+        if (source === 'auction') {
           // Calculate auction PNL: earnings - spending
           const auctionEarnings = new BigNumber(aggregatedBalances.auctionEarnings[token] || '0');
           const auctionSpending = new BigNumber(aggregatedBalances.auctionSpending[token] || '0');
           balance = auctionEarnings.minus(auctionSpending);
-        } else if (houseType === 'lottery') {
+        } else if (source === 'lottery') {
           // Calculate lottery PNL: earnings - spending
           const lotteryEarnings = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
           const lotterySpending = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
