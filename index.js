@@ -6727,7 +6727,7 @@ client.on('interactionCreate', async (interaction) => {
       // Get balance based on source - check both identifier and ticker (for backward compatibility)
       let houseBalance;
       let sourceName;
-      if (houseType === 'auction') {
+      if (source === 'auction') {
         sourceName = 'Auction House Balance';
         const auctionEarningsId = aggregatedBalances.auctionEarnings[tokenIdentifier] || '0';
         const auctionEarningsTicker = tokenIdentifier !== tokenTickerOnly ? (aggregatedBalances.auctionEarnings[tokenTickerOnly] || '0') : '0';
@@ -6743,7 +6743,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply({ content: '❌ Auction house has no balance for this token yet. No auctions have completed successfully.', flags: [MessageFlags.Ephemeral] });
           return;
         }
-      } else if (houseType === 'lottery') {
+      } else if (source === 'lottery') {
         sourceName = 'Lottery House Balance';
         // Check both identifier and ticker (for backward compatibility with old data stored by ticker)
         const lotteryEarningsId = aggregatedBalances.lotteryEarnings[tokenIdentifier] || '0';
@@ -8700,11 +8700,11 @@ client.on('interactionCreate', async (interaction) => {
       
       // Post initial message in thread
       if (thread) {
-        await thread.send(`📢 **Listing created!**\n\nThis ${tokenType} is now available for purchase. Use the buttons above to buy or make an offer.`);
+        await thread.send(`📢 **Listing created!**\n\nThis ${listingTokenType} is now available for purchase. Use the buttons above to buy or make an offer.`);
       }
       
       await interaction.editReply({ 
-        content: `✅ **Listing created successfully!**\n\nYour ${tokenType} "${nftDisplayName}${amountText}" is now listed for ${priceAmount} ${displayTicker}.`, 
+        content: `✅ **Listing created successfully!**\n\nYour ${listingTokenType} "${nftDisplayName}${amountText}" is now listed for ${priceAmount} ${displayTicker}.`, 
         flags: [MessageFlags.Ephemeral] 
       });
       
