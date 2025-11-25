@@ -3530,9 +3530,9 @@ client.on('interactionCreate', async (interaction) => {
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
 
       if (nftImageUrl) {
-        auctionEmbed.setThumbnail(nftImageUrl);
+        auctionEmbed.setImage(nftImageUrl);
       } else {
-        auctionEmbed.setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif');
+        auctionEmbed.setImage('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif');
       }
 
       // Create buttons
@@ -16943,9 +16943,9 @@ async function updateAuctionEmbed(guildId, auctionId) {
     }
     
     if (nftImageUrl) {
-      auctionEmbed.setThumbnail(nftImageUrl);
+      auctionEmbed.setImage(nftImageUrl);
     } else {
-      auctionEmbed.setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif');
+      auctionEmbed.setImage('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif');
     }
 
     // Only show buttons if auction is active
