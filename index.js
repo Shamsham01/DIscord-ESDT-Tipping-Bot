@@ -10773,30 +10773,9 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
-      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
-      console.log('[AUTOCOMPLETE] send-nft collection: Fetching from', nftsUrl);
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout for autocomplete
-      
-      const response = await fetch(nftsUrl, {
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        console.error(`[AUTOCOMPLETE] send-nft collection: API error ${response.status} ${response.statusText}`);
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const responseData = await response.json();
-      console.log('[AUTOCOMPLETE] send-nft collection: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
-      
-      // Handle paginated response (check for data property) or direct array
-      let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+      // Fetch all NFTs/SFTs from MultiversX API with pagination - this endpoint excludes MetaESDT automatically
+      console.log('[AUTOCOMPLETE] send-nft collection: Fetching from wallet', walletAddress);
+      const allItems = await fetchAllNFTs(walletAddress, 3000); // 3 second timeout for autocomplete
       
       if (!Array.isArray(allItems) || allItems.length === 0) {
         console.log('[AUTOCOMPLETE] send-nft collection: No NFTs/SFTs found');
@@ -10883,31 +10862,11 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
-      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
-      console.log('[AUTOCOMPLETE] send-nft nft-name: Fetching from', nftsUrl);
+      // Fetch all NFTs/SFTs from MultiversX API with pagination - this endpoint excludes MetaESDT automatically
+      console.log('[AUTOCOMPLETE] send-nft nft-name: Fetching from wallet', walletAddress);
       console.log('[AUTOCOMPLETE] send-nft nft-name: Filtering for collection:', selectedCollection);
       
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout for autocomplete
-      
-      const response = await fetch(nftsUrl, {
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        console.error(`[AUTOCOMPLETE] send-nft nft-name: API error ${response.status} ${response.statusText}`);
-        await safeRespond(interaction, []);
-        return;
-      }
-      
-      const responseData = await response.json();
-      console.log('[AUTOCOMPLETE] send-nft nft-name: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
-      
-      // Handle paginated response (check for data property) or direct array
-      let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+      const allItems = await fetchAllNFTs(walletAddress, 3000); // 3 second timeout for autocomplete
       
       if (!Array.isArray(allItems) || allItems.length === 0) {
         console.log('[AUTOCOMPLETE] send-nft nft-name: No NFTs found or invalid format');
@@ -10985,6 +10944,71 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Helper function to fetch all NFTs with pagination
+  async function fetchAllNFTs(walletAddress, timeout = 5000) {
+    const allItems = [];
+    let from = 0;
+    const size = 100; // Fetch 100 items per page
+    let hasMore = true;
+    
+    while (hasMore) {
+      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts?from=${from}&size=${size}`;
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
+      
+      try {
+        const response = await fetch(nftsUrl, {
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+          console.error(`[AUTOCOMPLETE] API error ${response.status} ${response.statusText} at offset ${from}`);
+          break;
+        }
+        
+        const responseData = await response.json();
+        
+        // Handle paginated response (check for data property) or direct array
+        let items = Array.isArray(responseData) ? responseData : (responseData.data || []);
+        
+        if (!Array.isArray(items) || items.length === 0) {
+          hasMore = false;
+          break;
+        }
+        
+        allItems.push(...items);
+        
+        // Check if there are more items to fetch
+        // If we got fewer items than requested, we've reached the end
+        if (items.length < size) {
+          hasMore = false;
+        } else {
+          from += size;
+        }
+        
+        // Safety limit: don't fetch more than 1000 items total (10 pages)
+        if (allItems.length >= 1000) {
+          console.log(`[AUTOCOMPLETE] Reached safety limit of 1000 items, stopping pagination`);
+          hasMore = false;
+        }
+      } catch (error) {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+          console.log(`[AUTOCOMPLETE] Request timeout at offset ${from}`);
+          break;
+        }
+        console.error(`[AUTOCOMPLETE] Error fetching NFTs at offset ${from}:`, error.message);
+        break;
+      }
+    }
+    
+    console.log(`[AUTOCOMPLETE] Fetched ${allItems.length} total items with pagination`);
+    return allItems;
+  }
+
   // COLLECTION AUTOCOMPLETE FOR CREATE-AUCTION
   if (interaction.commandName === 'create-auction' && interaction.options.getFocused(true).name === 'collection') {
     try {
@@ -11055,30 +11079,9 @@ client.on('interactionCreate', async (interaction) => {
               return;
             }
             
-            // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
-            const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
-            console.log('[AUTOCOMPLETE] create-auction collection: Fetching from', nftsUrl);
-            
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
-            
-            const response = await fetch(nftsUrl, {
-              signal: controller.signal
-            });
-            
-            clearTimeout(timeoutId);
-            
-            if (!response.ok) {
-              console.error(`[AUTOCOMPLETE] create-auction collection: API error ${response.status} ${response.statusText}`);
-              await safeRespond(interaction, []);
-              return;
-            }
-            
-            const responseData = await response.json();
-            console.log('[AUTOCOMPLETE] create-auction collection: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
-            
-            // Handle paginated response (check for data property) or direct array
-            let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+            // Fetch all NFTs/SFTs from MultiversX API with pagination - this endpoint excludes MetaESDT automatically
+            console.log('[AUTOCOMPLETE] create-auction collection: Fetching from wallet', walletAddress);
+            const allItems = await fetchAllNFTs(walletAddress, 5000);
             
             if (!Array.isArray(allItems) || allItems.length === 0) {
               console.log('[AUTOCOMPLETE] create-auction collection: No NFTs/SFTs found');
@@ -11155,24 +11158,8 @@ client.on('interactionCreate', async (interaction) => {
             }
             
             try {
-              const nftsUrl = `https://api.multiversx.com/accounts/${project.walletAddress}/nfts`;
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 3000); // Shorter timeout for parallel requests
-              
-              const response = await fetch(nftsUrl, {
-                signal: controller.signal
-              });
-              
-              clearTimeout(timeoutId);
-              
-              if (!response.ok) {
-                console.error(`[AUTOCOMPLETE] create-auction collection: API error for ${projectName}: ${response.status}`);
-                return [];
-              }
-              
-              const responseData = await response.json();
-              let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
-              
+              // Fetch all NFTs with pagination
+              const allItems = await fetchAllNFTs(project.walletAddress, 3000); // Shorter timeout for parallel requests
               return allItems || [];
             } catch (error) {
               if (error.name !== 'AbortError') {
@@ -11304,31 +11291,11 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         
-        // Fetch all NFTs/SFTs from MultiversX API - this endpoint excludes MetaESDT automatically
-        const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts`;
-        console.log('[AUTOCOMPLETE] create-auction nft-name: Fetching from', nftsUrl);
+        // Fetch all NFTs/SFTs from MultiversX API with pagination - this endpoint excludes MetaESDT automatically
+        console.log('[AUTOCOMPLETE] create-auction nft-name: Fetching from wallet', walletAddress);
         console.log('[AUTOCOMPLETE] create-auction nft-name: Filtering for collection:', selectedCollection);
         
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000);
-        
-        const response = await fetch(nftsUrl, {
-          signal: controller.signal
-        });
-        
-        clearTimeout(timeoutId);
-        
-        if (!response.ok) {
-          console.error(`[AUTOCOMPLETE] create-auction nft-name: API error ${response.status} ${response.statusText}`);
-          await safeRespond(interaction, []);
-          return;
-        }
-        
-        const responseData = await response.json();
-        console.log('[AUTOCOMPLETE] create-auction nft-name: Response type:', typeof responseData, 'Is array:', Array.isArray(responseData));
-        
-        // Handle paginated response (check for data property) or direct array
-        let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
+        const allItems = await fetchAllNFTs(walletAddress, 3000);
         
         if (!Array.isArray(allItems) || allItems.length === 0) {
           console.log('[AUTOCOMPLETE] create-auction nft-name: No NFTs found or invalid format');
@@ -11392,24 +11359,8 @@ client.on('interactionCreate', async (interaction) => {
         }
         
         try {
-          const nftsUrl = `https://api.multiversx.com/accounts/${project.walletAddress}/nfts`;
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 3000); // Shorter timeout for parallel requests
-          
-          const response = await fetch(nftsUrl, {
-            signal: controller.signal
-          });
-          
-          clearTimeout(timeoutId);
-          
-          if (!response.ok) {
-            console.error(`[AUTOCOMPLETE] create-auction nft-name: API error for ${projectName}: ${response.status}`);
-            return [];
-          }
-          
-          const responseData = await response.json();
-          let allItems = Array.isArray(responseData) ? responseData : (responseData.data || []);
-          
+          // Fetch all NFTs with pagination
+          const allItems = await fetchAllNFTs(project.walletAddress, 3000); // Shorter timeout for parallel requests
           return allItems || [];
         } catch (error) {
           if (error.name !== 'AbortError') {
