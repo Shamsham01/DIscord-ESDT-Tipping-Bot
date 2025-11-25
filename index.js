@@ -1978,6 +1978,71 @@ async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, to
   }
 }
 
+// Helper function to fetch all NFTs with pagination
+async function fetchAllNFTs(walletAddress, timeout = 5000) {
+  const allItems = [];
+  let from = 0;
+  const size = 100; // Fetch 100 items per page
+  let hasMore = true;
+  
+  while (hasMore) {
+    const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts?from=${from}&size=${size}`;
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
+    try {
+      const response = await fetch(nftsUrl, {
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        console.error(`[FETCH-NFTS] API error ${response.status} ${response.statusText} at offset ${from}`);
+        break;
+      }
+      
+      const responseData = await response.json();
+      
+      // Handle paginated response (check for data property) or direct array
+      let items = Array.isArray(responseData) ? responseData : (responseData.data || []);
+      
+      if (!Array.isArray(items) || items.length === 0) {
+        hasMore = false;
+        break;
+      }
+      
+      allItems.push(...items);
+      
+      // Check if there are more items to fetch
+      // If we got fewer items than requested, we've reached the end
+      if (items.length < size) {
+        hasMore = false;
+      } else {
+        from += size;
+      }
+      
+      // Safety limit: don't fetch more than 1000 items total (10 pages)
+      if (allItems.length >= 1000) {
+        console.log(`[FETCH-NFTS] Reached safety limit of 1000 items, stopping pagination`);
+        hasMore = false;
+      }
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        console.log(`[FETCH-NFTS] Request timeout at offset ${from}`);
+        break;
+      }
+      console.error(`[FETCH-NFTS] Error fetching NFTs at offset ${from}:`, error.message);
+      break;
+    }
+  }
+  
+  console.log(`[FETCH-NFTS] Fetched ${allItems.length} total items with pagination`);
+  return allItems;
+}
+
 // Handle bot interactions
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isCommand()) return;
@@ -3427,32 +3492,66 @@ client.on('interactionCreate', async (interaction) => {
           flags: [MessageFlags.Ephemeral] 
         });
 
-        const encodedNftName = encodeURIComponent(nftName);
-        const nftDetailsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts?search=${encodeURIComponent(collection)}&name=${encodedNftName}`;
+        // Extract collection identifier from collection value
+        // Handle cases where collection might be in format "Name (IDENTIFIER)" or just "IDENTIFIER"
+        let collectionIdentifier = collection;
+        if (collection.includes('(') && collection.includes(')')) {
+          // Extract identifier from format "Name (IDENTIFIER)"
+          const match = collection.match(/\(([^)]+)\)/);
+          if (match && match[1]) {
+            collectionIdentifier = match[1].trim();
+          }
+        }
         
+        // Also check if it's already a valid identifier format (e.g., "EMP-897b49")
+        // If not, try to extract from the value
+        if (!collectionIdentifier.match(/^[A-Z0-9]+-[a-f0-9]{6}$/i)) {
+          // If it doesn't match identifier format, try to find it in the original value
+          // Check if collection contains a hyphen (identifier format)
+          const parts = collection.split(' ');
+          for (const part of parts) {
+            if (part.match(/^[A-Z0-9]+-[a-f0-9]{6}$/i)) {
+              collectionIdentifier = part.replace(/[()]/g, ''); // Remove parentheses if present
+              break;
+            }
+          }
+        }
+
         try {
-          const nftResponse = await fetch(nftDetailsUrl);
-          if (!nftResponse.ok) {
-            throw new Error(`Failed to fetch NFT details: ${nftResponse.status}`);
+          // Fetch all NFTs from the wallet and filter by collection
+          // This is more reliable than using the search parameter
+          console.log(`[AUCTIONS] Fetching NFTs from wallet ${walletAddress} for collection "${collectionIdentifier}"`);
+          const allNFTs = await fetchAllNFTs(walletAddress, 10000);
+          
+          if (!Array.isArray(allNFTs) || allNFTs.length === 0) {
+            throw new Error(`No NFTs found in wallet`);
           }
-          const nftData = await nftResponse.json();
           
-          if (!Array.isArray(nftData) || nftData.length === 0) {
-            throw new Error(`NFT "${nftName}" not found in collection "${collection}"`);
+          // Filter NFTs by collection identifier (case-insensitive)
+          const collectionNFTs = allNFTs.filter(nft => 
+            nft.collection && 
+            nft.collection.toLowerCase() === collectionIdentifier.toLowerCase()
+          );
+          
+          if (collectionNFTs.length === 0) {
+            throw new Error(`No NFTs found in collection "${collectionIdentifier}"`);
           }
           
-          // Find the exact NFT match by name
-          const fetchedNftDetails = nftData.find(nft => nft.name === nftName) || nftData[0];
+          // Find the exact NFT match by name (case-insensitive)
+          const fetchedNftDetails = collectionNFTs.find(nft => 
+            nft.name && nft.name.toLowerCase() === nftName.toLowerCase()
+          );
           
-          if (!fetchedNftDetails || fetchedNftDetails.collection !== collection) {
-            throw new Error(`NFT "${nftName}" not found in collection "${collection}"`);
+          if (!fetchedNftDetails) {
+            throw new Error(`NFT "${nftName}" not found in collection "${collectionIdentifier}"`);
           }
 
-          if (!fetchedNftDetails.nonce && fetchedNftDetails.nonce !== 0) {
+          if (fetchedNftDetails.nonce === undefined && fetchedNftDetails.nonce !== 0) {
             throw new Error(`NFT "${nftName}" does not have a valid nonce`);
           }
           
           nftDetails = fetchedNftDetails;
+          console.log(`[AUCTIONS] Found NFT: ${nftDetails.name} (${nftDetails.collection}#${nftDetails.nonce})`);
         } catch (fetchError) {
           await interaction.editReply({ 
             content: `Error fetching NFT details: ${fetchError.message}`, 
@@ -10942,71 +11041,6 @@ client.on('interactionCreate', async (interaction) => {
       await safeRespond(interaction, []);
     }
     return;
-  }
-
-  // Helper function to fetch all NFTs with pagination
-  async function fetchAllNFTs(walletAddress, timeout = 5000) {
-    const allItems = [];
-    let from = 0;
-    const size = 100; // Fetch 100 items per page
-    let hasMore = true;
-    
-    while (hasMore) {
-      const nftsUrl = `https://api.multiversx.com/accounts/${walletAddress}/nfts?from=${from}&size=${size}`;
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-      
-      try {
-        const response = await fetch(nftsUrl, {
-          signal: controller.signal
-        });
-        
-        clearTimeout(timeoutId);
-        
-        if (!response.ok) {
-          console.error(`[AUTOCOMPLETE] API error ${response.status} ${response.statusText} at offset ${from}`);
-          break;
-        }
-        
-        const responseData = await response.json();
-        
-        // Handle paginated response (check for data property) or direct array
-        let items = Array.isArray(responseData) ? responseData : (responseData.data || []);
-        
-        if (!Array.isArray(items) || items.length === 0) {
-          hasMore = false;
-          break;
-        }
-        
-        allItems.push(...items);
-        
-        // Check if there are more items to fetch
-        // If we got fewer items than requested, we've reached the end
-        if (items.length < size) {
-          hasMore = false;
-        } else {
-          from += size;
-        }
-        
-        // Safety limit: don't fetch more than 1000 items total (10 pages)
-        if (allItems.length >= 1000) {
-          console.log(`[AUTOCOMPLETE] Reached safety limit of 1000 items, stopping pagination`);
-          hasMore = false;
-        }
-      } catch (error) {
-        clearTimeout(timeoutId);
-        if (error.name === 'AbortError') {
-          console.log(`[AUTOCOMPLETE] Request timeout at offset ${from}`);
-          break;
-        }
-        console.error(`[AUTOCOMPLETE] Error fetching NFTs at offset ${from}:`, error.message);
-        break;
-      }
-    }
-    
-    console.log(`[AUTOCOMPLETE] Fetched ${allItems.length} total items with pagination`);
-    return allItems;
   }
 
   // COLLECTION AUTOCOMPLETE FOR CREATE-AUCTION
