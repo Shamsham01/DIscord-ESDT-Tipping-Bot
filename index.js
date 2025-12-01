@@ -224,11 +224,7 @@ async function checkCommunityFundBalances(guildId, numberOfTransfers = 1) {
           rewardBalanceHuman = '0';
           // Try to get price from token metadata API
           try {
-            const priceResponse = await fetch(`https://api.multiversx.com/tokens/${REWARD_IDENTIFIER}`);
-            if (priceResponse.ok) {
-              const priceData = await priceResponse.json();
-              rewardPriceUsd = priceData.price || 0;
-            }
+            rewardPriceUsd = await getTokenPriceUsd(REWARD_IDENTIFIER);
           } catch (priceError) {
             console.error('[BALANCE-CHECK] Error fetching REWARD price:', priceError.message);
           }
@@ -372,11 +368,7 @@ async function checkCommunityFundBalances(guildId, numberOfTransfers = 1) {
     // Try to get REWARD price if not already fetched
     if (rewardPriceUsd <= 0) {
       try {
-        const priceResponse = await fetch(`https://api.multiversx.com/tokens/${REWARD_IDENTIFIER}`);
-        if (priceResponse.ok) {
-          const priceData = await priceResponse.json();
-          rewardPriceUsd = priceData.price || 0;
-        }
+        rewardPriceUsd = await getTokenPriceUsd(REWARD_IDENTIFIER);
       } catch (priceError) {
         console.error('[BALANCE-CHECK] Error fetching REWARD price:', priceError.message);
       }
@@ -3582,11 +3574,7 @@ client.on('interactionCreate', async (interaction) => {
       // Fetch token price for USD valuation
       let tokenPriceUsd = 0;
       try {
-        const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
-        if (priceResponse.ok) {
-          const priceData = await priceResponse.json();
-          tokenPriceUsd = priceData.price || 0;
-        }
+        tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
       } catch (error) {
         console.error('[AUCTIONS] Error fetching token price:', error.message);
       }
@@ -5432,6 +5420,22 @@ client.on('interactionCreate', async (interaction) => {
             newMatches++;
           }
 
+          // Fetch token price for USD valuation
+          let tokenPriceUsd = 0;
+          try {
+            tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
+          } catch (error) {
+            console.error(`[FOOTBALL] Error fetching token price for match ${matchId}:`, error.message);
+          }
+          
+          // Calculate USD values
+          const stakeUsd = tokenPriceUsd > 0 ? new BigNumber(amount).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+          const potSizeUsd = tokenPriceUsd > 0 ? new BigNumber(0).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+          
+          // Format field values with USD
+          const stakeValue = stakeUsd ? `${amount} ${tokenTicker} (≈ $${stakeUsd})` : `${amount} ${tokenTicker}`;
+          const potSizeValue = potSizeUsd ? `0 ${tokenTicker} (≈ $${potSizeUsd})` : `0 ${tokenTicker}`;
+          
           // Create match embed (only if we got here, meaning no duplicate embed exists)
           const matchEmbed = new EmbedBuilder()
             .setTitle(`⚽ ${fixture.homeTeam.name} vs ${fixture.awayTeam.name}`)
@@ -5439,8 +5443,8 @@ client.on('interactionCreate', async (interaction) => {
             .addFields([
               { name: '🏆 Competition', value: fixtures.competition?.name || competition, inline: true },
               { name: '🎮 Game ID', value: matchId, inline: true },
-              { name: '💰 Stake', value: `${amount} ${tokenTicker}`, inline: true },
-              { name: '🏆 Pot Size', value: `0 ${tokenTicker}`, inline: true },
+              { name: '💰 Stake', value: stakeValue, inline: true },
+              { name: '🏆 Pot Size', value: potSizeValue, inline: true },
               { name: '⏰ Kickoff', value: `<t:${Math.floor(kickoffTime.getTime() / 1000)}:f>\n(<t:${Math.floor(kickoffTime.getTime() / 1000)}:R>)`, inline: false }
             ])
             .setColor('#00FF00')
@@ -6011,15 +6015,12 @@ client.on('interactionCreate', async (interaction) => {
       // Fetch prices in parallel
       const pricePromises = uniqueTokenIds.map(async (tokenIdentifier) => {
         try {
-          const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
-          if (priceResponse.ok) {
-            const priceData = await priceResponse.json();
-            return { tokenIdentifier, price: priceData.price || 0 };
-          }
+          const price = await getTokenPriceUsd(tokenIdentifier);
+          return { tokenIdentifier, price };
         } catch (error) {
           console.error(`[MY-STATS] Error fetching price for ${tokenIdentifier}:`, error.message);
+          return { tokenIdentifier, price: 0 };
         }
-        return { tokenIdentifier, price: 0 };
       });
       
       const priceResults = await Promise.all(pricePromises);
@@ -7487,15 +7488,12 @@ client.on('interactionCreate', async (interaction) => {
         }
         
         try {
-          const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
-          if (priceResponse.ok) {
-            const priceData = await priceResponse.json();
-            return { tokenIdentifier, price: priceData.price || 0 };
-          }
+          const price = await getTokenPriceUsd(tokenIdentifier);
+          return { tokenIdentifier, price };
         } catch (error) {
           console.error(`[CHECK-BALANCE] Error fetching price for ${tokenIdentifier}:`, error.message);
+          return { tokenIdentifier, price: 0 };
         }
-        return { tokenIdentifier, price: 0 };
       });
       
       const priceResults = await Promise.all(pricePromises);
@@ -8607,12 +8605,8 @@ client.on('interactionCreate', async (interaction) => {
       // Fetch token price for USD valuation
       let priceUsd = 0;
       try {
-        const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
-        if (priceResponse.ok) {
-          const priceData = await priceResponse.json();
-          const tokenPriceUsd = priceData.price || 0;
-          priceUsd = new BigNumber(priceAmount).multipliedBy(tokenPriceUsd).toNumber();
-        }
+        const tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
+        priceUsd = new BigNumber(priceAmount).multipliedBy(tokenPriceUsd).toNumber();
       } catch (error) {
         console.error('[NFT-MARKETPLACE] Error fetching token price:', error.message);
       }
@@ -10197,13 +10191,9 @@ client.on('interactionCreate', async (interaction) => {
           
           // Fetch token price for USD calculation
           try {
-            const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
-            if (priceResponse.ok) {
-              const priceData = await priceResponse.json();
-              const tokenPriceUsd = priceData.price || 0;
-              const initialPrizePoolHumanAmount = amountToUseWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
-              initialPrizePoolUsd = new BigNumber(initialPrizePoolHumanAmount).multipliedBy(tokenPriceUsd).toNumber();
-            }
+            const tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
+            const initialPrizePoolHumanAmount = amountToUseWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+            initialPrizePoolUsd = new BigNumber(initialPrizePoolHumanAmount).multipliedBy(tokenPriceUsd).toNumber();
           } catch (error) {
             console.error('[LOTTERY] Error fetching token price for initial prize pool:', error.message);
           }
@@ -10233,15 +10223,11 @@ client.on('interactionCreate', async (interaction) => {
       } else {
         // Fetch token price from API
         try {
-          const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
-          if (priceResponse.ok) {
-            const priceData = await priceResponse.json();
-            tokenPriceUsd = priceData.price || 0;
-            // If we have initial prize pool but no USD value yet, calculate it
-            if (useHouseLotteryBalance && initialPrizePoolWei !== '0' && initialPrizePoolUsd === 0) {
-              const initialPrizePoolHumanAmount = new BigNumber(initialPrizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
-              initialPrizePoolUsd = new BigNumber(initialPrizePoolHumanAmount).multipliedBy(tokenPriceUsd).toNumber();
-            }
+          tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
+          // If we have initial prize pool but no USD value yet, calculate it
+          if (useHouseLotteryBalance && initialPrizePoolWei !== '0' && initialPrizePoolUsd === 0) {
+            const initialPrizePoolHumanAmount = new BigNumber(initialPrizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+            initialPrizePoolUsd = new BigNumber(initialPrizePoolHumanAmount).multipliedBy(tokenPriceUsd).toNumber();
           }
         } catch (error) {
           console.error('[LOTTERY] Error fetching token price:', error.message);
@@ -10593,15 +10579,12 @@ client.on('interactionCreate', async (interaction) => {
       // Fetch prices in parallel
       const pricePromises = uniqueTokenIds.map(async (tokenIdentifier) => {
         try {
-          const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
-          if (priceResponse.ok) {
-            const priceData = await priceResponse.json();
-            return { tokenIdentifier, price: priceData.price || 0 };
-          }
+          const price = await getTokenPriceUsd(tokenIdentifier);
+          return { tokenIdentifier, price };
         } catch (error) {
           console.error(`[LOTTERY-STATS] Error fetching price for ${tokenIdentifier}:`, error.message);
+          return { tokenIdentifier, price: 0 };
         }
-        return { tokenIdentifier, price: 0 };
       });
       
       const priceResults = await Promise.all(pricePromises);
@@ -14651,6 +14634,20 @@ client.on('interactionCreate', async (interaction) => {
             return;
           }
           
+          // Check if user already has a bet on this match with the same outcome
+          const userBets = await dbFootball.getBetsByUser(guildId, interaction.user.id);
+          const existingBet = Object.values(userBets).find(
+            bet => bet.matchId === matchId && bet.outcome === outcome && bet.status === 'ACCEPTED'
+          );
+          
+          if (existingBet) {
+            await interaction.reply({ 
+              content: `❌ **Duplicate bet not allowed!**\n\nYou have already placed a bet on **${match.home} vs ${match.away}** with outcome **${outcome === 'H' ? 'Home Win' : outcome === 'A' ? 'Away Win' : 'Draw'}**.\n\nYou can place bets on different outcomes for the same match, but not multiple bets on the same outcome.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+            return;
+          }
+          
           await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
           await interaction.editReply({ content: '💸 Processing your virtual bet...', flags: [MessageFlags.Ephemeral] });
           
@@ -14726,6 +14723,14 @@ client.on('interactionCreate', async (interaction) => {
                 updatedEmbed = EmbedBuilder.from(matchMessage.embeds[0]);
               }
               
+              // Fetch token price for USD valuation
+              let tokenPriceUsd = 0;
+              try {
+                tokenPriceUsd = await getTokenPriceUsd(token.identifier);
+              } catch (error) {
+                console.error(`[FOOTBALL] Error fetching token price for match ${matchId}:`, error.message);
+              }
+              
               // Check if fields exist and update both pot size and stake fields
               if (updatedEmbed.data && updatedEmbed.data.fields && Array.isArray(updatedEmbed.data.fields)) {
                 const potSizeField = updatedEmbed.data.fields.find(field => field.name === '🏆 Pot Size');
@@ -14734,7 +14739,9 @@ client.on('interactionCreate', async (interaction) => {
                 let needsUpdate = false;
                 
                 if (potSizeField) {
-                  potSizeField.value = `${potSize.totalPotHuman} ${token.ticker}`;
+                  // Calculate USD value for pot size
+                  const potSizeUsd = tokenPriceUsd > 0 ? new BigNumber(potSize.totalPotHuman).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+                  potSizeField.value = potSizeUsd ? `${potSize.totalPotHuman} ${token.ticker} (≈ $${potSizeUsd})` : `${potSize.totalPotHuman} ${token.ticker}`;
                   needsUpdate = true;
                 }
                 
@@ -14742,7 +14749,9 @@ client.on('interactionCreate', async (interaction) => {
                 if (stakeField) {
                   const stakeAmountWei = getMatchStakeForGuild(match, guildId);
                   const stakeAmountHuman = new BigNumber(stakeAmountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
-                  stakeField.value = `${stakeAmountHuman} ${token.ticker}`;
+                  // Calculate USD value for stake
+                  const stakeUsd = tokenPriceUsd > 0 ? new BigNumber(stakeAmountHuman).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+                  stakeField.value = stakeUsd ? `${stakeAmountHuman} ${token.ticker} (≈ $${stakeUsd})` : `${stakeAmountHuman} ${token.ticker}`;
                   needsUpdate = true;
                 }
                 
@@ -15454,10 +15463,13 @@ async function updateLotteryEmbed(guildId, lotteryId) {
     // Fetch token price from MultiversX API
     let tokenPriceUsd = 0;
     try {
-      const priceResponse = await fetch(`https://api.multiversx.com/tokens/${lottery.tokenIdentifier}?denominated=true`);
-      if (priceResponse.ok) {
-        const priceData = await priceResponse.json();
-        tokenPriceUsd = priceData.price || 0;
+      tokenPriceUsd = await getTokenPriceUsd(lottery.tokenIdentifier);
+      // If price is still 0, try to calculate from existing USD value if available
+      if (tokenPriceUsd === 0 && lottery.prizePoolUsd > 0 && parseFloat(lottery.prizePoolWei) > 0) {
+        const prizePoolHuman = new BigNumber(lottery.prizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        if (parseFloat(prizePoolHuman) > 0) {
+          tokenPriceUsd = parseFloat(lottery.prizePoolUsd) / parseFloat(prizePoolHuman);
+        }
       }
     } catch (error) {
       console.error('[LOTTERY] Error fetching token price:', error.message);
@@ -15650,12 +15662,8 @@ async function processLotteryDraw(guildId, lotteryId) {
         // Record winner - calculate USD value
         let prizeUsd = 0;
         try {
-          const priceResponse = await fetch(`https://api.multiversx.com/tokens/${lottery.tokenIdentifier}?denominated=true`);
-          if (priceResponse.ok) {
-            const priceData = await priceResponse.json();
-            const tokenPriceUsd = priceData.price || 0;
-            prizeUsd = parseFloat(new BigNumber(prizeHuman).multipliedBy(tokenPriceUsd).toFixed(2));
-          }
+          const tokenPriceUsd = await getTokenPriceUsd(lottery.tokenIdentifier);
+          prizeUsd = parseFloat(new BigNumber(prizeHuman).multipliedBy(tokenPriceUsd).toFixed(2));
         } catch (error) {
           console.error('[LOTTERY] Error fetching token price for winner:', error.message);
         }
@@ -15854,11 +15862,7 @@ async function processLotteryDraw(guildId, lotteryId) {
           // Fetch token price
           let tokenPriceUsd = 0;
           try {
-            const priceResponse = await fetch(`https://api.multiversx.com/tokens/${lottery.tokenIdentifier}?denominated=true`);
-            if (priceResponse.ok) {
-              const priceData = await priceResponse.json();
-              tokenPriceUsd = priceData.price || 0;
-            }
+            tokenPriceUsd = await getTokenPriceUsd(lottery.tokenIdentifier);
           } catch (error) {
             console.error('[LOTTERY] Error fetching token price:', error.message);
           }
@@ -16450,6 +16454,45 @@ async function getTokenDecimals(tokenIdentifier) {
   return decimals;
 }
 
+// Function to get token USD price with MultiversX API fallback to DexScreener
+async function getTokenPriceUsd(tokenIdentifier) {
+  try {
+    // Try MultiversX API first
+    const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+    if (priceResponse.ok) {
+      const priceData = await priceResponse.json();
+      const price = priceData.price || 0;
+      // If we got a valid price, return it
+      if (price > 0) {
+        return price;
+      }
+    }
+  } catch (error) {
+    console.error(`[TOKEN-PRICE] Error fetching price from MultiversX for ${tokenIdentifier}:`, error.message);
+  }
+  
+  // Fallback to DexScreener API
+  try {
+    const dexscreenerResponse = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenIdentifier}`);
+    if (dexscreenerResponse.ok) {
+      const dexscreenerData = await dexscreenerResponse.json();
+      // Check if we have pairs and extract priceUsd from the first pair
+      if (dexscreenerData.pairs && dexscreenerData.pairs.length > 0 && dexscreenerData.pairs[0].priceUsd) {
+        const priceUsd = parseFloat(dexscreenerData.pairs[0].priceUsd);
+        if (priceUsd > 0) {
+          console.log(`[TOKEN-PRICE] Using DexScreener price for ${tokenIdentifier}: $${priceUsd}`);
+          return priceUsd;
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`[TOKEN-PRICE] Error fetching price from DexScreener for ${tokenIdentifier}:`, error.message);
+  }
+  
+  // Return 0 if both APIs failed
+  return 0;
+}
+
 // Function to get full token metadata from MultiversX API with retry logic
 async function getTokenMetadata(tokenIdentifier, retryCount = 0, maxRetries = 3) {
   try {
@@ -16768,12 +16811,8 @@ async function updateNFTListingEmbed(guildId, listingId) {
     // Fetch token price for USD valuation
     let priceUsd = 0;
     try {
-      const priceResponse = await fetch(`https://api.multiversx.com/tokens/${listing.priceTokenIdentifier}?denominated=true`);
-      if (priceResponse.ok) {
-        const priceData = await priceResponse.json();
-        const tokenPriceUsd = priceData.price || 0;
-        priceUsd = new BigNumber(listing.priceAmount).multipliedBy(tokenPriceUsd).toNumber();
-      }
+      const tokenPriceUsd = await getTokenPriceUsd(listing.priceTokenIdentifier);
+      priceUsd = new BigNumber(listing.priceAmount).multipliedBy(tokenPriceUsd).toNumber();
     } catch (error) {
       console.error('[NFT-MARKETPLACE] Error fetching token price for listing:', error.message);
     }
@@ -16901,11 +16940,7 @@ async function updateAuctionEmbed(guildId, auctionId) {
     let tokenPriceUsd = 0;
     if (tokenIdentifier) {
       try {
-        const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
-        if (priceResponse.ok) {
-          const priceData = await priceResponse.json();
-          tokenPriceUsd = priceData.price || 0;
-        }
+        tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
       } catch (error) {
         console.error('[AUCTIONS] Error fetching token price for auction:', error.message);
       }
@@ -18116,14 +18151,31 @@ async function updateMatchEmbed(guildId, matchId) {
       return;
     }
     
+    // Fetch token price for USD valuation
+    let tokenPriceUsd = 0;
+    try {
+      tokenPriceUsd = await getTokenPriceUsd(token.identifier);
+    } catch (error) {
+      console.error(`[FOOTBALL] Error fetching token price for match ${matchId}:`, error.message);
+    }
+    
     // Create fields array
     const stakeAmountWei = getMatchStakeForGuild(match, guildId);
     const stakeAmountHuman = new BigNumber(stakeAmountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+    
+    // Calculate USD values
+    const stakeUsd = tokenPriceUsd > 0 ? new BigNumber(stakeAmountHuman).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+    const potSizeUsd = tokenPriceUsd > 0 ? new BigNumber(potSize.totalPotHuman).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+    
+    // Format field values with USD
+    const stakeValue = stakeUsd ? `${stakeAmountHuman} ${token.ticker} (≈ $${stakeUsd})` : `${stakeAmountHuman} ${token.ticker}`;
+    const potSizeValue = potSizeUsd ? `${potSize.totalPotHuman} ${token.ticker} (≈ $${potSizeUsd})` : `${potSize.totalPotHuman} ${token.ticker}`;
+    
     const fields = [
         { name: '🏆 Competition', value: match.compName, inline: true },
         { name: '🎮 Game ID', value: matchId, inline: true },
-        { name: '💰 Stake', value: `${stakeAmountHuman} ${token.ticker}`, inline: true },
-      { name: '🏆 Pot Size', value: `${potSize.totalPotHuman} ${token.ticker}`, inline: true },
+        { name: '💰 Stake', value: stakeValue, inline: true },
+      { name: '🏆 Pot Size', value: potSizeValue, inline: true },
         { name: '📊 Score', value: `${match.ftScore.home} - ${match.ftScore.away}`, inline: true },
       { name: '⏰ Status', value: statusText, inline: true }
     ];
