@@ -8,7 +8,7 @@ console.log('Environment variables:', {
   API_BASE_URL: process.env.API_BASE_URL ? 'Set' : 'Missing',
 });
 
-const { Client, IntentsBitField, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags, ChannelType } = require('discord.js');
+const { Client, IntentsBitField, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags, ChannelType, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const BigNumber = require('bignumber.js');
 
@@ -24,9 +24,13 @@ const dbFootball = require('./db/football');
 const dbAuctions = require('./db/auctions');
 const dbLeaderboard = require('./db/leaderboard');
 const dbLottery = require('./db/lottery');
+const dbStakingPools = require('./db/staking-pools');
+const nftMetadataCache = require('./db/nft-metadata-cache');
 
 // Import lottery helpers
 const lotteryHelpers = require('./utils/lottery-helpers');
+const traitValidator = require('./utils/trait-validator');
+const collectionTraits = require('./utils/collection-traits');
 
 const client = new Client({
   intents: [
@@ -7814,8 +7818,8 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guildId;
       const userId = interaction.user.id;
       
-      // Get user's NFTs in the collection
-      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collection);
+      // Get user's NFTs in the collection (include staked NFTs for viewing)
+      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collection, true); // includeStaked = true
       
       if (!userNFTs || userNFTs.length === 0) {
         await interaction.editReply({ 
@@ -8389,9 +8393,27 @@ client.on('interactionCreate', async (interaction) => {
       });
       
       // Add ownership info
+      let statusValue = `**In Virtual Account**\n**Owner:** ${interaction.user.tag}\n**Added:** <t:${Math.floor(new Date(nft.created_at).getTime() / 1000)}:R>`;
+      
+      // Check if NFT is staked and add staking pool info
+      if (nft.staked && nft.staking_pool_id) {
+        try {
+          const pool = await dbStakingPools.getStakingPool(guildId, nft.staking_pool_id);
+          if (pool) {
+            const poolName = pool.poolName || pool.collectionName;
+            const poolIdShort = pool.poolId.substring(0, 8);
+            statusValue = `**🔒 Staked in Pool**\n**Pool Name:** ${poolName}\n**Pool ID:** \`${poolIdShort}\`\n**Owner:** ${interaction.user.tag}\n**Added:** <t:${Math.floor(new Date(nft.created_at).getTime() / 1000)}:R>`;
+          }
+        } catch (poolError) {
+          console.error(`[SHOW-NFT] Error fetching staking pool info:`, poolError.message);
+          // Fallback to showing staked status without pool details
+          statusValue = `**🔒 Staked**\n**Pool ID:** \`${nft.staking_pool_id.substring(0, 8)}\`\n**Owner:** ${interaction.user.tag}\n**Added:** <t:${Math.floor(new Date(nft.created_at).getTime() / 1000)}:R>`;
+        }
+      }
+      
       embed.addFields({
         name: 'Status',
-        value: `**In Virtual Account**\n**Owner:** ${interaction.user.tag}\n**Added:** <t:${Math.floor(new Date(nft.created_at).getTime() / 1000)}:R>`,
+        value: statusValue,
         inline: false
       });
       
@@ -10661,6 +10683,406 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (commandName === 'create-staking-pool') {
+    try {
+      // Don't defer - we need to show modal immediately
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const userTag = interaction.user.tag;
+      
+      const collectionTicker = interaction.options.getString('collection_ticker');
+      const rewardTokenIdentifier = interaction.options.getString('reward_token_identifier');
+      const initialSupply = interaction.options.getString('initial_supply');
+      const rewardPerNftPerDay = interaction.options.getString('reward_per_nft_per_day');
+      const poolName = interaction.options.getString('pool_name');
+      const stakingTotalLimit = interaction.options.getInteger('staking_total_limit');
+      const stakingLimitPerUser = interaction.options.getInteger('staking_limit_per_user');
+      const durationMonths = interaction.options.getInteger('duration_months');
+      
+      // Validate collection exists in user's VA
+      const userCollections = await virtualAccountsNFT.getUserCollections(guildId, userId);
+      if (!userCollections.includes(collectionTicker)) {
+        await interaction.reply({ content: `❌ You don't have any NFTs from collection "${collectionTicker}" in your virtual account. Please deposit NFTs first.`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Fetch collection traits
+      let collectionData;
+      try {
+        collectionData = await collectionTraits.fetchCollectionTraits(collectionTicker);
+      } catch (error) {
+        await interaction.reply({ content: `❌ Error fetching collection data: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check balance first (without charging)
+      const feeInfo = await calculatePoolCreationFee();
+      const REWARD_IDENTIFIER = 'REWARD-cf6eac';
+      const feeAmountHuman = new BigNumber(feeInfo.feeAmountWei).dividedBy(new BigNumber(10).pow(feeInfo.rewardDecimals)).toString();
+      const userBalance = await virtualAccounts.getUserBalance(guildId, userId, REWARD_IDENTIFIER);
+      const balanceBN = new BigNumber(userBalance || '0');
+      const feeBN = new BigNumber(feeAmountHuman);
+      
+      if (balanceBN.isLessThan(feeBN)) {
+        const needed = feeBN.minus(balanceBN).toString();
+        const embed = new EmbedBuilder()
+          .setTitle('❌ Insufficient Balance for Pool Creation')
+          .setDescription(`Pool creation requires $${feeInfo.feeAmountUsd} worth of REWARD tokens.`)
+          .addFields({
+            name: '💵 Required Amount',
+            value: `You need **${needed} REWARD** more in your virtual account.`,
+            inline: false
+          })
+          .setColor(0xFF0000)
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        await interaction.reply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get token decimals
+      const rewardTokenDecimals = await getTokenDecimals(rewardTokenIdentifier);
+      const rewardTokenTicker = rewardTokenIdentifier.split('-')[0];
+      
+      // Convert amounts to wei
+      const initialSupplyWei = new BigNumber(initialSupply).multipliedBy(new BigNumber(10).pow(rewardTokenDecimals)).toFixed(0);
+      const rewardPerNftPerDayWei = new BigNumber(rewardPerNftPerDay).multipliedBy(new BigNumber(10).pow(rewardTokenDecimals)).toFixed(0);
+      
+      // Calculate timing
+      const createdAt = Date.now();
+      const nextRewardDistributionAt = createdAt + (24 * 60 * 60 * 1000);
+      const expiresAt = durationMonths ? createdAt + (durationMonths * 30 * 24 * 60 * 60 * 1000) : null;
+      
+      // Generate pool ID
+      const poolId = `pool_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Create pool record first (fee will be charged in modal handler)
+      const poolData = {
+        poolId: poolId,
+        creatorId: userId,
+        creatorTag: userTag,
+        poolName: poolName || null,
+        collectionTicker: collectionTicker,
+        collectionName: collectionData.collectionName,
+        collectionImageUrl: collectionData.collectionImageUrl,
+        rewardTokenIdentifier: rewardTokenIdentifier,
+        rewardTokenTicker: rewardTokenTicker,
+        rewardTokenDecimals: rewardTokenDecimals,
+        initialSupplyWei: initialSupplyWei,
+        rewardPerNftPerDayWei: rewardPerNftPerDayWei,
+        stakingTotalLimit: stakingTotalLimit || null,
+        stakingLimitPerUser: stakingLimitPerUser || null,
+        durationMonths: durationMonths || null,
+        createdAt: createdAt,
+        expiresAt: expiresAt,
+        nextRewardDistributionAt: nextRewardDistributionAt,
+        channelId: interaction.channel.id,
+        messageId: 'temp_' + Date.now(), // Temporary, will update after modal
+        threadId: null
+      };
+      
+      // Create pool record (fee will be charged after trait selection)
+      await dbStakingPools.createStakingPool(guildId, poolData);
+      
+      // Fetch collection traits for select menu
+      const collectionTraitsData = await collectionTraits.fetchCollectionTraits(collectionTicker);
+      const traitTypes = Object.keys(collectionTraitsData.traits || {});
+      
+      // Show select menu for trait type selection
+      if (traitTypes.length > 0) {
+        const traitTypeSelect = new StringSelectMenuBuilder()
+          .setCustomId(`staking-trait-type-select:${poolId}`)
+          .setPlaceholder('Select a trait type (optional)')
+          .setMinValues(0)
+          .setMaxValues(1);
+        
+        // Add "No filter" option
+        traitTypeSelect.addOptions(
+          new StringSelectMenuOptionBuilder()
+            .setLabel('No Trait Filter')
+            .setDescription('Allow all NFTs from this collection')
+            .setValue('none')
+        );
+        
+        // Add trait types (limit to 25 options)
+        const typesToShow = traitTypes.slice(0, 24);
+        for (const traitType of typesToShow) {
+          const valueCount = collectionTraitsData.traits[traitType]?.length || 0;
+          traitTypeSelect.addOptions(
+            new StringSelectMenuOptionBuilder()
+              .setLabel(traitType)
+              .setDescription(`${valueCount} value(s) available`)
+              .setValue(traitType)
+          );
+        }
+        
+        const selectRow = new ActionRowBuilder().addComponents(traitTypeSelect);
+        
+        await interaction.reply({
+          content: '**Configure Trait Filters (Optional)**\n\nSelect a trait type to filter NFTs, or choose "No Trait Filter" to allow all NFTs:',
+          components: [selectRow],
+          flags: [MessageFlags.Ephemeral]
+        });
+      } else {
+        // No traits available, skip to fee payment and embed creation
+        await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+        
+        // Use helper function to complete pool creation
+        await handlePoolCreationCompletion(guildId, userId, poolId, null, null, interaction);
+      }
+      
+    } catch (error) {
+      console.error('[STAKING] Error creating staking pool:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'update-staking-pool') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const poolId = interaction.options.getString('staking_pool');
+      
+      // Get pool and verify ownership
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await interaction.editReply({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (pool.creatorId !== userId) {
+        await interaction.editReply({ content: '❌ You are not the creator of this staking pool.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (pool.status !== 'ACTIVE') {
+        await interaction.editReply({ content: '❌ Pool must be ACTIVE to update.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const updates = {};
+      
+      // Handle topup
+      const topup = interaction.options.getString('topup_staking_pool');
+      if (topup) {
+        const tokenDecimals = pool.rewardTokenDecimals || 18;
+        const topupWei = new BigNumber(topup).multipliedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(0);
+        const newSupply = new BigNumber(pool.currentSupplyWei).plus(new BigNumber(topupWei)).toString();
+        updates.currentSupplyWei = newSupply;
+      }
+      
+      // Handle reward change
+      const newReward = interaction.options.getString('change_reward_per_nft');
+      if (newReward) {
+        const tokenDecimals = pool.rewardTokenDecimals || 18;
+        updates.rewardPerNftPerDayWei = new BigNumber(newReward).multipliedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(0);
+      }
+      
+      // Handle limit increases
+      const newTotalLimit = interaction.options.getInteger('increase_nft_pool_limit');
+      if (newTotalLimit !== null) {
+        if (pool.stakingTotalLimit && newTotalLimit <= pool.stakingTotalLimit) {
+          await interaction.editReply({ content: `❌ New total limit (${newTotalLimit}) must be higher than current limit (${pool.stakingTotalLimit}).`, flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        updates.stakingTotalLimit = newTotalLimit;
+      }
+      
+      const newUserLimit = interaction.options.getInteger('increase_user_staking_limit');
+      if (newUserLimit !== null) {
+        if (pool.stakingLimitPerUser && newUserLimit <= pool.stakingLimitPerUser) {
+          await interaction.editReply({ content: `❌ New user limit (${newUserLimit}) must be higher than current limit (${pool.stakingLimitPerUser}).`, flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        updates.stakingLimitPerUser = newUserLimit;
+      }
+      
+      // Handle trait filters
+      const traitFilterAction = interaction.options.getString('trait_filter_action');
+      if (traitFilterAction === 'add') {
+        const traitType = interaction.options.getString('trait_filter_type');
+        const traitValue = interaction.options.getString('trait_filter_value');
+        
+        if (!traitType) {
+          await interaction.editReply({ content: '❌ Trait type is required when adding a filter.', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        
+        // Fetch collection traits to validate
+        const collectionData = await collectionTraits.fetchCollectionTraits(pool.collectionTicker);
+        if (!collectionData.traits[traitType]) {
+          await interaction.editReply({ content: `❌ Trait type "${traitType}" not found in collection.`, flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        
+        if (traitValue && !collectionData.traits[traitType].includes(traitValue)) {
+          await interaction.editReply({ content: `❌ Trait value "${traitValue}" not found for trait type "${traitType}".`, flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        
+        const currentFilters = pool.traitFilters || [];
+        currentFilters.push({
+          trait_type: traitType,
+          value: traitValue || null
+        });
+        updates.traitFilters = currentFilters;
+      } else if (traitFilterAction === 'remove') {
+        const filterIndexStr = interaction.options.getString('trait_filter_index');
+        if (!filterIndexStr) {
+          await interaction.editReply({ content: '❌ Please select a filter to remove.', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        
+        const filterIndex = parseInt(filterIndexStr, 10);
+        if (isNaN(filterIndex)) {
+          await interaction.editReply({ content: '❌ Invalid filter selection.', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        
+        const currentFilters = pool.traitFilters || [];
+        if (filterIndex < 0 || filterIndex >= currentFilters.length) {
+          await interaction.editReply({ content: `❌ Invalid filter index. Pool has ${currentFilters.length} filter(s).`, flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        
+        const removedFilter = currentFilters[filterIndex];
+        const removedFilterText = removedFilter.value 
+          ? `${removedFilter.trait_type} = ${removedFilter.value}`
+          : `${removedFilter.trait_type} (any value)`;
+        
+        currentFilters.splice(filterIndex, 1);
+        updates.traitFilters = currentFilters.length > 0 ? currentFilters : null;
+        
+        // Log which filter was removed for user feedback
+        console.log(`[STAKING] Removed filter: ${removedFilterText}`);
+      } else if (traitFilterAction === 'clear') {
+        updates.traitFilters = null;
+      }
+      
+      // Apply updates
+      if (Object.keys(updates).length === 0) {
+        await interaction.editReply({ content: '❌ No updates specified.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      await dbStakingPools.updateStakingPool(guildId, poolId, updates);
+      
+      // Update embed
+      await updateStakingPoolEmbed(guildId, poolId);
+      
+      await interaction.editReply({ content: '✅ Staking pool updated successfully!', flags: [MessageFlags.Ephemeral] });
+      
+    } catch (error) {
+      console.error('[STAKING] Error updating staking pool:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'close-staking-pool') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const poolId = interaction.options.getString('staking_pool_name');
+      
+      // Get pool and verify ownership
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await interaction.editReply({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (pool.creatorId !== userId) {
+        await interaction.editReply({ content: '❌ You are not the creator of this staking pool.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get all staked NFTs
+      const stakedNFTs = await dbStakingPools.getAllStakedNFTs(guildId, poolId);
+      
+      // Return NFTs to users' VAs (mark as unstaked)
+      let returnedCount = 0;
+      let failedCount = 0;
+      for (const nft of stakedNFTs) {
+        try {
+          // Mark NFT as unstaked in VA (it's already there, just marked as staked)
+          const supabase = require('./supabase-client');
+          const { error: updateError } = await supabase
+            .from('virtual_account_nft_balances')
+            .update({
+              staked: false,
+              staking_pool_id: null,
+              updated_at: new Date().toISOString()
+            })
+            .eq('guild_id', guildId)
+            .eq('user_id', nft.user_id)
+            .eq('collection', nft.collection)
+            .eq('nonce', nft.nonce);
+          
+          if (updateError) {
+            throw new Error(`Failed to mark NFT as unstaked: ${updateError.message}`);
+          }
+          
+          const transactionId = `unstake_close_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          await virtualAccountsNFT.addNFTTransaction(guildId, nft.user_id, {
+            id: transactionId,
+            type: 'unstake_return',
+            collection: nft.collection,
+            identifier: nft.identifier,
+            nonce: nft.nonce,
+            nft_name: nft.nft_name,
+            timestamp: Date.now(),
+            description: `NFT returned due to pool closure: ${pool.poolName || pool.collectionName}`
+          });
+          
+          returnedCount++;
+        } catch (nftError) {
+          console.error(`[STAKING] Error returning NFT ${nft.identifier}:`, nftError);
+          failedCount++;
+        }
+      }
+      
+      // Update pool status
+      await dbStakingPools.updateStakingPool(guildId, poolId, {
+        status: 'CLOSED'
+      });
+      
+      // Update embed
+      await updateStakingPoolEmbed(guildId, poolId);
+      
+      // Post closure notification in thread
+      if (pool.threadId) {
+        try {
+          const channel = await client.channels.fetch(pool.channelId);
+          if (channel) {
+            const thread = await channel.threads.cache.get(pool.threadId) || await channel.threads.fetch(pool.threadId);
+            if (thread) {
+              await thread.send(`🔴 **Pool Closed**\n\nThe staking pool has been closed by the creator.\n\nAll ${returnedCount} staked NFT(s) have been returned to their owners' virtual accounts.`);
+            }
+          }
+        } catch (threadError) {
+          console.error('[STAKING] Error posting closure notification:', threadError.message);
+        }
+      }
+      
+      await interaction.editReply({ content: `✅ Pool closed successfully. ${returnedCount} NFT(s) returned to owners.`, flags: [MessageFlags.Ephemeral] });
+      
+    } catch (error) {
+      console.error('[STAKING] Error closing staking pool:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
   }
 });
 
@@ -12646,22 +13068,37 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Get user's NFTs in selected collection
-      const nfts = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, selectedCollection);
+      // Get user's NFTs in selected collection (include staked NFTs for viewing)
+      const nfts = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, selectedCollection, true); // includeStaked = true
+      
+      if (!nfts || nfts.length === 0) {
+        await safeRespond(interaction, [{
+          name: 'No NFTs found in this collection',
+          value: 'none'
+        }]);
+        return;
+      }
       
       // Filter by focused value (match by name or identifier)
-      const filtered = nfts.filter(nft => {
-        const name = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
-        const identifier = `${selectedCollection}#${nft.nonce}`;
-        return name.toLowerCase().includes(focusedValue.toLowerCase()) ||
-               identifier.toLowerCase().includes(focusedValue.toLowerCase());
-      });
+      // If focusedValue is empty, show all NFTs
+      const filtered = focusedValue 
+        ? nfts.filter(nft => {
+            const name = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
+            const identifier = `${selectedCollection}#${nft.nonce}`;
+            return name.toLowerCase().includes(focusedValue.toLowerCase()) ||
+                   identifier.toLowerCase().includes(focusedValue.toLowerCase());
+          })
+        : nfts; // Show all if no search term
       
       await safeRespond(interaction,
-        filtered.slice(0, 25).map(nft => ({
-          name: `${nft.nft_name || `${selectedCollection}#${nft.nonce}`} (${selectedCollection}#${nft.nonce})`,
-          value: nft.nft_name || `${selectedCollection}#${nft.nonce}`
-        }))
+        filtered.slice(0, 25).map(nft => {
+          const displayName = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
+          const stakedLabel = nft.staked ? ' 🔒' : '';
+          return {
+            name: `${displayName}${stakedLabel} (${selectedCollection}#${nft.nonce})`,
+            value: nft.nft_name || `${selectedCollection}#${nft.nonce}`
+          };
+        })
       );
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in show-my-nft nft-name autocomplete:', error);
@@ -12870,6 +13307,337 @@ client.on('interactionCreate', async (interaction) => {
       await safeRespond(interaction, choices);
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in virtual-house-topup token autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+  
+  // STAKING POOL AUTOCOMPLETE HANDLERS
+  if (interaction.commandName === 'create-staking-pool' && interaction.options.getFocused(true).name === 'collection_ticker') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      // Get user's collections from VA
+      const userCollections = await virtualAccountsNFT.getUserCollections(guildId, userId);
+      
+      const filtered = userCollections.filter(collection =>
+        collection.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(collection => ({ name: collection, value: collection }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in create-staking-pool collection autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+  
+  if (interaction.commandName === 'create-staking-pool' && interaction.options.getFocused(true).name === 'reward_token_identifier') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      
+      // Get Community Fund project and its supported tokens
+      const fundProject = await getCommunityFundProject(guildId);
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      
+      let supportedTokens = [];
+      if (fundProject && projects[projectName]) {
+        const communityFundProject = projects[projectName];
+        // Handle both string (comma-separated) and array formats
+        if (communityFundProject.supportedTokens) {
+          if (Array.isArray(communityFundProject.supportedTokens)) {
+            supportedTokens = communityFundProject.supportedTokens;
+          } else if (typeof communityFundProject.supportedTokens === 'string') {
+            supportedTokens = communityFundProject.supportedTokens.split(',').map(t => t.trim()).filter(t => t.length > 0);
+          }
+        }
+      }
+      
+      if (supportedTokens.length === 0) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Get token metadata for display
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      
+      // Filter tokens that match focused value
+      const choices = supportedTokens
+        .filter(tokenIdentifier => {
+          const matches = tokenIdentifier.toLowerCase().includes(focusedValue.toLowerCase());
+          if (!matches) return false;
+          
+          // Get token metadata for display name
+          const metadata = tokenMetadata[tokenIdentifier];
+          return metadata !== undefined; // Only include tokens with metadata
+        })
+        .map(tokenIdentifier => {
+          const metadata = tokenMetadata[tokenIdentifier];
+          const displayName = metadata?.ticker || tokenIdentifier.split('-')[0];
+          return {
+            name: `${displayName} (${tokenIdentifier})`,
+            value: tokenIdentifier
+          };
+        })
+        .slice(0, 25);
+      
+      await safeRespond(interaction, choices);
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in create-staking-pool reward_token_identifier autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+  
+  if (interaction.commandName === 'update-staking-pool' && interaction.options.getFocused(true).name === 'staking_pool') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      // Get pools created by user
+      const pools = await dbStakingPools.getStakingPoolsByCreator(guildId, userId);
+      
+      const filtered = pools.filter(pool => {
+        const poolName = pool.poolName || pool.collectionName;
+        return poolName.toLowerCase().includes(focusedValue.toLowerCase()) ||
+               pool.poolId.toLowerCase().includes(focusedValue.toLowerCase());
+      });
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(pool => ({
+          name: `${pool.poolName || pool.collectionName} (${pool.poolId.substring(0, 8)})`,
+          value: pool.poolId
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in update-staking-pool autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+  
+  if (interaction.commandName === 'update-staking-pool' && interaction.options.getFocused(true).name === 'trait_filter_index') {
+    // Autocomplete for trait filter removal - show current filters as selectable options
+    try {
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const poolId = interaction.options.getString('staking_pool');
+      
+      if (!poolId) {
+        await safeRespond(interaction, [{
+          name: 'Please select a staking pool first',
+          value: '0'
+        }]);
+        return;
+      }
+      
+      // Get pool and verify ownership
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      if (pool.creatorId !== userId) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Get current filters
+      const filters = pool.traitFilters || [];
+      if (filters.length === 0) {
+        await safeRespond(interaction, [{
+          name: 'No filters to remove',
+          value: '0'
+        }]);
+        return;
+      }
+      
+      // Create user-friendly filter list
+      const choices = filters.map((filter, index) => {
+        const filterText = filter.value 
+          ? `${filter.trait_type} = ${filter.value}`
+          : `${filter.trait_type} (any value)`;
+        return {
+          name: `Filter ${index + 1}: ${filterText}`,
+          value: index.toString() // Store index as string for autocomplete
+        };
+      });
+      
+      await safeRespond(interaction, choices);
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in trait_filter_index autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+  
+  if (interaction.commandName === 'update-staking-pool' && interaction.options.getFocused(true).name === 'trait_filter_type') {
+    // Autocomplete for trait filter type - show available trait types for the pool's collection
+    try {
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const poolId = interaction.options.getString('staking_pool');
+      const focusedValue = interaction.options.getFocused();
+      
+      if (!poolId) {
+        await safeRespond(interaction, [{
+          name: 'Please select a staking pool first',
+          value: 'none'
+        }]);
+        return;
+      }
+      
+      // Get pool and verify ownership
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      if (pool.creatorId !== userId) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Fetch collection traits
+      const collectionData = await collectionTraits.fetchCollectionTraits(pool.collectionTicker);
+      const traitTypes = Object.keys(collectionData.traits || {});
+      
+      if (traitTypes.length === 0) {
+        await safeRespond(interaction, [{
+          name: 'No trait types available for this collection',
+          value: 'none'
+        }]);
+        return;
+      }
+      
+      // Filter by focused value and create choices
+      const filtered = focusedValue
+        ? traitTypes.filter(type => type.toLowerCase().includes(focusedValue.toLowerCase()))
+        : traitTypes;
+      
+      const choices = filtered.slice(0, 25).map(traitType => {
+        const valueCount = collectionData.traits[traitType]?.length || 0;
+        return {
+          name: `${traitType} (${valueCount} value${valueCount !== 1 ? 's' : ''})`,
+          value: traitType
+        };
+      });
+      
+      await safeRespond(interaction, choices);
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in trait_filter_type autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+  
+  if (interaction.commandName === 'update-staking-pool' && interaction.options.getFocused(true).name === 'trait_filter_value') {
+    // Autocomplete for trait filter value - show available values for the selected trait type
+    try {
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const poolId = interaction.options.getString('staking_pool');
+      const traitType = interaction.options.getString('trait_filter_type');
+      const focusedValue = interaction.options.getFocused();
+      
+      if (!poolId) {
+        await safeRespond(interaction, [{
+          name: 'Please select a staking pool first',
+          value: 'none'
+        }]);
+        return;
+      }
+      
+      if (!traitType) {
+        await safeRespond(interaction, [{
+          name: 'Please select a trait type first',
+          value: 'none'
+        }]);
+        return;
+      }
+      
+      // Get pool and verify ownership
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      if (pool.creatorId !== userId) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Fetch collection traits
+      const collectionData = await collectionTraits.fetchCollectionTraits(pool.collectionTicker);
+      const traitValues = collectionData.traits[traitType] || [];
+      
+      if (traitValues.length === 0) {
+        await safeRespond(interaction, [{
+          name: `No values available for trait type "${traitType}"`,
+          value: 'none'
+        }]);
+        return;
+      }
+      
+      // Add "Any value" option first
+      const choices = [{
+        name: 'Any Value (accept all values for this trait type)',
+        value: ''
+      }];
+      
+      // Filter by focused value and add trait values
+      const filtered = focusedValue
+        ? traitValues.filter(value => value.toLowerCase().includes(focusedValue.toLowerCase()))
+        : traitValues;
+      
+      filtered.slice(0, 24).forEach(traitValue => {
+        choices.push({
+          name: traitValue,
+          value: traitValue
+        });
+      });
+      
+      await safeRespond(interaction, choices);
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in trait_filter_value autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+  
+  if (interaction.commandName === 'close-staking-pool' && interaction.options.getFocused(true).name === 'staking_pool_name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      // Get pools created by user
+      const pools = await dbStakingPools.getStakingPoolsByCreator(guildId, userId);
+      
+      const filtered = pools.filter(pool => {
+        const poolName = pool.poolName || pool.collectionName;
+        return poolName.toLowerCase().includes(focusedValue.toLowerCase()) ||
+               pool.poolId.toLowerCase().includes(focusedValue.toLowerCase());
+      });
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(pool => ({
+          name: `${pool.poolName || pool.collectionName} (${pool.poolId.substring(0, 8)})`,
+          value: pool.poolId
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in close-staking-pool autocomplete:', error.message);
       await safeRespond(interaction, []);
     }
     return;
@@ -14320,6 +15088,840 @@ client.on('interactionCreate', async (interaction) => {
         }
       } catch (replyError) {
         console.error('[NFT-MARKETPLACE] Could not send error message (interaction already handled):', replyError.message);
+      }
+    }
+  } else if (customId.startsWith('staking-stake:')) {
+    // Stake button handler
+    try {
+      const poolId = customId.split(':')[1];
+      const userId = interaction.user.id;
+      
+      // Check rate limit
+      const rateLimit = await dbStakingPools.checkRateLimit(guildId, poolId, userId, 'stake');
+      if (!rateLimit.allowed) {
+        await interaction.reply({ 
+          content: `⏳ Rate limit: Please wait ${rateLimit.waitSeconds} seconds before staking again.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Get pool
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await interaction.reply({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (pool.status !== 'ACTIVE' && pool.status !== 'PAUSED') {
+        await interaction.reply({ content: '❌ This pool is not accepting new stakes.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get user's available NFTs from VA for this collection
+      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, pool.collectionTicker);
+      
+      if (!userNFTs || userNFTs.length === 0) {
+        await interaction.reply({ content: `❌ You don't have any NFTs from collection "${pool.collectionTicker}" in your virtual account.`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Create select menu
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId(`staking-stake-select:${poolId}`)
+        .setPlaceholder('Select NFTs to stake')
+        .setMinValues(1)
+        .setMaxValues(Math.min(25, userNFTs.length + 1)); // +1 for "Stake All" option
+      
+      // Add "Stake All" option
+      selectMenu.addOptions(
+        new StringSelectMenuOptionBuilder()
+          .setLabel('Stake All')
+          .setDescription(`Stake all ${userNFTs.length} NFT(s)`)
+          .setValue('all')
+      );
+      
+      // Add individual NFT options (limit to 24 to fit with "Stake All")
+      const nftsToShow = userNFTs.slice(0, 24);
+      for (const nft of nftsToShow) {
+        const displayName = nft.nft_name || `${pool.collectionTicker}#${nft.nonce}`;
+        const value = `${nft.collection}-${nft.nonce}`;
+        selectMenu.addOptions(
+          new StringSelectMenuOptionBuilder()
+            .setLabel(displayName.length > 100 ? displayName.substring(0, 97) + '...' : displayName)
+            .setDescription(`Nonce: ${nft.nonce}`)
+            .setValue(value)
+        );
+      }
+      
+      const selectRow = new ActionRowBuilder().addComponents(selectMenu);
+      
+      await interaction.reply({ 
+        content: 'Select NFTs to stake:', 
+        components: [selectRow],
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+    } catch (error) {
+      console.error('[STAKING] Error handling stake button:', error);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('staking-unstake:')) {
+    // Unstake button handler
+    try {
+      const poolId = customId.split(':')[1];
+      const userId = interaction.user.id;
+      
+      // Check rate limit
+      const rateLimit = await dbStakingPools.checkRateLimit(guildId, poolId, userId, 'unstake');
+      if (!rateLimit.allowed) {
+        await interaction.reply({ 
+          content: `⏳ Rate limit: Please wait ${rateLimit.waitSeconds} seconds before unstaking again.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Get pool
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await interaction.reply({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get user's staked NFTs
+      const stakedNFTs = await dbStakingPools.getUserStakedNFTs(guildId, poolId, userId);
+      
+      if (!stakedNFTs || stakedNFTs.length === 0) {
+        await interaction.reply({ content: '❌ You don\'t have any NFTs staked in this pool.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Create select menu
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId(`staking-unstake-select:${poolId}`)
+        .setPlaceholder('Select NFTs to unstake')
+        .setMinValues(1)
+        .setMaxValues(Math.min(25, stakedNFTs.length + 1));
+      
+      // Add "Unstake All" option
+      selectMenu.addOptions(
+        new StringSelectMenuOptionBuilder()
+          .setLabel('Unstake All')
+          .setDescription(`Unstake all ${stakedNFTs.length} NFT(s)`)
+          .setValue('all')
+      );
+      
+      // Add individual NFT options
+      const nftsToShow = stakedNFTs.slice(0, 24);
+      for (const nft of nftsToShow) {
+        const displayName = nft.nft_name || `${pool.collectionTicker}#${nft.nonce}`;
+        const value = `${nft.collection}-${nft.nonce}`;
+        
+        selectMenu.addOptions(
+          new StringSelectMenuOptionBuilder()
+            .setLabel(displayName.length > 100 ? displayName.substring(0, 97) + '...' : displayName)
+            .setDescription(`Nonce: ${nft.nonce}`)
+            .setValue(value)
+        );
+      }
+      
+      const selectRow = new ActionRowBuilder().addComponents(selectMenu);
+      
+      await interaction.reply({ 
+        content: 'Select NFTs to unstake:', 
+        components: [selectRow],
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+    } catch (error) {
+      console.error('[STAKING] Error handling unstake button:', error);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('staking-claim-rewards:')) {
+    // Claim rewards button handler
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const poolId = customId.split(':')[1];
+      const userId = interaction.user.id;
+      
+      // Get user's unclaimed rewards
+      const unclaimedRewards = await dbStakingPools.getUserUnclaimedRewards(guildId, poolId, userId);
+      
+      if (!unclaimedRewards || unclaimedRewards.length === 0) {
+        await interaction.editReply({ content: '❌ You don\'t have any unclaimed rewards for this pool.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get pool
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await interaction.editReply({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Calculate total reward amount
+      let totalRewardWei = new BigNumber('0');
+      for (const reward of unclaimedRewards) {
+        totalRewardWei = totalRewardWei.plus(new BigNumber(reward.reward_amount_wei));
+      }
+      
+      // Transfer to user's VA
+      const tokenDecimals = pool.rewardTokenDecimals || 18;
+      const totalRewardHuman = totalRewardWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+      
+      await virtualAccounts.updateAccountBalance(guildId, userId, pool.rewardTokenIdentifier, totalRewardWei.toString());
+      
+      // Mark all as claimed
+      for (const reward of unclaimedRewards) {
+        await dbStakingPools.claimUserReward(guildId, poolId, userId, reward.distribution_id);
+      }
+      
+      // Create transaction records
+      const transactionId = `staking_claim_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const userBalance = await virtualAccounts.getUserBalance(guildId, userId, pool.rewardTokenIdentifier);
+      await virtualAccounts.addTransaction(guildId, userId, {
+        id: transactionId,
+        type: 'staking_reward',
+        token: pool.rewardTokenIdentifier,
+        amount: totalRewardWei.toString(),
+        balanceBefore: new BigNumber(userBalance).minus(totalRewardWei).toString(),
+        balanceAfter: userBalance,
+        timestamp: Date.now(),
+        description: `Claimed staking rewards from ${pool.poolName || pool.collectionName}`
+      });
+      
+      // Get USD value
+      const tokenPriceUsd = await getTokenPriceUsd(pool.rewardTokenIdentifier);
+      const totalRewardUsd = tokenPriceUsd > 0 
+        ? new BigNumber(totalRewardHuman).multipliedBy(tokenPriceUsd).toFixed(2)
+        : null;
+      
+      const rewardUsdText = totalRewardUsd ? ` (≈ $${totalRewardUsd})` : '';
+      
+      await interaction.editReply({ 
+        content: `✅ **Rewards Claimed!**\n\nYou received **${totalRewardHuman} ${pool.rewardTokenTicker}${rewardUsdText}** from ${unclaimedRewards.length} distribution(s).`, 
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+    } catch (error) {
+      console.error('[STAKING] Error claiming rewards:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('staking-my-nfts:')) {
+    // My Staked NFTs button handler with pagination
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const parts = customId.split(':');
+      const poolId = parts[1];
+      const page = parts[2] ? parseInt(parts[2], 10) : 1; // Default to page 1
+      const userId = interaction.user.id;
+      const guildId = interaction.guildId;
+      
+      // Get pool
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await interaction.editReply({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get user's staked NFTs
+      const userStakedNFTs = await dbStakingPools.getUserStakedNFTs(guildId, poolId, userId);
+      
+      if (!userStakedNFTs || userStakedNFTs.length === 0) {
+        await interaction.editReply({ 
+          content: `❌ **No staked NFTs found!**\n\nYou don't have any NFTs staked in this pool.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Pagination settings
+      const nftsPerPage = 20; // Show 20 NFTs per page (leaving room for pagination buttons)
+      const totalPages = Math.ceil(userStakedNFTs.length / nftsPerPage);
+      const currentPage = Math.max(1, Math.min(page, totalPages)); // Clamp page between 1 and totalPages
+      const startIndex = (currentPage - 1) * nftsPerPage;
+      const endIndex = startIndex + nftsPerPage;
+      const nftsToShow = userStakedNFTs.slice(startIndex, endIndex);
+      
+      // Create embed
+      const embed = new EmbedBuilder()
+        .setTitle(`🔒 My Staked NFTs - ${pool.poolName || pool.collectionName}`)
+        .setDescription(`You have **${userStakedNFTs.length} NFT(s)** staked in this pool`)
+        .setColor(0x00FF00)
+        .setFooter({ 
+          text: `Page ${currentPage}/${totalPages} • Pool: ${pool.poolId.substring(0, 8)}`, 
+          iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' 
+        })
+        .setTimestamp();
+      
+      // Group NFTs into fields (each field can hold multiple NFTs)
+      // Discord field value limit is 1024 characters, so we'll put ~5-6 NFTs per field
+      const nftsPerField = 5;
+      let currentFieldNFTs = [];
+      let fieldIndex = 0;
+      
+      for (let i = 0; i < nftsToShow.length; i++) {
+        const nft = nftsToShow[i];
+        const nftName = nft.nft_name || `${pool.collectionTicker}#${nft.nonce}`;
+        const nftDisplay = `${i + startIndex + 1}. ${nftName} (Nonce: ${nft.nonce})`;
+        currentFieldNFTs.push(nftDisplay);
+        
+        // If we've filled a field or reached the end, add it to embed
+        if (currentFieldNFTs.length >= nftsPerField || i === nftsToShow.length - 1) {
+          const fieldValue = currentFieldNFTs.join('\n');
+          const fieldStartNum = startIndex + fieldIndex * nftsPerField + 1;
+          const fieldEndNum = startIndex + i + 1;
+          embed.addFields({
+            name: `NFTs ${fieldStartNum}-${fieldEndNum}`,
+            value: fieldValue.length > 1024 ? fieldValue.substring(0, 1021) + '...' : fieldValue,
+            inline: false
+          });
+          currentFieldNFTs = [];
+          fieldIndex++;
+        }
+      }
+      
+      // Create pagination buttons
+      const components = [];
+      if (totalPages > 1) {
+        const buttonRow = new ActionRowBuilder();
+        
+        // Previous button
+        const prevButton = new ButtonBuilder()
+          .setCustomId(`staking-my-nfts:${poolId}:${currentPage - 1}`)
+          .setLabel('◀ Previous')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === 1);
+        
+        // Page indicator (non-clickable)
+        const pageButton = new ButtonBuilder()
+          .setCustomId(`staking-my-nfts-page:${poolId}:${currentPage}`)
+          .setLabel(`Page ${currentPage}/${totalPages}`)
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+        
+        // Next button
+        const nextButton = new ButtonBuilder()
+          .setCustomId(`staking-my-nfts:${poolId}:${currentPage + 1}`)
+          .setLabel('Next ▶')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === totalPages);
+        
+        buttonRow.addComponents(prevButton, pageButton, nextButton);
+        components.push(buttonRow);
+      }
+      
+      await interaction.editReply({ embeds: [embed], components });
+      
+    } catch (error) {
+      console.error('[STAKING] Error handling my staked NFTs:', error);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  }
+});
+
+// Select menu interaction handler for staking pools
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isStringSelectMenu()) return;
+  
+  const { customId } = interaction;
+  const guildId = interaction.guildId;
+  const userId = interaction.user.id;
+  
+  if (customId.startsWith('staking-trait-type-select:')) {
+    // Trait type selection handler
+    try {
+      await interaction.deferUpdate();
+      
+      const poolId = customId.split(':')[1];
+      const selectedValue = interaction.values[0];
+      
+      // Get pool
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await interaction.followUp({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (selectedValue === 'none') {
+        // No trait filter - proceed to fee payment and embed creation
+        await handlePoolCreationCompletion(guildId, userId, poolId, null, null, interaction);
+        return;
+      }
+      
+      // Fetch collection traits to get values for selected trait type
+      const collectionTraitsData = await collectionTraits.fetchCollectionTraits(pool.collectionTicker);
+      const traitValues = collectionTraitsData.traits[selectedValue] || [];
+      
+      // Show select menu for trait value
+      const traitValueSelect = new StringSelectMenuBuilder()
+        .setCustomId(`staking-trait-value-select:${poolId}:${selectedValue}`)
+        .setPlaceholder(`Select a value for "${selectedValue}" (optional)`)
+        .setMinValues(0)
+        .setMaxValues(1);
+      
+      // Add "Any value" option
+      traitValueSelect.addOptions(
+        new StringSelectMenuOptionBuilder()
+          .setLabel('Any Value')
+          .setDescription(`Accept any value for ${selectedValue}`)
+          .setValue('any')
+      );
+      
+      // Add trait values (limit to 24 options)
+      const valuesToShow = traitValues.slice(0, 24);
+      for (const traitValue of valuesToShow) {
+        traitValueSelect.addOptions(
+          new StringSelectMenuOptionBuilder()
+            .setLabel(traitValue)
+            .setDescription(`Filter by ${selectedValue}: ${traitValue}`)
+            .setValue(traitValue)
+        );
+      }
+      
+      const selectRow = new ActionRowBuilder().addComponents(traitValueSelect);
+      
+      await interaction.followUp({
+        content: `**Trait Type Selected: ${selectedValue}**\n\nSelect a specific value, or choose "Any Value" to accept all values for this trait type:`,
+        components: [selectRow],
+        flags: [MessageFlags.Ephemeral]
+      });
+      
+    } catch (error) {
+      console.error('[STAKING] Error handling trait type selection:', error);
+      if (interaction.deferred) {
+        await interaction.followUp({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('staking-trait-value-select:')) {
+    // Trait value selection handler
+    try {
+      await interaction.deferUpdate();
+      
+      const parts = customId.split(':');
+      const poolId = parts[1];
+      const traitType = parts[2];
+      const selectedValue = interaction.values[0];
+      
+      // Get pool
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await interaction.followUp({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Determine trait value (null if "any", otherwise the selected value)
+      const traitValue = selectedValue === 'any' ? null : selectedValue;
+      
+      // Proceed to fee payment and embed creation
+      await handlePoolCreationCompletion(guildId, userId, poolId, traitType, traitValue, interaction);
+      
+    } catch (error) {
+      console.error('[STAKING] Error handling trait value selection:', error);
+      if (interaction.deferred) {
+        await interaction.followUp({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('staking-stake-select:')) {
+    // Stake select menu handler
+    try {
+      await interaction.deferUpdate();
+      
+      const poolId = customId.split(':')[1];
+      const selections = interaction.values;
+      
+      // Get pool
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await interaction.followUp({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (pool.status !== 'ACTIVE' && pool.status !== 'PAUSED') {
+        await interaction.followUp({ content: '❌ This pool is not accepting new stakes.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get user's NFTs from VA
+      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, pool.collectionTicker);
+      
+      // Determine which NFTs to stake
+      let nftsToStake = [];
+      if (selections.includes('all')) {
+        // Stake all
+        nftsToStake = userNFTs;
+      } else {
+        // Stake selected NFTs
+        for (const selection of selections) {
+          // Parse selection: format is "COLLECTION-NONCE" where collection can contain dashes
+          // Example: "BASTURDS-2a4c51-2620" -> collection="BASTURDS-2a4c51", nonce=2620
+          const parts = selection.split('-');
+          if (parts.length < 2) {
+            console.warn(`[STAKING] Invalid selection format: ${selection}`);
+            continue;
+          }
+          
+          // Nonce is always the last part
+          const nonceStr = parts[parts.length - 1];
+          // Collection is everything before the last part
+          const collection = parts.slice(0, -1).join('-');
+          
+          const nonce = parseInt(nonceStr, 10);
+          if (isNaN(nonce)) {
+            console.warn(`[STAKING] Invalid nonce in selection: ${selection} (parsed nonce: ${nonceStr})`);
+            continue;
+          }
+          
+          const nft = userNFTs.find(n => n.collection === collection && n.nonce === nonce);
+          if (nft) {
+            nftsToStake.push(nft);
+          } else {
+            console.warn(`[STAKING] NFT not found: collection=${collection}, nonce=${nonce} (selection: ${selection})`);
+            console.warn(`[STAKING] Available NFTs:`, userNFTs.map(n => `${n.collection}-${n.nonce}`).slice(0, 5));
+          }
+        }
+      }
+      
+      if (nftsToStake.length === 0) {
+        await interaction.followUp({ content: '❌ No valid NFTs selected.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check pool limits
+      const currentStaked = await dbStakingPools.getAllStakedNFTs(guildId, poolId);
+      const currentUserStaked = await dbStakingPools.getUserStakedNFTs(guildId, poolId, userId);
+      
+      if (pool.stakingTotalLimit && (currentStaked.length + nftsToStake.length) > pool.stakingTotalLimit) {
+        const available = pool.stakingTotalLimit - currentStaked.length;
+        await interaction.followUp({ 
+          content: `❌ Pool limit reached. Only ${available} more NFT(s) can be staked.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      if (pool.stakingLimitPerUser && (currentUserStaked.length + nftsToStake.length) > pool.stakingLimitPerUser) {
+        const available = pool.stakingLimitPerUser - currentUserStaked.length;
+        await interaction.followUp({ 
+          content: `❌ Your staking limit reached. You can only stake ${available} more NFT(s).`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Validate traits if filters exist
+      let validNFTs = [];
+      let invalidNFTs = [];
+      
+      if (pool.traitFilters && pool.traitFilters.length > 0) {
+        console.log(`[STAKING] Validating ${nftsToStake.length} NFT(s) against trait filters:`, pool.traitFilters);
+        const validationResult = await traitValidator.validateMultipleNFTs(
+          guildId,
+          userId,
+          nftsToStake.map(nft => ({ 
+            collection: nft.collection, 
+            nonce: nft.nonce,
+            identifier: nft.identifier // Use stored identifier from database (same as show-my-nft)
+          })),
+          pool.traitFilters
+        );
+        
+        validNFTs = validationResult.validNFTs;
+        invalidNFTs = validationResult.invalidNFTs;
+        
+        console.log(`[STAKING] Validation result: ${validNFTs.length} valid, ${invalidNFTs.length} invalid`);
+        if (invalidNFTs.length > 0) {
+          console.log(`[STAKING] Invalid NFT reasons:`, invalidNFTs.map(inv => `${inv.nft.collection}-${inv.nft.nonce}: ${inv.reason}`));
+        }
+      } else {
+        validNFTs = nftsToStake.map(nft => ({ collection: nft.collection, nonce: nft.nonce }));
+      }
+      
+      if (validNFTs.length === 0) {
+        const reasons = invalidNFTs.length > 0 
+          ? invalidNFTs.map(inv => `• ${inv.nft.collection}-${inv.nft.nonce}: ${inv.reason}`).join('\n')
+          : 'All NFTs failed validation';
+        await interaction.followUp({ 
+          content: `❌ **No NFTs meet the pool requirements:**\n\n${reasons}\n\n💡 **Tip:** Make sure your NFTs have the required traits. If metadata is missing, try again in a few moments.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Stake valid NFTs
+      let stakedCount = 0;
+      let failedCount = 0;
+      
+      console.log(`[STAKING] Attempting to stake ${validNFTs.length} valid NFT(s)`);
+      
+      for (const nftData of validNFTs) {
+        const nft = userNFTs.find(n => n.collection === nftData.collection && n.nonce === nftData.nonce);
+        if (!nft) {
+          console.warn(`[STAKING] NFT ${nftData.collection}-${nftData.nonce} not found in user's VA`);
+          failedCount++;
+          continue;
+        }
+        
+        try {
+          console.log(`[STAKING] Staking NFT ${nft.identifier}...`);
+          
+          // Mark NFT as staked in VA (don't remove it - safer approach)
+          const supabase = require('./supabase-client');
+          const { error: updateError } = await supabase
+            .from('virtual_account_nft_balances')
+            .update({
+              staked: true,
+              staking_pool_id: poolId,
+              updated_at: new Date().toISOString()
+            })
+            .eq('guild_id', guildId)
+            .eq('user_id', userId)
+            .eq('collection', nft.collection)
+            .eq('nonce', nft.nonce);
+          
+          if (updateError) {
+            throw new Error(`Failed to mark NFT as staked: ${updateError.message}`);
+          }
+          
+          // Add to pool (no lock period)
+          await dbStakingPools.stakeNFT(guildId, poolId, userId, {
+            collection: nft.collection,
+            identifier: nft.identifier,
+            nonce: nft.nonce,
+            nftName: nft.nft_name,
+            nftImageUrl: nft.nft_image_url,
+            lockUntil: null // No lock period
+          });
+          
+          // Create transaction record
+          const transactionId = `stake_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
+            id: transactionId,
+            type: 'stake',
+            collection: nft.collection,
+            identifier: nft.identifier,
+            nonce: nft.nonce,
+            nft_name: nft.nft_name,
+            timestamp: Date.now(),
+            description: `Staked in pool: ${pool.poolName || pool.collectionName}`
+          });
+          
+          stakedCount++;
+          console.log(`[STAKING] Successfully staked NFT ${nft.identifier}`);
+        } catch (stakeError) {
+          console.error(`[STAKING] Error staking NFT ${nft.identifier}:`, stakeError);
+          // If staking failed, unmark the NFT as staked (rollback)
+          try {
+            const supabase = require('./supabase-client');
+            await supabase
+              .from('virtual_account_nft_balances')
+              .update({
+                staked: false,
+                staking_pool_id: null,
+                updated_at: new Date().toISOString()
+              })
+              .eq('guild_id', guildId)
+              .eq('user_id', userId)
+              .eq('collection', nft.collection)
+              .eq('nonce', nft.nonce);
+          } catch (rollbackError) {
+            console.error(`[STAKING] Failed to rollback staking status for ${nft.identifier}:`, rollbackError);
+          }
+          failedCount++;
+        }
+      }
+      
+      console.log(`[STAKING] Staking complete: ${stakedCount} staked, ${failedCount} failed`);
+      
+      // Refresh pool statistics to ensure we have latest counts
+      if (stakedCount > 0) {
+        await dbStakingPools.updatePoolStatistics(guildId, poolId);
+      }
+      
+      // Update embed
+      await updateStakingPoolEmbed(guildId, poolId);
+      
+      // Show result
+      let resultMessage = '';
+      if (stakedCount > 0) {
+        resultMessage = `✅ **Staked ${stakedCount} NFT(s) successfully!**`;
+        if (invalidNFTs.length > 0) {
+          resultMessage += `\n\n⚠️ ${invalidNFTs.length} NFT(s) were skipped (didn't meet trait requirements).`;
+        }
+        if (failedCount > 0) {
+          resultMessage += `\n\n❌ ${failedCount} NFT(s) failed to stake (check logs for details).`;
+        }
+      } else {
+        resultMessage = `❌ **Failed to stake NFTs.**\n\n`;
+        if (invalidNFTs.length > 0) {
+          resultMessage += `⚠️ ${invalidNFTs.length} NFT(s) didn't meet trait requirements.\n`;
+        }
+        if (failedCount > 0) {
+          resultMessage += `❌ ${failedCount} NFT(s) failed during staking process.\n`;
+        }
+        resultMessage += `\n💡 **Tip:** Check that your NFTs are still in your virtual account and try again.`;
+      }
+      
+      await interaction.followUp({ content: resultMessage, flags: [MessageFlags.Ephemeral] });
+      
+    } catch (error) {
+      console.error('[STAKING] Error handling stake select menu:', error);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('staking-unstake-select:')) {
+    // Unstake select menu handler
+    try {
+      await interaction.deferUpdate();
+      
+      const poolId = customId.split(':')[1];
+      const selections = interaction.values;
+      
+      // Get pool
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+      if (!pool) {
+        await interaction.followUp({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get user's staked NFTs
+      const stakedNFTs = await dbStakingPools.getUserStakedNFTs(guildId, poolId, userId);
+      
+      // Determine which NFTs to unstake
+      let nftsToUnstake = [];
+      if (selections.includes('all')) {
+        // Unstake all
+        nftsToUnstake = stakedNFTs;
+      } else {
+        // Unstake selected NFTs
+        for (const selection of selections) {
+          // Parse selection: format is "COLLECTION-NONCE" where collection can contain dashes
+          const parts = selection.split('-');
+          if (parts.length < 2) {
+            console.warn(`[STAKING] Invalid selection format: ${selection}`);
+            continue;
+          }
+          
+          // Nonce is always the last part
+          const nonceStr = parts[parts.length - 1];
+          // Collection is everything before the last part
+          const collection = parts.slice(0, -1).join('-');
+          
+          const nonce = parseInt(nonceStr, 10);
+          if (isNaN(nonce)) {
+            console.warn(`[STAKING] Invalid nonce in selection: ${selection}`);
+            continue;
+          }
+          
+          const nft = stakedNFTs.find(n => n.collection === collection && n.nonce === nonce);
+          if (nft) {
+            nftsToUnstake.push(nft);
+          }
+        }
+      }
+      
+      if (nftsToUnstake.length === 0) {
+        await interaction.followUp({ content: '❌ No unlocked NFTs selected.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Unstake NFTs
+      let unstakedCount = 0;
+      let failedCount = 0;
+      for (const nft of nftsToUnstake) {
+        try {
+          // Remove from pool
+          await dbStakingPools.unstakeNFT(guildId, poolId, userId, nft.collection, nft.nonce);
+          
+          // Mark NFT as unstaked in VA (it's already there, just marked as staked)
+          const supabase = require('./supabase-client');
+          const { error: updateError } = await supabase
+            .from('virtual_account_nft_balances')
+            .update({
+              staked: false,
+              staking_pool_id: null,
+              updated_at: new Date().toISOString()
+            })
+            .eq('guild_id', guildId)
+            .eq('user_id', userId)
+            .eq('collection', nft.collection)
+            .eq('nonce', nft.nonce);
+          
+          if (updateError) {
+            throw new Error(`Failed to mark NFT as unstaked: ${updateError.message}`);
+          }
+          
+          // Create transaction record
+          const transactionId = `unstake_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
+            id: transactionId,
+            type: 'unstake',
+            collection: nft.collection,
+            identifier: nft.identifier,
+            nonce: nft.nonce,
+            nft_name: nft.nft_name,
+            timestamp: Date.now(),
+            description: `Unstaked from pool: ${pool.poolName || pool.collectionName}`
+          });
+          
+          unstakedCount++;
+        } catch (unstakeError) {
+          console.error(`[STAKING] Error unstaking NFT ${nft.identifier}:`, unstakeError);
+          failedCount++;
+        }
+      }
+      
+      // Update embed
+      await updateStakingPoolEmbed(guildId, poolId);
+      
+      // Show result
+      let resultMessage = '';
+      if (unstakedCount > 0) {
+        resultMessage = `✅ **Unstaked ${unstakedCount} NFT(s) successfully!**`;
+        if (failedCount > 0) {
+          resultMessage += `\n\n❌ ${failedCount} NFT(s) failed to unstake.`;
+        }
+      } else {
+        resultMessage = `❌ **Failed to unstake NFTs.**\n\n${failedCount} NFT(s) failed during unstaking process.`;
+      }
+      
+      await interaction.followUp({ 
+        content: resultMessage, 
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+    } catch (error) {
+      console.error('[STAKING] Error handling unstake select menu:', error);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
   }
@@ -16012,6 +17614,779 @@ async function trackLotteryEarnings(guildId, tokenIdentifier, commissionWei) {
   }
 }
 
+// ============================================
+// STAKING POOLS HELPER FUNCTIONS
+// ============================================
+
+// Helper function to complete pool creation after trait selection
+async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, traitValue, interaction) {
+  try {
+    // Get pool
+    const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+    if (!pool) {
+      await interaction.followUp({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+    
+    // Charge pool creation fee
+    const feeResult = await chargePoolCreationFee(guildId, userId);
+    if (!feeResult.sufficient) {
+      // Delete the pool since fee payment failed
+      await dbStakingPools.updateStakingPool(guildId, poolId, { status: 'CLOSED' });
+      const embed = new EmbedBuilder()
+        .setTitle('❌ Insufficient Balance for Pool Creation')
+        .setDescription(`Pool creation requires $${feeResult.feeAmountUsd} worth of REWARD tokens.`)
+        .addFields({
+          name: '💵 Required Amount',
+          value: `You need **${feeResult.needed} REWARD** more in your virtual account.`,
+          inline: false
+        })
+        .setColor(0xFF0000)
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.editReply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+      }
+      return;
+    }
+    
+    // Update pool with trait filters if provided
+    if (traitType) {
+      const traitFilters = [{
+        trait_type: traitType,
+        value: traitValue || null
+      }];
+      
+      await dbStakingPools.updateStakingPool(guildId, poolId, {
+        traitFilters: traitFilters
+      });
+    }
+    
+    // Refresh pool data
+    const updatedPool = await dbStakingPools.getStakingPool(guildId, poolId);
+    
+    // Create embed and post it
+    const embed = await createStakingPoolEmbed(guildId, updatedPool);
+    
+    // Create buttons
+    const stakeButton = new ButtonBuilder()
+      .setCustomId(`staking-stake:${poolId}`)
+      .setLabel('Stake')
+      .setStyle(ButtonStyle.Success);
+    
+    const unstakeButton = new ButtonBuilder()
+      .setCustomId(`staking-unstake:${poolId}`)
+      .setLabel('Unstake')
+      .setStyle(ButtonStyle.Danger);
+    
+    const claimRewardsButton = new ButtonBuilder()
+      .setCustomId(`staking-claim-rewards:${poolId}`)
+      .setLabel('Claim')
+      .setStyle(ButtonStyle.Primary);
+    
+    const myStakedNFTsButton = new ButtonBuilder()
+      .setCustomId(`staking-my-nfts:${poolId}`)
+      .setLabel('My NFTs')
+      .setStyle(ButtonStyle.Secondary);
+    
+    const buttonRow = new ActionRowBuilder()
+      .addComponents(stakeButton, unstakeButton, claimRewardsButton, myStakedNFTsButton);
+    
+    // Post embed
+    const poolMessage = await interaction.channel.send({
+      embeds: [embed],
+      components: [buttonRow]
+    });
+    
+    // Create thread
+    let threadId = null;
+    try {
+      const thread = await poolMessage.startThread({
+        name: `Staking Pool ${poolId.substring(0, 8)}`,
+        autoArchiveDuration: 1440
+      });
+      threadId = thread.id;
+      console.log(`[STAKING] Created thread ${threadId} for pool ${poolId} (message: ${poolMessage.id})`);
+      
+      // Verify thread ID is different from message ID
+      if (threadId === poolMessage.id) {
+        console.warn(`[STAKING] WARNING: Thread ID (${threadId}) matches message ID (${poolMessage.id}) - this should not happen!`);
+      }
+    } catch (threadError) {
+      console.error('[STAKING] Error creating thread:', threadError.message);
+    }
+    
+    // Update pool with message/thread IDs
+    try {
+      await dbStakingPools.updateStakingPool(guildId, poolId, {
+        messageId: poolMessage.id,
+        threadId: threadId
+      });
+      console.log(`[STAKING] Updated pool ${poolId} with messageId=${poolMessage.id}, threadId=${threadId}`);
+    } catch (updateError) {
+      console.error(`[STAKING] Failed to update pool ${poolId} with message/thread IDs:`, updateError.message);
+      throw updateError; // Re-throw to prevent continuing with incorrect state
+    }
+    
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({ content: `✅ Staking pool created successfully! Pool ID: \`${poolId}\``, flags: [MessageFlags.Ephemeral] });
+    } else {
+      await interaction.editReply({ content: `✅ Staking pool created successfully! Pool ID: \`${poolId}\``, flags: [MessageFlags.Ephemeral] });
+    }
+    
+  } catch (error) {
+    console.error('[STAKING] Error completing pool creation:', error);
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+    } else {
+      await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+    }
+  }
+}
+
+// Calculate pool creation fee ($5 worth of REWARD)
+async function calculatePoolCreationFee() {
+  try {
+    const REWARD_IDENTIFIER = 'REWARD-cf6eac';
+    const rewardPriceUsd = await getTokenPriceUsd(REWARD_IDENTIFIER);
+    const rewardDecimals = await getTokenDecimals(REWARD_IDENTIFIER);
+    const feeAmountUsd = 5;
+    
+    if (rewardPriceUsd <= 0) {
+      throw new Error('REWARD token price not available');
+    }
+    
+    const feeAmountWei = new BigNumber(feeAmountUsd)
+      .dividedBy(rewardPriceUsd)
+      .multipliedBy(new BigNumber(10).pow(rewardDecimals))
+      .toFixed(0);
+    
+    return {
+      feeAmountWei,
+      feeAmountUsd,
+      rewardPriceUsd,
+      rewardDecimals
+    };
+  } catch (error) {
+    console.error('[STAKING] Error calculating pool creation fee:', error);
+    throw error;
+  }
+}
+
+// Charge pool creation fee from user VA and transfer on-chain
+async function chargePoolCreationFee(guildId, userId) {
+  try {
+    const feeInfo = await calculatePoolCreationFee();
+    const REWARD_IDENTIFIER = 'REWARD-cf6eac';
+    const FEE_RECIPIENT_WALLET = 'erd158k2c3aserjmwnyxzpln24xukl2fsvlk9x46xae4dxl5xds79g6sdz37qn';
+    
+    // Convert fee from wei to human-readable format
+    const feeAmountHuman = new BigNumber(feeInfo.feeAmountWei).dividedBy(new BigNumber(10).pow(feeInfo.rewardDecimals)).toString();
+    
+    // Check user VA balance (getUserBalance returns human-readable format)
+    const userBalance = await virtualAccounts.getUserBalance(guildId, userId, REWARD_IDENTIFIER);
+    const balanceBN = new BigNumber(userBalance || '0');
+    const feeBN = new BigNumber(feeAmountHuman);
+    
+    if (balanceBN.isLessThan(feeBN)) {
+      const needed = feeBN.minus(balanceBN).toString();
+      return {
+        sufficient: false,
+        needed: needed,
+        feeAmountUsd: feeInfo.feeAmountUsd
+      };
+    }
+    
+    // Make on-chain transfer from Community Fund to fee recipient wallet FIRST
+    // This protects user funds - if transfer fails, we don't deduct anything
+    let transferResult;
+    try {
+      const communityFundProjectName = getCommunityFundProjectName();
+      console.log(`[STAKING] Transferring pool creation fee: ${feeAmountHuman} ${REWARD_IDENTIFIER} from Community Fund to ${FEE_RECIPIENT_WALLET}`);
+      
+      transferResult = await transferESDTFromCommunityFund(
+        FEE_RECIPIENT_WALLET,
+        REWARD_IDENTIFIER,
+        feeAmountHuman,
+        communityFundProjectName,
+        guildId
+      );
+      
+      if (!transferResult.success) {
+        throw new Error(`Failed to transfer fee on-chain: ${transferResult.error || 'Unknown error'}`);
+      }
+      
+      console.log(`[STAKING] Pool creation fee transferred successfully. TX Hash: ${transferResult.txHash || 'N/A'}`);
+    } catch (transferError) {
+      console.error('[STAKING] Error making on-chain transfer for pool creation fee:', transferError);
+      // Transfer failed - don't deduct from user, just return error
+      throw new Error(`Failed to process pool creation fee: ${transferError.message}. Your balance was not deducted.`);
+    }
+    
+    // Only deduct from VA after successful on-chain transfer
+    // This ensures user funds are protected - if transfer fails, user keeps their balance
+    const deductResult = await virtualAccounts.deductFundsFromAccount(
+      guildId,
+      userId,
+      REWARD_IDENTIFIER,
+      feeAmountHuman,
+      `Pool creation fee ($${feeInfo.feeAmountUsd} REWARD)`
+    );
+    
+    if (!deductResult.success) {
+      // If deduction fails after successful transfer, log error but don't fail the pool creation
+      // The transfer already happened, so we'll just log this for manual review
+      console.error(`[STAKING] WARNING: On-chain transfer succeeded but VA deduction failed for user ${userId}. TX Hash: ${transferResult.txHash || 'N/A'}`);
+      // Continue anyway since the transfer already happened
+    } else {
+      // Update the transaction record with tx_hash
+      if (transferResult.txHash && deductResult.transaction) {
+        try {
+          const supabase = require('./supabase-client');
+          const { error: updateError } = await supabase
+            .from('virtual_account_transactions')
+            .update({ 
+              tx_hash: transferResult.txHash,
+              source: 'staking_pool_fee'
+            })
+            .eq('transaction_id', deductResult.transaction.id)
+            .eq('guild_id', guildId)
+            .eq('user_id', userId);
+          
+          if (updateError) {
+            console.error(`[STAKING] Error updating transaction with tx_hash:`, updateError);
+          } else {
+            console.log(`[STAKING] Updated transaction ${deductResult.transaction.id} with tx_hash: ${transferResult.txHash}`);
+          }
+        } catch (updateError) {
+          console.error(`[STAKING] Error updating transaction record:`, updateError);
+        }
+      }
+    }
+    
+    return {
+      sufficient: true,
+      feeAmountWei: feeInfo.feeAmountWei,
+      feeAmountUsd: feeInfo.feeAmountUsd,
+      txHash: transferResult.txHash || null
+    };
+  } catch (error) {
+    console.error('[STAKING] Error charging pool creation fee:', error);
+    throw error;
+  }
+}
+
+// Create staking pool embed
+async function createStakingPoolEmbed(guildId, pool) {
+  try {
+    const tokenPriceUsd = await getTokenPriceUsd(pool.rewardTokenIdentifier);
+    const tokenDecimals = pool.rewardTokenDecimals || 18;
+    
+    // Calculate USD values
+    const currentSupplyHuman = new BigNumber(pool.currentSupplyWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    const rewardPerNftHuman = new BigNumber(pool.rewardPerNftPerDayWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    
+    const currentSupplyUsd = tokenPriceUsd > 0 ? new BigNumber(currentSupplyHuman).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+    const rewardPerNftUsd = tokenPriceUsd > 0 ? new BigNumber(rewardPerNftHuman).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+    
+    // Determine embed color based on status
+    let embedColor = 0x00FF00; // Green for ACTIVE
+    if (pool.status === 'PAUSED') embedColor = 0xFFA500; // Orange
+    if (pool.status === 'CLOSED') embedColor = 0xFF0000; // Red
+    
+    const embed = new EmbedBuilder()
+      .setTitle(pool.poolName || pool.collectionName)
+      .setDescription(`**Staking Pool** - ${pool.collectionName}`)
+      .setColor(embedColor)
+      .setTimestamp()
+      .setFooter({ text: `Pool ID: ${pool.poolId.substring(0, 8)} | Created by ${pool.creatorTag || pool.creatorId}`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+    
+    // Set thumbnail: use collection image URL, or fallback to first staked NFT's image
+    let thumbnailUrl = pool.collectionImageUrl;
+    
+    // If collection image URL is missing, try to fetch it from API
+    if (!thumbnailUrl) {
+      try {
+        const collectionData = await collectionTraits.fetchCollectionTraits(pool.collectionTicker);
+        if (collectionData.collectionImageUrl) {
+          thumbnailUrl = collectionData.collectionImageUrl;
+          // Update pool with the image URL for future use
+          await dbStakingPools.updateStakingPool(guildId, pool.poolId, {
+            collectionImageUrl: thumbnailUrl
+          });
+        }
+      } catch (error) {
+        console.error('[STAKING] Error fetching collection image URL:', error.message);
+      }
+    }
+    
+    // Fallback: use first staked NFT's image if collection image is still missing
+    if (!thumbnailUrl && pool.totalNftsStaked > 0) {
+      try {
+        const stakedNFTs = await dbStakingPools.getAllStakedNFTs(guildId, pool.poolId);
+        if (stakedNFTs && stakedNFTs.length > 0 && stakedNFTs[0].nft_image_url) {
+          thumbnailUrl = stakedNFTs[0].nft_image_url;
+        }
+      } catch (error) {
+        console.error('[STAKING] Error fetching staked NFTs for thumbnail fallback:', error.message);
+      }
+    }
+    
+    if (thumbnailUrl) {
+      embed.setThumbnail(thumbnailUrl);
+    }
+    
+    // Current Supply Balance
+    const supplyText = currentSupplyUsd 
+      ? `${currentSupplyHuman} ${pool.rewardTokenTicker} (≈ $${currentSupplyUsd})`
+      : `${currentSupplyHuman} ${pool.rewardTokenTicker}`;
+    embed.addFields({ name: '💰 Current Supply Balance', value: supplyText, inline: true });
+    
+    // Reward Per NFT Per Day
+    const rewardText = rewardPerNftUsd
+      ? `${rewardPerNftHuman} ${pool.rewardTokenTicker}/day (≈ $${rewardPerNftUsd}/day)`
+      : `${rewardPerNftHuman} ${pool.rewardTokenTicker}/day`;
+    embed.addFields({ name: '🎁 Reward Per NFT Per Day', value: rewardText, inline: true });
+    
+    // Users Staking
+    embed.addFields({ name: '👥 Users Staking', value: `${pool.uniqueStakersCount}`, inline: true });
+    
+    // NFTs Staked
+    embed.addFields({ name: '🖼️ NFTs Staked', value: `${pool.totalNftsStaked}`, inline: true });
+    
+    // Staking Limits
+    const totalLimitText = pool.stakingTotalLimit ? `${pool.stakingTotalLimit} NFTs` : 'Unlimited';
+    const userLimitText = pool.stakingLimitPerUser ? `${pool.stakingLimitPerUser} NFTs` : 'Unlimited';
+    embed.addFields({ name: '📊 Staking Limits', value: `Total: ${totalLimitText}\nPer User: ${userLimitText}`, inline: true });
+    
+    // Trait Requirements
+    let traitText = 'None (all NFTs accepted)';
+    if (pool.traitFilters && pool.traitFilters.length > 0) {
+      traitText = pool.traitFilters.map(filter => {
+        if (filter.value === null || filter.value === undefined) {
+          return `• ${filter.trait_type} (any value)`;
+        } else {
+          return `• ${filter.trait_type} = ${filter.value}`;
+        }
+      }).join('\n');
+    }
+    embed.addFields({ name: '🎯 Trait Requirements', value: traitText, inline: false });
+    
+    // Next Reward Distribution
+    const nextDist = new Date(pool.nextRewardDistributionAt);
+    const now = Date.now();
+    const timeUntil = nextDist.getTime() - now;
+    const hoursUntil = Math.floor(timeUntil / (1000 * 60 * 60));
+    const minutesUntil = Math.floor((timeUntil % (1000 * 60 * 60)) / (1000 * 60));
+    const countdownText = timeUntil > 0 
+      ? `${hoursUntil}h ${minutesUntil}m`
+      : 'Due now';
+    embed.addFields({ name: '⏰ Next Reward Distribution', value: countdownText, inline: true });
+    
+    // Status
+    let statusText = '🟢 Active';
+    if (pool.status === 'PAUSED') {
+      statusText = '🟠 Paused (Low Supply)';
+      if (pool.autoCloseAt) {
+        const autoCloseDate = new Date(pool.autoCloseAt);
+        const timeUntilClose = autoCloseDate.getTime() - now;
+        const hoursUntilClose = Math.floor(timeUntilClose / (1000 * 60 * 60));
+        if (timeUntilClose > 0) {
+          statusText += `\n⚠️ Auto-closing in ${hoursUntilClose}h if no top-up`;
+        }
+      }
+    }
+    if (pool.status === 'CLOSED') {
+      statusText = '🔴 Closed';
+      
+      // Check if rewards are still claimable (within 24h of last distribution)
+      if (pool.lastRewardDistributionAt) {
+        const lastDistTime = pool.lastRewardDistributionAt;
+        const claimDeadline = lastDistTime + (24 * 60 * 60 * 1000); // 24 hours after last distribution
+        const timeUntilDeadline = claimDeadline - now;
+        
+        if (timeUntilDeadline > 0) {
+          // Rewards still claimable
+          const hoursLeft = Math.floor(timeUntilDeadline / (1000 * 60 * 60));
+          const minutesLeft = Math.floor((timeUntilDeadline % (1000 * 60 * 60)) / (1000 * 60));
+          const deadlineText = hoursLeft > 0 
+            ? `${hoursLeft}h ${minutesLeft}m`
+            : `${minutesLeft}m`;
+          
+          embed.addFields({ 
+            name: '⚠️ Rewards Still Claimable', 
+            value: `Rewards can still be claimed for the next ${deadlineText}. Use the "Claim Rewards" button below.`,
+            inline: false 
+          });
+        }
+        // If timeUntilDeadline <= 0, don't show the message (rewards expired)
+      }
+    }
+    embed.addFields({ name: '📌 Status', value: statusText, inline: true });
+    
+    return embed;
+  } catch (error) {
+    console.error('[STAKING] Error creating staking pool embed:', error);
+    throw error;
+  }
+}
+
+// Update staking pool embed
+async function updateStakingPoolEmbed(guildId, poolId) {
+  try {
+    const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+    if (!pool || !pool.channelId) {
+      return;
+    }
+    
+    const channel = await client.channels.fetch(pool.channelId);
+    if (!channel) return;
+    
+    let message = null;
+    
+    // If messageId is temp, try to find the actual message by searching recent messages
+    if (!pool.messageId || pool.messageId.startsWith('temp_')) {
+      // Search for messages with the pool embed (look for pool ID substring in embed footer)
+      const poolIdSubstring = poolId.substring(0, 8); // Footer shows first 8 chars
+      const messages = await channel.messages.fetch({ limit: 50 });
+      message = messages.find(msg => {
+        if (!msg.embeds || msg.embeds.length === 0) return false;
+        const embed = msg.embeds[0];
+        return embed.footer && embed.footer.text && embed.footer.text.includes(poolIdSubstring);
+      });
+      
+      // If found, update the pool with the correct message_id
+      if (message) {
+        await dbStakingPools.updateStakingPool(guildId, poolId, {
+          messageId: message.id
+        });
+      } else {
+        // Message not found, can't update embed
+        console.warn(`[STAKING] Could not find message for pool ${poolId} to update embed`);
+        return;
+      }
+    } else {
+      // Normal case: fetch by message_id
+      try {
+        message = await channel.messages.fetch(pool.messageId);
+      } catch (fetchError) {
+        // Message might have been deleted, try to find it
+        console.warn(`[STAKING] Failed to fetch message ${pool.messageId} for pool ${poolId}, searching...`);
+        const poolIdSubstring = poolId.substring(0, 8); // Footer shows first 8 chars
+        const messages = await channel.messages.fetch({ limit: 50 });
+        message = messages.find(msg => {
+          if (!msg.embeds || msg.embeds.length === 0) return false;
+          const embed = msg.embeds[0];
+          return embed.footer && embed.footer.text && embed.footer.text.includes(poolIdSubstring);
+        });
+        
+        if (message) {
+          await dbStakingPools.updateStakingPool(guildId, poolId, {
+            messageId: message.id
+          });
+        } else {
+          return;
+        }
+      }
+    }
+    
+    if (!message) return;
+    
+    const embed = await createStakingPoolEmbed(guildId, pool);
+    
+    // Create buttons
+    const components = [];
+    if (pool.status === 'ACTIVE' || pool.status === 'PAUSED') {
+      const stakeButton = new ButtonBuilder()
+        .setCustomId(`staking-stake:${poolId}`)
+        .setLabel('Stake')
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(pool.status === 'PAUSED');
+      
+      const unstakeButton = new ButtonBuilder()
+        .setCustomId(`staking-unstake:${poolId}`)
+        .setLabel('Unstake')
+        .setStyle(ButtonStyle.Danger)
+        .setDisabled(pool.status === 'PAUSED');
+      
+      const claimRewardsButton = new ButtonBuilder()
+        .setCustomId(`staking-claim-rewards:${poolId}`)
+        .setLabel('Claim')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(pool.status === 'PAUSED');
+      
+      const myStakedNFTsButton = new ButtonBuilder()
+        .setCustomId(`staking-my-nfts:${poolId}`)
+        .setLabel('My NFTs')
+        .setStyle(ButtonStyle.Secondary);
+      
+      const buttonRow = new ActionRowBuilder()
+        .addComponents(stakeButton, unstakeButton, claimRewardsButton, myStakedNFTsButton);
+      
+      components.push(buttonRow);
+    } else if (pool.status === 'CLOSED') {
+      // For closed pools, show claim button and my staked NFTs button
+      const claimRewardsButton = new ButtonBuilder()
+        .setCustomId(`staking-claim-rewards:${poolId}`)
+        .setLabel('Claim')
+        .setStyle(ButtonStyle.Primary);
+      
+      const myStakedNFTsButton = new ButtonBuilder()
+        .setCustomId(`staking-my-nfts:${poolId}`)
+        .setLabel('My NFTs')
+        .setStyle(ButtonStyle.Secondary);
+      
+      const buttonRow = new ActionRowBuilder()
+        .addComponents(claimRewardsButton, myStakedNFTsButton);
+      
+      components.push(buttonRow);
+    }
+    
+    await message.edit({ embeds: [embed], components });
+  } catch (error) {
+    console.error(`[STAKING] Error updating embed for pool ${poolId}:`, error.message);
+  }
+}
+
+// Process staking pool rewards
+async function processStakingPoolRewards(guildId, poolId) {
+  try {
+    console.log(`[STAKING] Processing rewards for pool ${poolId}`);
+    
+    const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+    if (!pool || pool.status !== 'ACTIVE') {
+      return;
+    }
+    
+    // Get all staked NFTs
+    const stakedNFTs = await dbStakingPools.getAllStakedNFTs(guildId, poolId);
+    
+    if (stakedNFTs.length === 0) {
+      // No NFTs staked, just update next distribution time
+      await dbStakingPools.updateStakingPool(guildId, poolId, {
+        nextRewardDistributionAt: Date.now() + (24 * 60 * 60 * 1000),
+        lastRewardDistributionAt: Date.now()
+      });
+      return;
+    }
+    
+    // Calculate total rewards needed
+    const rewardPerNftBN = new BigNumber(pool.rewardPerNftPerDayWei);
+    const totalRewardsNeededBN = rewardPerNftBN.multipliedBy(stakedNFTs.length);
+    const currentSupplyBN = new BigNumber(pool.currentSupplyWei);
+    
+    // Check if supply is sufficient for next day
+    const requiredForNextDay = totalRewardsNeededBN;
+    const isLowSupply = currentSupplyBN.isLessThan(requiredForNextDay);
+    
+    if (isLowSupply) {
+      // Pause pool and set warning
+      const now = Date.now();
+      const warningAt = pool.lowSupplyWarningAt || now;
+      const autoCloseAt = pool.autoCloseAt || (warningAt + (48 * 60 * 60 * 1000));
+      
+      await dbStakingPools.updateStakingPool(guildId, poolId, {
+        status: 'PAUSED',
+        lowSupplyWarningAt: warningAt,
+        autoCloseAt: autoCloseAt
+      });
+      
+      // Post warning in thread
+      if (pool.threadId) {
+        try {
+          const channel = await client.channels.fetch(pool.channelId);
+          if (channel) {
+            const thread = await channel.threads.cache.get(pool.threadId) || await channel.threads.fetch(pool.threadId);
+            if (thread) {
+              const creatorMention = pool.creatorId ? `<@${pool.creatorId}>` : pool.creatorTag || 'Pool Creator';
+              const hoursUntilClose = Math.floor((autoCloseAt - now) / (1000 * 60 * 60));
+              await thread.send(`⚠️ **Low Supply Warning**\n\n${creatorMention} - The staking pool supply is running low and cannot cover the next day's rewards.\n\n**Current Supply:** ${new BigNumber(pool.currentSupplyWei).dividedBy(new BigNumber(10).pow(pool.rewardTokenDecimals)).toString()} ${pool.rewardTokenTicker}\n**Required for Next Day:** ${requiredForNextDay.dividedBy(new BigNumber(10).pow(pool.rewardTokenDecimals)).toString()} ${pool.rewardTokenTicker}\n\n⚠️ **Action Required:** Please top-up the pool or it will be automatically closed in ${hoursUntilClose} hours.`);
+            }
+          }
+        } catch (threadError) {
+          console.error('[STAKING] Error posting warning to thread:', threadError.message);
+        }
+      }
+      
+      // Update embed
+      await updateStakingPoolEmbed(guildId, poolId);
+      return;
+    }
+    
+    // Calculate per-user rewards
+    const userNFTCounts = {};
+    for (const nft of stakedNFTs) {
+      userNFTCounts[nft.user_id] = (userNFTCounts[nft.user_id] || 0) + 1;
+    }
+    
+    // Distribute rewards
+    const tokenPriceUsd = await getTokenPriceUsd(pool.rewardTokenIdentifier);
+    const tokenDecimals = pool.rewardTokenDecimals || 18;
+    const distributionId = `dist_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const distributedAt = Date.now();
+    const nextDistributionAt = distributedAt + (24 * 60 * 60 * 1000);
+    
+    let totalRewardsPaidBN = new BigNumber('0');
+    
+    // Create user rewards
+    for (const [userId, nftCount] of Object.entries(userNFTCounts)) {
+      const userRewardBN = rewardPerNftBN.multipliedBy(nftCount);
+      totalRewardsPaidBN = totalRewardsPaidBN.plus(userRewardBN);
+      
+      const rewardAmountUsd = tokenPriceUsd > 0 
+        ? new BigNumber(userRewardBN).dividedBy(new BigNumber(10).pow(tokenDecimals)).multipliedBy(tokenPriceUsd).toFixed(2)
+        : 0;
+      
+      await dbStakingPools.createUserReward(guildId, {
+        poolId: poolId,
+        userId: userId,
+        distributionId: distributionId,
+        nftsStakedCount: nftCount,
+        rewardAmountWei: userRewardBN.toString(),
+        rewardAmountUsd: parseFloat(rewardAmountUsd)
+      });
+    }
+    
+    // Create distribution record
+    const totalRewardsPaidUsd = tokenPriceUsd > 0
+      ? new BigNumber(totalRewardsPaidBN).dividedBy(new BigNumber(10).pow(tokenDecimals)).multipliedBy(tokenPriceUsd).toFixed(2)
+      : 0;
+    
+    // Update pool supply
+    const newSupplyBN = currentSupplyBN.minus(totalRewardsPaidBN);
+    
+    await dbStakingPools.updateStakingPool(guildId, poolId, {
+      currentSupplyWei: newSupplyBN.toString(),
+      nextRewardDistributionAt: nextDistributionAt,
+      lastRewardDistributionAt: distributedAt
+    });
+    
+    // Create distribution record
+    let notificationMessageId = null;
+    if (pool.threadId) {
+      try {
+        const channel = await client.channels.fetch(pool.channelId);
+        if (channel) {
+          const thread = await channel.threads.cache.get(pool.threadId) || await channel.threads.fetch(pool.threadId);
+          if (thread) {
+            const totalRewardsHuman = totalRewardsPaidBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+            const totalRewardsUsdText = tokenPriceUsd > 0 ? ` (≈ $${totalRewardsPaidUsd})` : '';
+            const notification = await thread.send(`✅ **Reward Distribution Complete**\n\nTotal rewards paid: **${totalRewardsHuman} ${pool.rewardTokenTicker}${totalRewardsUsdText}**\n\nUsers can now claim their rewards using the "Claim Rewards" button.`);
+            notificationMessageId = notification.id;
+          }
+        }
+      } catch (threadError) {
+        console.error('[STAKING] Error posting notification to thread:', threadError.message);
+      }
+    }
+    
+    await dbStakingPools.createRewardDistribution(guildId, {
+      poolId: poolId,
+      distributionId: distributionId,
+      totalRewardsPaidWei: totalRewardsPaidBN.toString(),
+      totalRewardsPaidUsd: parseFloat(totalRewardsPaidUsd),
+      nftsStakedAtTime: stakedNFTs.length,
+      uniqueStakersAtTime: Object.keys(userNFTCounts).length,
+      distributedAt: distributedAt,
+      nextDistributionAt: nextDistributionAt,
+      threadId: pool.threadId,
+      notificationMessageId: notificationMessageId
+    });
+    
+    // Update embed
+    await updateStakingPoolEmbed(guildId, poolId);
+    
+    console.log(`[STAKING] Rewards distributed for pool ${poolId}: ${totalRewardsPaidBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString()} ${pool.rewardTokenTicker}`);
+    
+  } catch (error) {
+    console.error(`[STAKING] Error processing rewards for pool ${poolId}:`, error.message);
+  }
+}
+
+// Auto-close staking pool after 48h low supply warning
+async function autoCloseStakingPool(guildId, poolId) {
+  try {
+    console.log(`[STAKING] Auto-closing pool ${poolId}`);
+    
+    const pool = await dbStakingPools.getStakingPool(guildId, poolId);
+    if (!pool || pool.status !== 'PAUSED') {
+      return;
+    }
+    
+    // Get all staked NFTs
+    const stakedNFTs = await dbStakingPools.getAllStakedNFTs(guildId, poolId);
+    
+    // Return NFTs to users' VAs (mark as unstaked)
+    for (const nft of stakedNFTs) {
+      try {
+        // Mark NFT as unstaked in VA (it's already there, just marked as staked)
+        const supabase = require('./supabase-client');
+        const { error: updateError } = await supabase
+          .from('virtual_account_nft_balances')
+          .update({
+            staked: false,
+            staking_pool_id: null,
+            updated_at: new Date().toISOString()
+          })
+          .eq('guild_id', guildId)
+          .eq('user_id', nft.user_id)
+          .eq('collection', nft.collection)
+          .eq('nonce', nft.nonce);
+        
+        if (updateError) {
+          throw new Error(`Failed to mark NFT as unstaked: ${updateError.message}`);
+        }
+        
+        // Create transaction record
+        const transactionId = `unstake_auto_close_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        await virtualAccountsNFT.addNFTTransaction(guildId, nft.user_id, {
+          id: transactionId,
+          type: 'unstake_return',
+          collection: nft.collection,
+          identifier: nft.identifier,
+          nonce: nft.nonce,
+          nft_name: nft.nft_name,
+          timestamp: Date.now(),
+          description: `NFT returned due to pool closure: ${pool.poolName || pool.collectionName}`
+        });
+      } catch (nftError) {
+        console.error(`[STAKING] Error returning NFT ${nft.identifier} to user ${nft.user_id}:`, nftError);
+      }
+    }
+    
+    // Update pool status
+    await dbStakingPools.updateStakingPool(guildId, poolId, {
+      status: 'CLOSED'
+    });
+    
+    // Update embed
+    await updateStakingPoolEmbed(guildId, poolId);
+    
+    // Post closure notification in thread
+    if (pool.threadId) {
+      try {
+        const channel = await client.channels.fetch(pool.channelId);
+        if (channel) {
+          const thread = await channel.threads.cache.get(pool.threadId) || await channel.threads.fetch(pool.threadId);
+          if (thread) {
+            await thread.send(`🔴 **Pool Closed**\n\nThe staking pool has been automatically closed due to low supply and no top-up within 48 hours.\n\nAll staked NFTs have been returned to their owners' virtual accounts.`);
+          }
+        }
+      } catch (threadError) {
+        console.error('[STAKING] Error posting closure notification to thread:', threadError.message);
+      }
+    }
+    
+    console.log(`[STAKING] Pool ${poolId} auto-closed, ${stakedNFTs.length} NFTs returned`);
+    
+  } catch (error) {
+    console.error(`[STAKING] Error auto-closing pool ${poolId}:`, error.message);
+  }
+}
+
 // Ready event
 client.on('ready', async () => {
   console.log(`Multi-Server ESDT Tipping Bot with Virtual Accounts is ready with ID: ${client.user.tag}`);
@@ -16089,6 +18464,73 @@ client.on('ready', async () => {
   console.log('Auction expiration check scheduled (every minute)');
   console.log('Lottery draw check scheduled (every minute)');
   console.log('Lottery embed update scheduled (every 10 minutes)');
+  
+  // Set up periodic check for staking pool reward distributions
+  setInterval(async () => {
+    try {
+      const pools = await dbStakingPools.getPoolsForRewardDistribution();
+      for (const pool of pools) {
+        await processStakingPoolRewards(pool.guildId, pool.poolId);
+      }
+    } catch (error) {
+      console.error('[STAKING] Error checking reward distributions:', error.message);
+    }
+  }, 60 * 1000); // Every minute
+  
+  // Set up periodic check for staking pool auto-close (48h after low supply warning)
+  setInterval(async () => {
+    try {
+      const pools = await dbStakingPools.getPoolsForAutoClose();
+      for (const pool of pools) {
+        await autoCloseStakingPool(pool.guildId, pool.poolId);
+      }
+    } catch (error) {
+      console.error('[STAKING] Error checking auto-close pools:', error.message);
+    }
+  }, 60 * 1000); // Every minute
+  
+  // Set up periodic expiry of old unclaimed rewards (24h)
+  setInterval(async () => {
+    try {
+      await dbStakingPools.expireOldRewards();
+    } catch (error) {
+      console.error('[STAKING] Error expiring rewards:', error.message);
+    }
+  }, 60 * 60 * 1000); // Every hour
+  
+  // Set up periodic update for staking pool embeds (USD prices and closed pool reward deadlines)
+  setInterval(async () => {
+    try {
+      const allGuilds = await client.guilds.fetch();
+      for (const [guildId, guild] of allGuilds) {
+        try {
+          // Update active pools (for USD price updates)
+          const activePools = await dbStakingPools.getStakingPoolsByGuild(guildId, 'ACTIVE');
+          for (const pool of activePools) {
+            await updateStakingPoolEmbed(guildId, pool.poolId);
+          }
+          
+          // Update closed pools (to remove reward claimability message after 24h)
+          const closedPools = await dbStakingPools.getStakingPoolsByGuild(guildId, 'CLOSED');
+          for (const pool of closedPools) {
+            // Only update if pool had a distribution (to check if 24h passed)
+            if (pool.lastRewardDistributionAt) {
+              await updateStakingPoolEmbed(guildId, pool.poolId);
+            }
+          }
+        } catch (error) {
+          console.error(`[STAKING] Error updating embeds for guild ${guildId}:`, error.message);
+        }
+      }
+    } catch (error) {
+      console.error('[STAKING] Error updating staking pool embeds:', error.message);
+    }
+  }, 10 * 60 * 1000); // Every 10 minutes
+  
+  console.log('Staking pool reward distribution check scheduled (every minute)');
+  console.log('Staking pool auto-close check scheduled (every minute)');
+  console.log('Staking pool reward expiry check scheduled (every hour)');
+  console.log('Staking pool embed update scheduled (every 10 minutes)');
   
   // Set up periodic cleanup for expired NFT offers and listings
   setInterval(async () => {

@@ -5,13 +5,18 @@ const BigNumber = require('bignumber.js');
 // BALANCE MANAGEMENT
 // ============================================
 
-async function getUserNFTBalances(guildId, userId, collection = null) {
+async function getUserNFTBalances(guildId, userId, collection = null, includeStaked = false) {
   try {
     let query = supabase
       .from('virtual_account_nft_balances')
       .select('*')
       .eq('guild_id', guildId)
       .eq('user_id', userId);
+    
+    // By default, exclude staked NFTs (only show available NFTs)
+    if (!includeStaked) {
+      query = query.eq('staked', false);
+    }
     
     if (collection) {
       query = query.eq('collection', collection);

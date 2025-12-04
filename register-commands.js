@@ -1204,6 +1204,161 @@ const commands = [
         options: [],
         default_member_permissions: null,
     },
+    {
+        name: 'create-staking-pool',
+        description: 'Create a new NFT staking pool',
+        options: [
+            {
+                name: 'collection_ticker',
+                description: 'Collection ticker for the staking pool',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'reward_token_identifier',
+                description: 'Token identifier for staking rewards',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'initial_supply',
+                description: 'Initial reward supply amount',
+                type: ApplicationCommandOptionType.String,
+                required: true
+            },
+            {
+                name: 'reward_per_nft_per_day',
+                description: 'Daily reward amount per NFT',
+                type: ApplicationCommandOptionType.String,
+                required: true
+            },
+            {
+                name: 'pool_name',
+                description: 'Display name for the pool (defaults to collection name)',
+                type: ApplicationCommandOptionType.String,
+                required: false
+            },
+            {
+                name: 'staking_total_limit',
+                description: 'Maximum NFTs that can be staked in the pool',
+                type: ApplicationCommandOptionType.Integer,
+                required: false
+            },
+            {
+                name: 'staking_limit_per_user',
+                description: 'Maximum NFTs a user can stake',
+                type: ApplicationCommandOptionType.Integer,
+                required: false
+            },
+            {
+                name: 'duration_months',
+                description: 'Pool duration in months (1-12, optional)',
+                type: ApplicationCommandOptionType.Integer,
+                required: false,
+                choices: [
+                    { name: '1 month', value: 1 },
+                    { name: '2 months', value: 2 },
+                    { name: '3 months', value: 3 },
+                    { name: '4 months', value: 4 },
+                    { name: '5 months', value: 5 },
+                    { name: '6 months', value: 6 },
+                    { name: '7 months', value: 7 },
+                    { name: '8 months', value: 8 },
+                    { name: '9 months', value: 9 },
+                    { name: '10 months', value: 10 },
+                    { name: '11 months', value: 11 },
+                    { name: '12 months', value: 12 }
+                ]
+            }
+        ],
+        default_member_permissions: null
+    },
+    {
+        name: 'update-staking-pool',
+        description: 'Update an existing staking pool',
+        options: [
+            {
+                name: 'staking_pool',
+                description: 'Select the staking pool to update',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'topup_staking_pool',
+                description: 'Add more tokens to the pool supply',
+                type: ApplicationCommandOptionType.String,
+                required: false
+            },
+            {
+                name: 'change_reward_per_nft',
+                description: 'Update the daily reward per NFT',
+                type: ApplicationCommandOptionType.String,
+                required: false
+            },
+            {
+                name: 'increase_nft_pool_limit',
+                description: 'Increase the total NFT limit (must be higher than current)',
+                type: ApplicationCommandOptionType.Integer,
+                required: false
+            },
+            {
+                name: 'increase_user_staking_limit',
+                description: 'Increase the per-user staking limit (must be higher than current)',
+                type: ApplicationCommandOptionType.Integer,
+                required: false
+            },
+            {
+                name: 'trait_filter_action',
+                description: 'Action to perform on trait filters',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                choices: [
+                    { name: 'Add filter', value: 'add' },
+                    { name: 'Remove filter by index', value: 'remove' },
+                    { name: 'Clear all filters', value: 'clear' }
+                ]
+            },
+            {
+                name: 'trait_filter_type',
+                description: 'Trait type to filter (required if action is add)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                autocomplete: true
+            },
+            {
+                name: 'trait_filter_value',
+                description: 'Specific trait value (optional, leave empty for any value)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                autocomplete: true
+            },
+            {
+                name: 'trait_filter_index',
+                description: 'Select filter to remove (required if action is remove)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                autocomplete: true
+            }
+        ],
+        default_member_permissions: null
+    },
+    {
+        name: 'close-staking-pool',
+        description: 'Close a staking pool and return NFTs to users',
+        options: [
+            {
+                name: 'staking_pool_name',
+                description: 'Select the staking pool to close',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            }
+        ],
+        default_member_permissions: null
+    },
 ];
 
 // Export commands for use in other scripts

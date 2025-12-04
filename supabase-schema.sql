@@ -434,6 +434,8 @@ CREATE TABLE IF NOT EXISTS virtual_account_nft_balances (
     nft_name TEXT,
     nft_image_url TEXT,
     metadata JSONB DEFAULT '{}',
+    staked BOOLEAN DEFAULT FALSE,
+    staking_pool_id TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(guild_id, user_id, collection, nonce)
@@ -442,6 +444,8 @@ CREATE TABLE IF NOT EXISTS virtual_account_nft_balances (
 CREATE INDEX IF NOT EXISTS idx_va_nft_balances_guild_user ON virtual_account_nft_balances(guild_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_va_nft_balances_collection ON virtual_account_nft_balances(guild_id, collection);
 CREATE INDEX IF NOT EXISTS idx_va_nft_balances_identifier ON virtual_account_nft_balances(identifier);
+CREATE INDEX IF NOT EXISTS idx_va_nft_balances_staked ON virtual_account_nft_balances(guild_id, user_id, staked);
+CREATE INDEX IF NOT EXISTS idx_va_nft_balances_staking_pool ON virtual_account_nft_balances(staking_pool_id) WHERE staking_pool_id IS NOT NULL;
 
 -- NFT transaction history
 CREATE TABLE IF NOT EXISTS virtual_account_nft_transactions (
@@ -530,4 +534,169 @@ CREATE INDEX IF NOT EXISTS idx_nft_offers_listing ON nft_offers(listing_id, guil
 CREATE INDEX IF NOT EXISTS idx_nft_offers_offerer ON nft_offers(guild_id, offerer_id);
 CREATE INDEX IF NOT EXISTS idx_nft_offers_status ON nft_offers(status);
 CREATE INDEX IF NOT EXISTS idx_nft_offers_expires_at ON nft_offers(expires_at) WHERE expires_at IS NOT NULL;
+
+-- ============================================
+-- NFT STAKING POOLS TABLES
+-- ============================================
+
+-- Main staking pools table
+CREATE TABLE IF NOT EXISTS staking_pools (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pool_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    creator_id TEXT NOT NULL,
+    creator_tag TEXT,
+    
+    -- Pool display info
+    pool_name TEXT,
+    
+    -- Collection info
+    collection_ticker TEXT NOT NULL,
+    collection_name TEXT NOT NULL,
+    collection_image_url TEXT,
+    
+    -- Reward token info
+    reward_token_identifier TEXT NOT NULL,
+    reward_token_ticker TEXT NOT NULL,
+    reward_token_decimals INTEGER NOT NULL DEFAULT 18,
+    
+    -- Pool configuration
+    initial_supply_wei TEXT NOT NULL,
+    current_supply_wei TEXT NOT NULL,
+    reward_per_nft_per_day_wei TEXT NOT NULL,
+    staking_total_limit INTEGER,
+    staking_limit_per_user INTEGER,
+    duration_months INTEGER,
+    
+    -- Trait filtering
+    trait_filters JSONB DEFAULT NULL,
+    
+    -- Pool timing
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT,
+    next_reward_distribution_at BIGINT NOT NULL,
+    last_reward_distribution_at BIGINT,
+    
+    -- Low supply warning
+    low_supply_warning_at BIGINT,
+    auto_close_at BIGINT,
+    
+    -- Discord embed info
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    thread_id TEXT,
+    
+    -- Status
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    
+    -- Statistics
+    total_nfts_staked INTEGER DEFAULT 0,
+    unique_stakers_count INTEGER DEFAULT 0,
+    
+    created_at_timestamp TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    
+    UNIQUE(pool_id, guild_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_staking_pools_guild ON staking_pools(guild_id);
+CREATE INDEX IF NOT EXISTS idx_staking_pools_status ON staking_pools(status);
+CREATE INDEX IF NOT EXISTS idx_staking_pools_creator ON staking_pools(guild_id, creator_id);
+CREATE INDEX IF NOT EXISTS idx_staking_pools_next_distribution ON staking_pools(next_reward_distribution_at) WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS idx_staking_pools_auto_close ON staking_pools(auto_close_at) WHERE auto_close_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_staking_pools_collection ON staking_pools(guild_id, collection_ticker);
+CREATE INDEX IF NOT EXISTS idx_staking_pools_trait_filters ON staking_pools USING GIN (trait_filters) WHERE trait_filters IS NOT NULL;
+
+-- User staked NFTs
+CREATE TABLE IF NOT EXISTS staking_pool_balances (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pool_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    nonce INTEGER NOT NULL,
+    nft_name TEXT,
+    nft_image_url TEXT,
+    staked_at BIGINT NOT NULL,
+    lock_until BIGINT,
+    unstake_priority BIGINT DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(pool_id, guild_id, user_id, collection, nonce)
+);
+
+CREATE INDEX IF NOT EXISTS idx_staking_balances_pool ON staking_pool_balances(pool_id, guild_id);
+CREATE INDEX IF NOT EXISTS idx_staking_balances_user ON staking_pool_balances(guild_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_staking_balances_collection ON staking_pool_balances(guild_id, collection);
+CREATE INDEX IF NOT EXISTS idx_staking_balances_staked_at ON staking_pool_balances(staked_at);
+CREATE INDEX IF NOT EXISTS idx_staking_balances_lock_until ON staking_pool_balances(lock_until) WHERE lock_until IS NOT NULL;
+
+-- Reward distribution history
+CREATE TABLE IF NOT EXISTS staking_pool_reward_distributions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pool_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    distribution_id TEXT NOT NULL,
+    total_rewards_paid_wei TEXT NOT NULL,
+    total_rewards_paid_usd NUMERIC DEFAULT 0,
+    nfts_staked_at_time INTEGER NOT NULL,
+    unique_stakers_at_time INTEGER NOT NULL,
+    distributed_at BIGINT NOT NULL,
+    next_distribution_at BIGINT NOT NULL,
+    thread_id TEXT,
+    notification_message_id TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(distribution_id, guild_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reward_distributions_pool ON staking_pool_reward_distributions(pool_id, guild_id);
+CREATE INDEX IF NOT EXISTS idx_reward_distributions_time ON staking_pool_reward_distributions(distributed_at DESC);
+
+-- User reward claims
+CREATE TABLE IF NOT EXISTS staking_pool_user_rewards (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pool_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    distribution_id TEXT NOT NULL,
+    nfts_staked_count INTEGER NOT NULL,
+    reward_amount_wei TEXT NOT NULL,
+    reward_amount_usd NUMERIC DEFAULT 0,
+    claimed BOOLEAN DEFAULT FALSE,
+    claimed_at BIGINT,
+    expired BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(pool_id, guild_id, user_id, distribution_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_rewards_pool_user ON staking_pool_user_rewards(pool_id, guild_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_user_rewards_distribution ON staking_pool_user_rewards(distribution_id);
+CREATE INDEX IF NOT EXISTS idx_user_rewards_claimed ON staking_pool_user_rewards(pool_id, guild_id, user_id, claimed) WHERE claimed = FALSE AND expired = FALSE;
+
+-- Rate limiting
+CREATE TABLE IF NOT EXISTS staking_pool_rate_limits (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pool_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    last_action_at BIGINT NOT NULL,
+    UNIQUE(pool_id, guild_id, user_id, action_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_limits_user_action ON staking_pool_rate_limits(guild_id, user_id, action_type);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_cleanup ON staking_pool_rate_limits(last_action_at);
+
+-- NFT metadata cache
+CREATE TABLE IF NOT EXISTS nft_metadata_cache (
+    identifier TEXT PRIMARY KEY,
+    collection TEXT NOT NULL,
+    nonce INTEGER NOT NULL,
+    attributes JSONB,
+    cached_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_nft_metadata_collection_nonce ON nft_metadata_cache(collection, nonce);
+CREATE INDEX IF NOT EXISTS idx_nft_metadata_expires ON nft_metadata_cache(expires_at) WHERE expires_at IS NOT NULL;
 

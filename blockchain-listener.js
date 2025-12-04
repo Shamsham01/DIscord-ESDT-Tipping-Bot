@@ -275,27 +275,11 @@ async function processTransaction(transaction, guildId, projectName, userId = nu
     
     // CRITICAL: Check database for duplicates BEFORE any processing
     // This is bulletproof and survives crashes/restarts
+    // NOTE: For multi-transfer transactions, we check per-transfer inside the loop
+    // This initial check is a quick filter for completely new transactions
     try {
-      // Check NFT transactions table
-      const { data: existingNftTx, error: nftCheckError } = await supabase
-        .from('virtual_account_nft_transactions')
-        .select('id, user_id, collection, nonce, type, tx_hash')
-        .eq('tx_hash', transaction.txHash)
-        .limit(1)
-        .maybeSingle(); // Use maybeSingle() to avoid error if no record found
-      
-      if (nftCheckError && nftCheckError.code !== 'PGRST116') { // PGRST116 = no rows found, which is OK
-        console.error(`[BLOCKCHAIN] ⚠️ Error checking NFT transactions for duplicate:`, nftCheckError.message);
-        // Continue processing if database check fails (fail-open to avoid missing transactions)
-      } else if (existingNftTx) {
-        console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate transaction ${transaction.txHash} (found in NFT transactions)`);
-        console.log(`[BLOCKCHAIN] ℹ️ Already processed: user=${existingNftTx.user_id}, collection=${existingNftTx.collection}, nonce=${existingNftTx.nonce}, type=${existingNftTx.type}`);
-        // Add to in-memory cache to avoid future database queries
-        processedTransactions.add(transaction.txHash);
-        return { processed: false, reason: 'Already processed (database - NFT)' };
-      }
-      
-      // Check ESDT transactions table
+      // Quick check: If this is a pure ESDT transaction (no NFTs), check ESDT table
+      // For NFT transactions, we'll check per-transfer inside the loop
       const { data: existingEsdtTx, error: esdtCheckError } = await supabase
         .from('virtual_account_transactions')
         .select('id, user_id, token, amount, type, tx_hash')
@@ -307,14 +291,21 @@ async function processTransaction(transaction, guildId, projectName, userId = nu
         console.error(`[BLOCKCHAIN] ⚠️ Error checking ESDT transactions for duplicate:`, esdtCheckError.message);
         // Continue processing if database check fails (fail-open to avoid missing transactions)
       } else if (existingEsdtTx) {
-        console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate transaction ${transaction.txHash} (found in ESDT transactions)`);
-        console.log(`[BLOCKCHAIN] ℹ️ Already processed: user=${existingEsdtTx.user_id}, token=${existingEsdtTx.token}, amount=${existingEsdtTx.amount}, type=${existingEsdtTx.type}`);
-        // Add to in-memory cache to avoid future database queries
-        processedTransactions.add(transaction.txHash);
-        return { processed: false, reason: 'Already processed (database - ESDT)' };
+        // Check if this transaction contains ONLY ESDT transfers (no NFTs)
+        const transfers = transaction.action?.arguments?.transfers || [];
+        const hasNFTs = transfers.some(t => t.type === 'NonFungibleESDT' || t.type === 'SemiFungibleESDT');
+        
+        if (!hasNFTs) {
+          // Pure ESDT transaction, safe to skip
+          console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate ESDT transaction ${transaction.txHash} (found in ESDT transactions)`);
+          console.log(`[BLOCKCHAIN] ℹ️ Already processed: user=${existingEsdtTx.user_id}, token=${existingEsdtTx.token}, amount=${existingEsdtTx.amount}, type=${existingEsdtTx.type}`);
+          processedTransactions.add(transaction.txHash);
+          return { processed: false, reason: 'Already processed (database - ESDT)' };
+        }
+        // If transaction has NFTs, continue processing (NFTs checked per-transfer)
       }
       
-      console.log(`[BLOCKCHAIN] ✅ Transaction ${transaction.txHash} not found in database, proceeding with processing`);
+      console.log(`[BLOCKCHAIN] ✅ Transaction ${transaction.txHash} not found in database or contains NFTs, proceeding with processing`);
     } catch (dbCheckError) {
       console.error(`[BLOCKCHAIN] ⚠️ Critical error during database duplicate check:`, dbCheckError.message);
       // Fail-open: Continue processing if database check fails completely
@@ -493,6 +484,37 @@ async function processTransaction(transaction, guildId, projectName, userId = nu
         console.log(`[BLOCKCHAIN] Processing ${transferType} transfer: ${identifier} (${collection}#${nonce})${transfer.type === 'SemiFungibleESDT' ? ` amount: ${amount}` : ''} to ${projectName} in guild ${guildId}`);
         console.log(`[BLOCKCHAIN] Sender: ${transaction.sender}, Receiver: ${transaction.receiver}`);
         
+        // CRITICAL: Check for duplicate NFT transfer (tx_hash + collection + nonce combination)
+        // This allows processing multiple NFTs from the same transaction
+        try {
+          const { data: existingNftTx, error: nftCheckError } = await supabase
+            .from('virtual_account_nft_transactions')
+            .select('id, user_id, collection, nonce, type, tx_hash')
+            .eq('tx_hash', transaction.txHash)
+            .eq('collection', collection)
+            .eq('nonce', nonce)
+            .limit(1)
+            .maybeSingle();
+          
+          if (nftCheckError && nftCheckError.code !== 'PGRST116') {
+            console.error(`[BLOCKCHAIN] ⚠️ Error checking NFT duplicate:`, nftCheckError.message);
+          } else if (existingNftTx) {
+            console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate NFT transfer: ${identifier} (tx_hash=${transaction.txHash}, collection=${collection}, nonce=${nonce})`);
+            console.log(`[BLOCKCHAIN] ℹ️ Already processed for user ${existingNftTx.user_id}`);
+            results.push({
+              nft: identifier,
+              collection: collection,
+              nonce: nonce,
+              success: false,
+              error: 'Already processed'
+            });
+            continue; // Skip this NFT but continue processing other transfers
+          }
+        } catch (duplicateCheckError) {
+          console.error(`[BLOCKCHAIN] ⚠️ Error during per-transfer duplicate check:`, duplicateCheckError.message);
+          // Continue processing if check fails (fail-open)
+        }
+        
         // Process NFT/SFT deposit (pass token type from blockchain transaction)
         // Pass userId if provided (for pending transaction processing)
         const nftDepositResult = await processNFTDeposit(
@@ -564,12 +586,14 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
     }
     
     // CRITICAL: Database duplicate check (redundant safety layer)
-    // Main check happens in processTransaction() before calling this function
-    if (txHash) {
+    // Check for specific NFT transfer (tx_hash + collection + nonce) to allow multiple NFTs per transaction
+    if (txHash && collection && nonce !== null) {
       const { data: existingTx, error: checkError } = await supabase
         .from('virtual_account_nft_transactions')
         .select('id, user_id, collection, nonce, type')
         .eq('tx_hash', txHash)
+        .eq('collection', collection)
+        .eq('nonce', nonce)
         .limit(1)
         .maybeSingle(); // Use maybeSingle() to avoid error if no record found
       
@@ -577,11 +601,11 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
         console.error(`[BLOCKCHAIN] ⚠️ Error checking NFT duplicate in processNFTDeposit:`, checkError.message);
         // Continue processing if database check fails (fail-open to avoid missing transactions)
       } else if (existingTx) {
-        console.log(`[BLOCKCHAIN] ⚠️ Transaction ${txHash} already processed (found in database), skipping`);
-        console.log(`[BLOCKCHAIN] ℹ️ Already processed for user ${existingTx.user_id}, collection ${existingTx.collection}, nonce ${existingTx.nonce}`);
+        console.log(`[BLOCKCHAIN] ⚠️ NFT transfer already processed (tx_hash=${txHash}, collection=${collection}, nonce=${nonce}), skipping`);
+        console.log(`[BLOCKCHAIN] ℹ️ Already processed for user ${existingTx.user_id}`);
         return {
           success: false,
-          error: 'Transaction already processed'
+          error: 'NFT transfer already processed'
         };
       }
     }
