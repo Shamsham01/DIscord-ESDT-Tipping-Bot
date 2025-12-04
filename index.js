@@ -15279,26 +15279,32 @@ client.on('interactionCreate', async (interaction) => {
       const tokenDecimals = pool.rewardTokenDecimals || 18;
       const totalRewardHuman = totalRewardWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
       
-      await virtualAccounts.updateAccountBalance(guildId, userId, pool.rewardTokenIdentifier, totalRewardWei.toString());
+      // Get balance before adding rewards
+      const balanceBefore = await virtualAccounts.getUserBalance(guildId, userId, pool.rewardTokenIdentifier);
+      
+      // Add rewards to user's virtual account
+      const addResult = await virtualAccounts.addFundsToAccount(
+        guildId,
+        userId,
+        pool.rewardTokenIdentifier,
+        totalRewardHuman, // Use human-readable amount
+        null, // No transaction hash for staking rewards
+        'staking_reward',
+        interaction.user.tag
+      );
+      
+      if (!addResult.success) {
+        await interaction.editReply({ 
+          content: `❌ Failed to add rewards to your account: ${addResult.error}`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
       
       // Mark all as claimed
       for (const reward of unclaimedRewards) {
         await dbStakingPools.claimUserReward(guildId, poolId, userId, reward.distribution_id);
       }
-      
-      // Create transaction records
-      const transactionId = `staking_claim_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      const userBalance = await virtualAccounts.getUserBalance(guildId, userId, pool.rewardTokenIdentifier);
-      await virtualAccounts.addTransaction(guildId, userId, {
-        id: transactionId,
-        type: 'staking_reward',
-        token: pool.rewardTokenIdentifier,
-        amount: totalRewardWei.toString(),
-        balanceBefore: new BigNumber(userBalance).minus(totalRewardWei).toString(),
-        balanceAfter: userBalance,
-        timestamp: Date.now(),
-        description: `Claimed staking rewards from ${pool.poolName || pool.collectionName}`
-      });
       
       // Get USD value
       const tokenPriceUsd = await getTokenPriceUsd(pool.rewardTokenIdentifier);
