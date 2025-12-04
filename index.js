@@ -11008,6 +11008,69 @@ client.on('interactionCreate', async (interaction) => {
       // Get all staked NFTs
       const stakedNFTs = await dbStakingPools.getAllStakedNFTs(guildId, poolId);
       
+      // Calculate and auto-distribute final rewards (last 24h) to all stakers
+      let totalRewardsDistributed = new BigNumber('0');
+      let rewardsDistributedCount = 0;
+      const tokenDecimals = pool.rewardTokenDecimals || 18;
+      const rewardPerNftWei = new BigNumber(pool.rewardPerNftPerDayWei);
+      
+      if (stakedNFTs.length > 0 && rewardPerNftWei.isGreaterThan(0)) {
+        // Group NFTs by user to calculate per-user rewards
+        const userNFTCounts = {};
+        for (const nft of stakedNFTs) {
+          if (!userNFTCounts[nft.user_id]) {
+            userNFTCounts[nft.user_id] = 0;
+          }
+          userNFTCounts[nft.user_id]++;
+        }
+        
+        // Distribute rewards to each user
+        for (const [userId, nftCount] of Object.entries(userNFTCounts)) {
+          try {
+            // Calculate reward for this user (reward_per_nft * number of NFTs)
+            const userRewardWei = rewardPerNftWei.multipliedBy(nftCount);
+            const userRewardHuman = userRewardWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+            
+            // Check if pool has enough supply
+            const currentSupplyBN = new BigNumber(pool.currentSupplyWei);
+            if (currentSupplyBN.isGreaterThanOrEqualTo(userRewardWei)) {
+              // Add reward to user's VA (auto-claim)
+              const addResult = await virtualAccounts.addFundsToAccount(
+                guildId,
+                userId,
+                pool.rewardTokenIdentifier,
+                userRewardHuman,
+                null, // No transaction hash for auto-claim on closure
+                'staking_reward_auto',
+                null // Username not needed
+              );
+              
+              if (addResult.success) {
+                totalRewardsDistributed = totalRewardsDistributed.plus(userRewardWei);
+                rewardsDistributedCount++;
+                console.log(`[STAKING] Auto-distributed ${userRewardHuman} ${pool.rewardTokenTicker} to user ${userId} (${nftCount} NFT(s))`);
+              } else {
+                console.error(`[STAKING] Failed to auto-distribute reward to user ${userId}: ${addResult.error}`);
+              }
+            } else {
+              console.warn(`[STAKING] Insufficient supply to pay final reward to user ${userId}. Required: ${userRewardWei.toString()}, Available: ${currentSupplyBN.toString()}`);
+            }
+          } catch (rewardError) {
+            console.error(`[STAKING] Error auto-distributing reward to user ${userId}:`, rewardError.message);
+          }
+        }
+        
+        // Update pool supply after distributing rewards
+        if (totalRewardsDistributed.isGreaterThan(0)) {
+          const newSupplyBN = new BigNumber(pool.currentSupplyWei).minus(totalRewardsDistributed);
+          await dbStakingPools.updateStakingPool(guildId, poolId, {
+            currentSupplyWei: newSupplyBN.toString()
+          });
+          pool.currentSupplyWei = newSupplyBN.toString(); // Update local pool object for refund calculation
+          console.log(`[STAKING] Distributed ${totalRewardsDistributed.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString()} ${pool.rewardTokenTicker} in final rewards, remaining supply: ${newSupplyBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString()}`);
+        }
+      }
+      
       // Return NFTs to users' VAs (mark as unstaked)
       let returnedCount = 0;
       let failedCount = 0;
@@ -11050,9 +11113,40 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
       
-      // Update pool status
+      // Return remaining supply balance to pool creator
+      let refundAmount = null;
+      let refundAmountHuman = null;
+      if (pool.currentSupplyWei && new BigNumber(pool.currentSupplyWei).isGreaterThan(0)) {
+        try {
+          const tokenDecimals = pool.rewardTokenDecimals || 18;
+          refundAmountHuman = new BigNumber(pool.currentSupplyWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+          
+          // Add remaining supply back to creator's VA
+          const refundResult = await virtualAccounts.addFundsToAccount(
+            guildId,
+            pool.creatorId,
+            pool.rewardTokenIdentifier,
+            refundAmountHuman,
+            null, // No transaction hash for refund
+            'staking_pool_refund',
+            interaction.user.tag
+          );
+          
+          if (refundResult.success) {
+            refundAmount = refundAmountHuman;
+            console.log(`[STAKING] Refunded ${refundAmountHuman} ${pool.rewardTokenTicker} to pool creator ${pool.creatorId}`);
+          } else {
+            console.error(`[STAKING] Failed to refund remaining supply: ${refundResult.error}`);
+          }
+        } catch (refundError) {
+          console.error(`[STAKING] Error refunding remaining supply:`, refundError.message);
+        }
+      }
+      
+      // Update pool status and clear supply (set to 0)
       await dbStakingPools.updateStakingPool(guildId, poolId, {
-        status: 'CLOSED'
+        status: 'CLOSED',
+        currentSupplyWei: '0' // Clear supply after refund
       });
       
       // Update embed
@@ -11065,7 +11159,20 @@ client.on('interactionCreate', async (interaction) => {
           if (channel) {
             const thread = await channel.threads.cache.get(pool.threadId) || await channel.threads.fetch(pool.threadId);
             if (thread) {
-              await thread.send(`🔴 **Pool Closed**\n\nThe staking pool has been closed by the creator.\n\nAll ${returnedCount} staked NFT(s) have been returned to their owners' virtual accounts.`);
+              let closureMessage = `🔴 **Pool Closed**\n\nThe staking pool has been closed by the creator.\n\n`;
+              
+              if (rewardsDistributedCount > 0) {
+                const totalRewardsHuman = totalRewardsDistributed.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+                closureMessage += `💰 **Final Rewards Distributed:** ${totalRewardsHuman} ${pool.rewardTokenTicker} automatically credited to ${rewardsDistributedCount} staker(s).\n\n`;
+              }
+              
+              closureMessage += `All ${returnedCount} staked NFT(s) have been returned to their owners' virtual accounts.`;
+              
+              if (refundAmount) {
+                closureMessage += `\n\n💰 **Remaining Supply Refunded:** ${refundAmount} ${pool.rewardTokenTicker} has been returned to the pool creator's virtual account.`;
+              }
+              
+              await thread.send(closureMessage);
             }
           }
         } catch (threadError) {
@@ -11073,7 +11180,20 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
       
-      await interaction.editReply({ content: `✅ Pool closed successfully. ${returnedCount} NFT(s) returned to owners.`, flags: [MessageFlags.Ephemeral] });
+      let successMessage = `✅ Pool closed successfully.\n\n`;
+      
+      if (rewardsDistributedCount > 0) {
+        const totalRewardsHuman = totalRewardsDistributed.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        successMessage += `💰 Final rewards (${totalRewardsHuman} ${pool.rewardTokenTicker}) automatically distributed to ${rewardsDistributedCount} staker(s).\n\n`;
+      }
+      
+      successMessage += `${returnedCount} NFT(s) returned to owners.`;
+      
+      if (refundAmount) {
+        successMessage += `\n💰 Remaining supply (${refundAmount} ${pool.rewardTokenTicker}) has been refunded to your virtual account.`;
+      }
+      
+      await interaction.editReply({ content: successMessage, flags: [MessageFlags.Ephemeral] });
       
     } catch (error) {
       console.error('[STAKING] Error closing staking pool:', error);
@@ -18325,6 +18445,69 @@ async function autoCloseStakingPool(guildId, poolId) {
     // Get all staked NFTs
     const stakedNFTs = await dbStakingPools.getAllStakedNFTs(guildId, poolId);
     
+    // Calculate and auto-distribute final rewards (last 24h) to all stakers
+    let totalRewardsDistributed = new BigNumber('0');
+    let rewardsDistributedCount = 0;
+    const tokenDecimals = pool.rewardTokenDecimals || 18;
+    const rewardPerNftWei = new BigNumber(pool.rewardPerNftPerDayWei);
+    
+    if (stakedNFTs.length > 0 && rewardPerNftWei.isGreaterThan(0)) {
+      // Group NFTs by user to calculate per-user rewards
+      const userNFTCounts = {};
+      for (const nft of stakedNFTs) {
+        if (!userNFTCounts[nft.user_id]) {
+          userNFTCounts[nft.user_id] = 0;
+        }
+        userNFTCounts[nft.user_id]++;
+      }
+      
+      // Distribute rewards to each user
+      for (const [userId, nftCount] of Object.entries(userNFTCounts)) {
+        try {
+          // Calculate reward for this user (reward_per_nft * number of NFTs)
+          const userRewardWei = rewardPerNftWei.multipliedBy(nftCount);
+          const userRewardHuman = userRewardWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+          
+          // Check if pool has enough supply
+          const currentSupplyBN = new BigNumber(pool.currentSupplyWei);
+          if (currentSupplyBN.isGreaterThanOrEqualTo(userRewardWei)) {
+            // Add reward to user's VA (auto-claim)
+            const addResult = await virtualAccounts.addFundsToAccount(
+              guildId,
+              userId,
+              pool.rewardTokenIdentifier,
+              userRewardHuman,
+              null, // No transaction hash for auto-claim on closure
+              'staking_reward_auto',
+              null // Username not needed
+            );
+            
+            if (addResult.success) {
+              totalRewardsDistributed = totalRewardsDistributed.plus(userRewardWei);
+              rewardsDistributedCount++;
+              console.log(`[STAKING] Auto-close: Auto-distributed ${userRewardHuman} ${pool.rewardTokenTicker} to user ${userId} (${nftCount} NFT(s))`);
+            } else {
+              console.error(`[STAKING] Auto-close: Failed to auto-distribute reward to user ${userId}: ${addResult.error}`);
+            }
+          } else {
+            console.warn(`[STAKING] Auto-close: Insufficient supply to pay final reward to user ${userId}. Required: ${userRewardWei.toString()}, Available: ${currentSupplyBN.toString()}`);
+          }
+        } catch (rewardError) {
+          console.error(`[STAKING] Auto-close: Error auto-distributing reward to user ${userId}:`, rewardError.message);
+        }
+      }
+      
+      // Update pool supply after distributing rewards
+      if (totalRewardsDistributed.isGreaterThan(0)) {
+        const newSupplyBN = new BigNumber(pool.currentSupplyWei).minus(totalRewardsDistributed);
+        await dbStakingPools.updateStakingPool(guildId, poolId, {
+          currentSupplyWei: newSupplyBN.toString()
+        });
+        pool.currentSupplyWei = newSupplyBN.toString(); // Update local pool object for refund calculation
+        console.log(`[STAKING] Auto-close: Distributed ${totalRewardsDistributed.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString()} ${pool.rewardTokenTicker} in final rewards, remaining supply: ${newSupplyBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString()}`);
+      }
+    }
+    
     // Return NFTs to users' VAs (mark as unstaked)
     for (const nft of stakedNFTs) {
       try {
@@ -18363,9 +18546,39 @@ async function autoCloseStakingPool(guildId, poolId) {
       }
     }
     
-    // Update pool status
+    // Return remaining supply balance to pool creator
+    let refundAmount = null;
+    let refundAmountHuman = null;
+    if (pool.currentSupplyWei && new BigNumber(pool.currentSupplyWei).isGreaterThan(0)) {
+      try {
+        const tokenDecimals = pool.rewardTokenDecimals || 18;
+        refundAmountHuman = new BigNumber(pool.currentSupplyWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        
+        // Add remaining supply back to creator's VA
+        const refundResult = await virtualAccounts.addFundsToAccount(
+          guildId,
+          pool.creatorId,
+          pool.rewardTokenIdentifier,
+          refundAmountHuman,
+          null, // No transaction hash for refund
+          'staking_pool_refund'
+        );
+        
+        if (refundResult.success) {
+          refundAmount = refundAmountHuman;
+          console.log(`[STAKING] Auto-close: Refunded ${refundAmountHuman} ${pool.rewardTokenTicker} to pool creator ${pool.creatorId}`);
+        } else {
+          console.error(`[STAKING] Auto-close: Failed to refund remaining supply: ${refundResult.error}`);
+        }
+      } catch (refundError) {
+        console.error(`[STAKING] Auto-close: Error refunding remaining supply:`, refundError.message);
+      }
+    }
+    
+    // Update pool status and clear supply (set to 0)
     await dbStakingPools.updateStakingPool(guildId, poolId, {
-      status: 'CLOSED'
+      status: 'CLOSED',
+      currentSupplyWei: '0' // Clear supply after refund
     });
     
     // Update embed
@@ -18378,7 +18591,20 @@ async function autoCloseStakingPool(guildId, poolId) {
         if (channel) {
           const thread = await channel.threads.cache.get(pool.threadId) || await channel.threads.fetch(pool.threadId);
           if (thread) {
-            await thread.send(`🔴 **Pool Closed**\n\nThe staking pool has been automatically closed due to low supply and no top-up within 48 hours.\n\nAll staked NFTs have been returned to their owners' virtual accounts.`);
+            let closureMessage = `🔴 **Pool Closed**\n\nThe staking pool has been automatically closed due to low supply and no top-up within 48 hours.\n\n`;
+            
+            if (rewardsDistributedCount > 0) {
+              const totalRewardsHuman = totalRewardsDistributed.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+              closureMessage += `💰 **Final Rewards Distributed:** ${totalRewardsHuman} ${pool.rewardTokenTicker} automatically credited to ${rewardsDistributedCount} staker(s).\n\n`;
+            }
+            
+            closureMessage += `All staked NFTs have been returned to their owners' virtual accounts.`;
+            
+            if (refundAmount) {
+              closureMessage += `\n\n💰 **Remaining Supply Refunded:** ${refundAmount} ${pool.rewardTokenTicker} has been returned to the pool creator's virtual account.`;
+            }
+            
+            await thread.send(closureMessage);
           }
         }
       } catch (threadError) {
@@ -18386,7 +18612,7 @@ async function autoCloseStakingPool(guildId, poolId) {
       }
     }
     
-    console.log(`[STAKING] Pool ${poolId} auto-closed, ${stakedNFTs.length} NFTs returned`);
+    console.log(`[STAKING] Pool ${poolId} auto-closed, ${stakedNFTs.length} NFTs returned${rewardsDistributedCount > 0 ? `, ${totalRewardsDistributed.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString()} ${pool.rewardTokenTicker} auto-distributed` : ''}${refundAmount ? `, ${refundAmount} ${pool.rewardTokenTicker} refunded` : ''}`);
     
   } catch (error) {
     console.error(`[STAKING] Error auto-closing pool ${poolId}:`, error.message);
