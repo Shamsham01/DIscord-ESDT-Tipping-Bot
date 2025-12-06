@@ -189,6 +189,7 @@ async function updateLottery(guildId, lotteryId, lotteryData) {
       updated_at: new Date().toISOString()
     };
     
+    if (lotteryData.ticketPriceWei !== undefined) updateData.ticket_price_wei = lotteryData.ticketPriceWei;
     if (lotteryData.prizePoolWei !== undefined) updateData.prize_pool_wei = lotteryData.prizePoolWei;
     if (lotteryData.prizePoolUsd !== undefined) updateData.prize_pool_usd = lotteryData.prizePoolUsd;
     if (lotteryData.endTime !== undefined) updateData.end_time = lotteryData.endTime;
@@ -249,34 +250,54 @@ async function createTicket(guildId, ticketId, ticketData) {
 
 async function getTicketsByLottery(guildId, lotteryId) {
   try {
-    const { data, error } = await supabase
-      .from('lottery_tickets')
-      .select('*')
-      .eq('guild_id', guildId)
-      .eq('lottery_id', lotteryId)
-      .order('created_at', { ascending: false });
-    
-    if (error) throw error;
-    
+    // Supabase defaults to 1000 rows, so we need to paginate to get all tickets
     const tickets = {};
-    (data || []).forEach(row => {
-      tickets[row.ticket_id] = {
-        ticketId: row.ticket_id,
-        guildId: row.guild_id,
-        lotteryId: row.lottery_id,
-        userId: row.user_id,
-        userTag: row.user_tag,
-        numbers: row.numbers,
-        tokenIdentifier: row.token_identifier,
-        tokenTicker: row.token_ticker,
-        ticketPriceWei: row.ticket_price_wei,
-        status: row.status,
-        isWinner: row.is_winner,
-        matchedNumbers: row.matched_numbers,
-        createdAt: row.created_at,
-        expiredAt: row.expired_at
-      };
-    });
+    let from = 0;
+    const pageSize = 1000;
+    let hasMore = true;
+    
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from('lottery_tickets')
+        .select('*')
+        .eq('guild_id', guildId)
+        .eq('lottery_id', lotteryId)
+        .order('created_at', { ascending: false })
+        .range(from, from + pageSize - 1);
+      
+      if (error) throw error;
+      
+      if (!data || data.length === 0) {
+        hasMore = false;
+      } else {
+        data.forEach(row => {
+          tickets[row.ticket_id] = {
+            ticketId: row.ticket_id,
+            guildId: row.guild_id,
+            lotteryId: row.lottery_id,
+            userId: row.user_id,
+            userTag: row.user_tag,
+            numbers: row.numbers,
+            tokenIdentifier: row.token_identifier,
+            tokenTicker: row.token_ticker,
+            ticketPriceWei: row.ticket_price_wei,
+            status: row.status,
+            isWinner: row.is_winner,
+            matchedNumbers: row.matched_numbers,
+            createdAt: row.created_at,
+            expiredAt: row.expired_at
+          };
+        });
+        
+        // If we got less than pageSize, we've reached the end
+        if (data.length < pageSize) {
+          hasMore = false;
+        } else {
+          from += pageSize;
+        }
+      }
+    }
+    
     return tickets;
   } catch (error) {
     console.error('[DB] Error getting tickets by lottery:', error);
@@ -332,6 +353,28 @@ async function getTicketsByUser(guildId, userId, tokenTicker = null, status = nu
     }));
   } catch (error) {
     console.error('[DB] Error getting tickets by user:', error);
+    throw error;
+  }
+}
+
+async function getTicketsCountByLottery(guildId, lotteryId, status = null) {
+  try {
+    let query = supabase
+      .from('lottery_tickets')
+      .select('*', { count: 'exact', head: true })
+      .eq('guild_id', guildId)
+      .eq('lottery_id', lotteryId);
+    
+    if (status) {
+      query = query.eq('status', status);
+    }
+    
+    const { count, error } = await query;
+    
+    if (error) throw error;
+    return count || 0;
+  } catch (error) {
+    console.error('[DB] Error getting tickets count by lottery:', error);
     throw error;
   }
 }
@@ -582,6 +625,7 @@ module.exports = {
   createTicket,
   getTicketsByLottery,
   getTicketsByUser,
+  getTicketsCountByLottery,
   getTicketsCountByUser,
   getWinningTickets,
   updateTicketStatus,

@@ -5550,6 +5550,113 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (commandName === 'update-football-match') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ content: 'Only administrators can update football matches.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const guildId = interaction.guildId;
+      const matchId = interaction.options.getString('game_id');
+      const topupPotSize = interaction.options.getNumber('topup-pot-size');
+      
+      // Validate update option is provided
+      if (topupPotSize === null) {
+        await interaction.editReply({ content: 'Please provide the new stake amount (topup-pot-size).', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      if (topupPotSize <= 0) {
+        await interaction.editReply({ content: 'Stake amount must be greater than 0.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get match
+      const match = await dbFootball.getMatch(matchId);
+      if (!match) {
+        await interaction.editReply({ content: 'Match not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Validate match is in current guild
+      if (!match.guildIds || !match.guildIds.includes(guildId)) {
+        await interaction.editReply({ content: 'This match is not available in this server.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Validate match is active
+      if (!['SCHEDULED', 'TIMED', 'IN_PLAY'].includes(match.status)) {
+        await interaction.editReply({ content: `Match is not active (current status: ${match.status}). Only SCHEDULED, TIMED, or IN_PLAY matches can be updated.`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get token data for this guild
+      const token = getMatchTokenForGuild(match, guildId);
+      if (!token) {
+        await interaction.editReply({ content: 'Could not find token configuration for this match in this guild.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get current bonus pot amount
+      const currentBonusPotWei = match.bonusPotWeiByGuild?.[guildId] || '0';
+      const currentBonusPotHuman = new BigNumber(currentBonusPotWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+      
+      // Convert topup amount to wei
+      const topupAmountWei = toBlockchainAmount(topupPotSize, token.decimals);
+      
+      // Add topup to current bonus pot
+      const newBonusPotWei = new BigNumber(currentBonusPotWei).plus(new BigNumber(topupAmountWei)).toString();
+      const newBonusPotHuman = new BigNumber(newBonusPotWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+      
+      // Update bonus pot in match_guilds table
+      await dbFootball.updateMatchGuildBonusPot(matchId, guildId, newBonusPotWei);
+      
+      console.log(`[FOOTBALL] Topped up bonus pot for match ${matchId} in guild ${guildId}: ${currentBonusPotHuman} + ${topupPotSize} = ${newBonusPotHuman} ${token.ticker}`);
+      
+      // Refresh embed (updateMatchEmbed will fetch fresh match data internally)
+      await updateMatchEmbed(guildId, matchId);
+      
+      // Post notification in match thread
+      if (match.embeds && match.embeds[guildId] && match.embeds[guildId].threadId) {
+        try {
+          const thread = await interaction.guild.channels.fetch(match.embeds[guildId].threadId);
+          if (thread) {
+            const notificationEmbed = new EmbedBuilder()
+              .setTitle('💰 Bonus Pot Topped Up!')
+              .setDescription(`**${match.home} vs ${match.away}**`)
+              .addFields([
+                { name: '🎁 Topup Amount', value: `${topupPotSize} ${token.ticker}`, inline: true },
+                { name: '📊 Previous Bonus', value: `${currentBonusPotHuman} ${token.ticker}`, inline: true },
+                { name: '💎 Total Bonus Pot', value: `**${newBonusPotHuman} ${token.ticker}**`, inline: false }
+              ])
+              .setColor('#00FF00')
+              .setFooter({ text: 'Bonus pot is added to the prize pool for winners', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+              .setTimestamp();
+            
+            await thread.send({ embeds: [notificationEmbed] });
+          }
+        } catch (threadError) {
+          console.error('[FOOTBALL] Error posting bonus pot notification to thread:', threadError.message);
+          // Don't fail the command if thread notification fails
+        }
+      }
+      
+      await interaction.editReply({
+        content: `✅ **Match updated successfully!**\n\nTopped up pot size: ${currentBonusPotHuman} ${token.ticker} + ${topupPotSize} ${token.ticker} = **${newBonusPotHuman} ${token.ticker}**`,
+        flags: [MessageFlags.Ephemeral]
+      });
+      
+    } catch (error) {
+      console.error('[FOOTBALL] Error updating match:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error updating match: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error updating match: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
   } else if (commandName === 'get-competition') {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
@@ -10369,6 +10476,172 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error creating lottery: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (commandName === 'update-lottery') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ content: 'Only administrators can update lotteries.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const guildId = interaction.guildId;
+      const lotteryId = interaction.options.getString('lottery_id');
+      const topupPrizePool = interaction.options.getNumber('topup_prize_pool');
+      const updateTicketPrice = interaction.options.getNumber('update_ticket_price');
+      
+      // Validate at least one update option is provided
+      if (topupPrizePool === null && updateTicketPrice === null) {
+        await interaction.editReply({ content: 'Please provide at least one update option (topup_prize_pool or update_ticket_price).', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get lottery
+      const lottery = await dbLottery.getLottery(guildId, lotteryId);
+      if (!lottery) {
+        await interaction.editReply({ content: 'Lottery not found.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Validate lottery is LIVE
+      if (lottery.status !== 'LIVE') {
+        await interaction.editReply({ content: `Lottery is not LIVE (current status: ${lottery.status}). Only LIVE lotteries can be updated.`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get token metadata
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      let tokenDecimals = 8;
+      if (tokenMetadata[lottery.tokenIdentifier]) {
+        tokenDecimals = tokenMetadata[lottery.tokenIdentifier].decimals;
+      }
+      
+      const updates = {};
+      let updateMessages = [];
+      
+      // Handle topup prize pool
+      if (topupPrizePool !== null) {
+        if (topupPrizePool <= 0) {
+          await interaction.editReply({ content: 'Topup amount must be greater than 0.', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        
+        // Get house lottery balance
+        const houseBalanceData = await getAllHouseBalances(guildId);
+        const aggregatedBalances = {
+          lotteryEarnings: {},
+          lotterySpending: {}
+        };
+        
+        for (const [tokenId, tokenData] of Object.entries(houseBalanceData || {})) {
+          if (tokenData.lotteryEarnings) {
+            for (const [token, amount] of Object.entries(tokenData.lotteryEarnings)) {
+              if (!aggregatedBalances.lotteryEarnings[token]) {
+                aggregatedBalances.lotteryEarnings[token] = '0';
+              }
+              const current = new BigNumber(aggregatedBalances.lotteryEarnings[token] || '0');
+              aggregatedBalances.lotteryEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+            }
+          }
+          
+          if (tokenData.lotterySpending) {
+            for (const [token, amount] of Object.entries(tokenData.lotterySpending)) {
+              if (!aggregatedBalances.lotterySpending[token]) {
+                aggregatedBalances.lotterySpending[token] = '0';
+              }
+              const current = new BigNumber(aggregatedBalances.lotterySpending[token] || '0');
+              aggregatedBalances.lotterySpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+            }
+          }
+        }
+        
+        const lotteryEarnings = new BigNumber(aggregatedBalances.lotteryEarnings[lottery.tokenIdentifier] || '0');
+        const lotterySpending = new BigNumber(aggregatedBalances.lotterySpending[lottery.tokenIdentifier] || '0');
+        const availableBalanceWei = lotteryEarnings.minus(lotterySpending);
+        
+        const topupAmountWei = new BigNumber(topupPrizePool).multipliedBy(new BigNumber(10).pow(tokenDecimals));
+        
+        if (topupAmountWei.isGreaterThan(availableBalanceWei)) {
+          const availableHuman = availableBalanceWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+          await interaction.editReply({ 
+            content: `❌ **Insufficient House Lottery balance!**\n\nRequested: **${topupPrizePool}** ${lottery.tokenTicker}\nAvailable: **${availableHuman}** ${lottery.tokenTicker}`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        // Track spending from House Lottery balance
+        const spendingResult = await trackHouseSpending(
+          guildId, 
+          topupAmountWei.toString(), 
+          lottery.tokenIdentifier, 
+          `Topup prize pool for lottery ${lotteryId.substring(0, 16)}...`, 
+          'lottery'
+        );
+        
+        if (!spendingResult || !spendingResult.success) {
+          await interaction.editReply({ 
+            content: `❌ **Failed to track House Lottery spending!**\n\nError: ${spendingResult?.error || 'Unknown error'}`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        // Add to prize pool
+        const currentPrizePoolWei = new BigNumber(lottery.prizePoolWei || '0');
+        const newPrizePoolWei = currentPrizePoolWei.plus(topupAmountWei).toString();
+        updates.prizePoolWei = newPrizePoolWei;
+        
+        // Recalculate USD value
+        try {
+          const tokenPriceUsd = await getTokenPriceUsd(lottery.tokenIdentifier);
+          const newPrizePoolHuman = new BigNumber(newPrizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+          updates.prizePoolUsd = new BigNumber(newPrizePoolHuman).multipliedBy(tokenPriceUsd).toNumber();
+        } catch (error) {
+          console.error('[LOTTERY] Error fetching token price for topup:', error.message);
+          // Calculate from existing USD value if available
+          if (lottery.prizePoolUsd > 0 && parseFloat(lottery.prizePoolWei) > 0) {
+            const oldPrizePoolHuman = new BigNumber(lottery.prizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+            const tokenPriceUsd = parseFloat(lottery.prizePoolUsd) / parseFloat(oldPrizePoolHuman);
+            const newPrizePoolHuman = new BigNumber(newPrizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+            updates.prizePoolUsd = new BigNumber(newPrizePoolHuman).multipliedBy(tokenPriceUsd).toNumber();
+          }
+        }
+        
+        updateMessages.push(`Added ${topupPrizePool} ${lottery.tokenTicker} to prize pool from House Lottery balance`);
+      }
+      
+      // Handle ticket price update
+      if (updateTicketPrice !== null) {
+        if (updateTicketPrice <= 0) {
+          await interaction.editReply({ content: 'Ticket price must be greater than 0.', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        
+        const newTicketPriceWei = new BigNumber(updateTicketPrice).multipliedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        updates.ticketPriceWei = newTicketPriceWei;
+        updateMessages.push(`Updated ticket price to ${updateTicketPrice} ${lottery.tokenTicker}`);
+      }
+      
+      // Save updates
+      await dbLottery.updateLottery(guildId, lotteryId, updates);
+      
+      // Refresh embed
+      await updateLotteryEmbed(guildId, lotteryId);
+      
+      await interaction.editReply({
+        content: `✅ **Lottery updated successfully!**\n\n${updateMessages.join('\n')}`,
+        flags: [MessageFlags.Ephemeral]
+      });
+      
+    } catch (error) {
+      console.error('[LOTTERY] Error updating lottery:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error updating lottery: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error updating lottery: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
   } else if (commandName === 'my-active-lottery-tickets') {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
@@ -12763,6 +13036,74 @@ client.on('interactionCreate', async (interaction) => {
       await safeRespond(interaction, filtered);
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in lottery token autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // AUTOCOMPLETE FOR UPDATE-LOTTERY lottery_id
+  if (interaction.commandName === 'update-lottery' && interaction.options.getFocused(true).name === 'lottery_id') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      
+      // Get active lotteries
+      const activeLotteries = await dbLottery.getActiveLotteries(guildId);
+      
+      const filtered = Object.values(activeLotteries).filter(lottery => {
+        const lotteryIdLower = lottery.lotteryId.toLowerCase();
+        const tokenTickerLower = lottery.tokenTicker.toLowerCase();
+        const focusedLower = focusedValue.toLowerCase();
+        return lotteryIdLower.includes(focusedLower) || tokenTickerLower.includes(focusedLower);
+      });
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(lottery => ({
+          name: `${lottery.tokenTicker} Lottery (${lottery.lotteryId.substring(0, 16)}...)`,
+          value: lottery.lotteryId
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in update-lottery lottery_id autocomplete:', error.message);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // AUTOCOMPLETE FOR UPDATE-FOOTBALL-MATCH game_id
+  if (interaction.commandName === 'update-football-match' && interaction.options.getFocused(true).name === 'game_id') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      
+      // Get matches for this guild
+      const guildMatches = await dbFootball.getMatchesByGuild(guildId);
+      
+      // Filter active matches (SCHEDULED, TIMED, IN_PLAY)
+      const activeMatches = Object.values(guildMatches).filter(match => {
+        return ['SCHEDULED', 'TIMED', 'IN_PLAY'].includes(match.status);
+      });
+      
+      const focusedLower = focusedValue.toLowerCase();
+      const filtered = activeMatches.filter(match => {
+        const matchIdLower = match.matchId.toLowerCase();
+        const homeLower = match.home.toLowerCase();
+        const awayLower = match.away.toLowerCase();
+        const compLower = match.compName.toLowerCase();
+        return matchIdLower.includes(focusedLower) || 
+               homeLower.includes(focusedLower) || 
+               awayLower.includes(focusedLower) ||
+               compLower.includes(focusedLower);
+      });
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(match => ({
+          name: `${match.home} vs ${match.away} - ${match.compName} (${match.matchId})`,
+          value: match.matchId
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in update-football-match game_id autocomplete:', error.message);
       await safeRespond(interaction, []);
     }
     return;
@@ -17123,8 +17464,12 @@ async function processTicketPurchase(guildId, lotteryId, userId, userTag, number
     });
     
     // Update lottery stats
+    // Use count query for ticket count (more efficient than fetching all tickets)
+    const ticketCount = await dbLottery.getTicketsCountByLottery(guildId, lotteryId);
+    
+    // For unique participants, we still need to fetch tickets to get distinct user IDs
+    // But now getTicketsByLottery uses pagination so it will work correctly even with >1000 tickets
     const tickets = await dbLottery.getTicketsByLottery(guildId, lotteryId);
-    const ticketCount = Object.keys(tickets).length;
     const uniqueUsers = new Set(Object.values(tickets).map(t => t.userId));
     const uniqueParticipants = uniqueUsers.size;
     
@@ -20486,22 +20831,31 @@ function getMatchTokenForGuild(match, guildId) {
   return null;
 }
 
-// Calculate current pot size for a football match
+// Calculate current pot size for a football match (bets + bonus pot)
 async function calculateMatchPotSize(guildId, matchId) {
   try {
     const matchBets = await dbFootball.getBetsByMatch(guildId, matchId);
     const allBets = Object.values(matchBets || {});
     
-    const totalPotWei = allBets.reduce((total, bet) => total + Number(bet.amountWei || 0), 0);
+    // Sum of all bets
+    const betsPotWei = allBets.reduce((total, bet) => total + Number(bet.amountWei || 0), 0);
     
-    // Get match data to access token decimals (guild-specific)
+    // Get match data to access token decimals and bonus pot (guild-specific)
     const match = await dbFootball.getMatch(matchId);
     if (!match || !match.guildIds || !match.guildIds.includes(guildId)) return { totalPotWei: 0, totalPotHuman: '0' };
     
     const token = getMatchTokenForGuild(match, guildId);
     if (!token) return { totalPotWei: 0, totalPotHuman: '0' };
     
+    // Get bonus pot for this guild
+    const bonusPotWei = match.bonusPotWeiByGuild?.[guildId] || '0';
+    
+    // Total pot = bets + bonus
+    const totalPotWei = new BigNumber(betsPotWei).plus(new BigNumber(bonusPotWei)).toString();
     const totalPotHuman = new BigNumber(totalPotWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+    
+    // Debug logging to track pot calculation
+    console.log(`[FOOTBALL] calculateMatchPotSize for match ${matchId} guild ${guildId}: bets=${betsPotWei} (${new BigNumber(betsPotWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString()}), bonus=${bonusPotWei} (${new BigNumber(bonusPotWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString()}), total=${totalPotWei} (${totalPotHuman})`);
     
     return {
       totalPotWei: totalPotWei,
@@ -20835,6 +21189,7 @@ async function updateMatchEmbed(guildId, matchId) {
     
     // Create fields array
     const stakeAmountWei = getMatchStakeForGuild(match, guildId);
+    console.log(`[FOOTBALL] updateMatchEmbed: Reading stake for match ${matchId} in guild ${guildId}: ${stakeAmountWei} wei (from requiredAmountWeiByGuild: ${match.requiredAmountWeiByGuild?.[guildId] || 'not found'})`);
     const stakeAmountHuman = new BigNumber(stakeAmountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
     
     // Calculate USD values
@@ -20973,13 +21328,16 @@ async function processMatchPrizes(guildId, matchId) {
     }
     
     // Step 4: Calculate prize distribution (use all winners for fair pot distribution)
-    const totalPotWei = matchBets.reduce((total, bet) => total + Number(bet.amountWei), 0);
-    const totalPotHuman = new BigNumber(totalPotWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+    // Include bonus pot in total pot calculation
+    const potSize = await calculateMatchPotSize(guildId, matchId);
+    const totalPotWei = potSize.totalPotWei; // This includes bets + bonus pot
+    const totalPotHuman = potSize.totalPotHuman;
     
     if (allWinners.length === 0) {
       console.log(`[FOOTBALL] No winners for match ${matchId}, all bets lose`);
       
       // Track house earnings when no winners (only if not already tracked for this guild)
+      // Include bonus pot in house earnings (bets + bonus pot go to house)
       const houseEarningsTracked = match.houseEarningsTrackedByGuild?.[guildId] || false;
       if (!houseEarningsTracked) {
         await trackHouseEarnings(guildId, matchId, totalPotWei, token.decimals, token.identifier);
@@ -20992,6 +21350,7 @@ async function processMatchPrizes(guildId, matchId) {
     }
     
     // Winners split the pot equally (use allWinners for fair distribution, but only process unprocessed ones)
+    // Total pot includes bonus pot, so winners get bets + bonus pot
     const prizePerWinnerWei = Math.floor(totalPotWei / allWinners.length);
     const prizePerWinnerHuman = new BigNumber(prizePerWinnerWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
     
