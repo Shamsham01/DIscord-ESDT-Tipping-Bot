@@ -6448,6 +6448,11 @@ client.on('interactionCreate', async (interaction) => {
           const totalBalance = bettingBalance.plus(auctionBalance).plus(lotteryBalance);
           const totalBalanceHuman = new BigNumber(totalBalance).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
           
+          // Skip tokens with zero total balance to save space
+          if (totalBalance.isLessThanOrEqualTo(0)) {
+            continue;
+          }
+          
           embed.addFields({
             name: `💰 ${tokenTicker}`,
             value: `**⚽ Betting:** ${bettingBalanceHuman} (Earned: ${bettingEarningsHuman} | Spent: ${bettingSpendingHuman})\n**🎨 Auction:** ${auctionBalanceHuman} (Earned: ${auctionEarningsHuman} | Spent: ${auctionSpendingHuman})\n**🎲 Lottery:** ${lotteryBalanceHuman} (Earned: ${lotteryEarningsHuman} | Spent: ${lotterySpendingHuman})\n**📊 Total:** ${totalBalanceHuman}`,
