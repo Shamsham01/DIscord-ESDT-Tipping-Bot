@@ -1234,7 +1234,7 @@ const commands = [
     },
     {
         name: 'update-football-match',
-        description: 'Update an existing football match stake amount (Admin only)',
+        description: 'Top up the bonus pot (prize pool) for an existing football match (Admin only)',
         options: [
             {
                 name: 'game_id',
@@ -1245,7 +1245,7 @@ const commands = [
             },
             {
                 name: 'topup-pot-size',
-                description: 'New required stake amount (pot size)',
+                description: 'Amount to add to the bonus pot (prize pool)',
                 type: ApplicationCommandOptionType.Number,
                 required: true,
                 min_value: 0.1

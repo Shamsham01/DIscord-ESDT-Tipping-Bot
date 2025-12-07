@@ -199,20 +199,22 @@ Update an existing lottery (Admin only).
 ```
 
 ### `/update-football-match`
-Update an existing football match stake amount (Admin only).
+Top up the bonus pot (prize pool) for an existing football match (Admin only).
 
 **Usage**: `/update-football-match game_id topup-pot-size`
 
 **Parameters**:
 - `game_id` (Required): Select the match to update
-- `topup-pot-size` (Required): New stake amount per bet
+- `topup-pot-size` (Required): Amount to add to the bonus pot (prize pool)
 
-**Important**: Only matches with status SCHEDULED, TIMED, or IN_PLAY can be updated.
+**Important**: Only matches with status SCHEDULED, TIMED, or IN_PLAY can be updated. This adds to the existing bonus pot, creating a larger prize pool for winners.
 
 **Example**:
 ```
 /update-football-match 12345 topup-pot-size:200
 ```
+
+This adds 200 tokens to the bonus pot, increasing the total prize pool for this match.
 
 ### `/create-staking-pool`
 Create a new NFT staking pool.

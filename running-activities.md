@@ -169,7 +169,7 @@ When a match has **no winners**, all bets go to the Betting House. This balance 
 
 ### Updating Football Matches
 
-Admins can update active football matches to adjust the stake amount:
+Admins can top up the bonus pot (prize pool) for active football matches to create a larger prize pool:
 
 ```
 /update-football-match game_id topup-pot-size
@@ -178,13 +178,13 @@ Admins can update active football matches to adjust the stake amount:
 #### Parameters Explained
 
 * **`game_id`** (Required): Select the match to update (autocomplete available)
-* **`topup-pot-size`** (Required): New stake amount per bet for this match
+* **`topup-pot-size`** (Required): Amount to add to the bonus pot (prize pool)
 
 #### Important Notes
 
 * Only matches with status **SCHEDULED**, **TIMED**, or **IN_PLAY** can be updated
-* The new stake amount applies to all future bets on this match
-* Existing bets are not affected by the update
+* This adds to the existing bonus pot, increasing the total prize pool for winners
+* The bonus pot is distributed to winning bettors when the match concludes
 * The match must be available in your server
 
 #### Example
@@ -193,7 +193,7 @@ Admins can update active football matches to adjust the stake amount:
 /update-football-match 12345 topup-pot-size:200
 ```
 
-This updates the match to require 200 tokens per bet instead of the original amount.
+This adds 200 tokens to the bonus pot, increasing the total prize pool for this match.
 
 ***
 
