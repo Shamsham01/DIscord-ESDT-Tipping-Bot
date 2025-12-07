@@ -18835,6 +18835,99 @@ async function processStakingPoolRewards(guildId, poolId) {
   }
 }
 
+// Generate distribution cycle summaries (24h after distribution)
+async function generateDistributionSummaries() {
+  try {
+    const distributions = await dbStakingPools.getDistributionsForSummary();
+    
+    if (!distributions || distributions.length === 0) {
+      return;
+    }
+    
+    for (const distribution of distributions) {
+      try {
+        const pool = await dbStakingPools.getStakingPool(distribution.guild_id, distribution.pool_id);
+        if (!pool) {
+          console.warn(`[STAKING] Pool ${distribution.pool_id} not found for distribution summary`);
+          continue;
+        }
+        
+        // Get distribution statistics
+        const stats = await dbStakingPools.getDistributionStats(
+          distribution.guild_id,
+          distribution.pool_id,
+          distribution.distribution_id
+        );
+        
+        const tokenDecimals = pool.rewardTokenDecimals || 18;
+        const tokenPriceUsd = await getTokenPriceUsd(pool.rewardTokenIdentifier);
+        
+        // Calculate human-readable amounts
+        const totalRewardsBN = new BigNumber(stats.totalRewardsWei);
+        const claimedRewardsBN = new BigNumber(stats.claimedRewardsWei);
+        const unclaimedRewardsBN = new BigNumber(stats.unclaimedRewardsWei);
+        const expiredRewardsBN = new BigNumber(stats.expiredRewardsWei);
+        
+        const totalRewardsHuman = totalRewardsBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        const claimedRewardsHuman = claimedRewardsBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        const unclaimedRewardsHuman = unclaimedRewardsBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        const expiredRewardsHuman = expiredRewardsBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+        
+        // Calculate USD values
+        const totalRewardsUsd = tokenPriceUsd > 0 
+          ? new BigNumber(totalRewardsHuman).multipliedBy(tokenPriceUsd).toFixed(2)
+          : null;
+        const claimedRewardsUsd = tokenPriceUsd > 0 
+          ? new BigNumber(claimedRewardsHuman).multipliedBy(tokenPriceUsd).toFixed(2)
+          : null;
+        const unclaimedRewardsUsd = tokenPriceUsd > 0 
+          ? new BigNumber(unclaimedRewardsHuman).multipliedBy(tokenPriceUsd).toFixed(2)
+          : null;
+        const expiredRewardsUsd = tokenPriceUsd > 0 
+          ? new BigNumber(expiredRewardsHuman).multipliedBy(tokenPriceUsd).toFixed(2)
+          : null;
+        
+        // Format USD text
+        const usdText = (amount) => amount ? ` (≈ $${amount})` : '';
+        
+        // Generate summary message
+        const distributionDate = new Date(distribution.distributed_at);
+        const summaryMessage = `📊 **Distribution Cycle Summary**\n\n` +
+          `**Distribution Date:** <t:${Math.floor(distribution.distributed_at / 1000)}:F>\n\n` +
+          `**Total Rewards Distributed:** ${totalRewardsHuman} ${pool.rewardTokenTicker}${usdText(totalRewardsUsd)}\n` +
+          `**Claimed:** ${claimedRewardsHuman} ${pool.rewardTokenTicker}${usdText(claimedRewardsUsd)} (${stats.claimedUsers} user${stats.claimedUsers !== 1 ? 's' : ''})\n` +
+          `**Unclaimed:** ${unclaimedRewardsHuman} ${pool.rewardTokenTicker}${usdText(unclaimedRewardsUsd)} (${stats.unclaimedUsers} user${stats.unclaimedUsers !== 1 ? 's' : ''})\n` +
+          `**Expired & Returned to Pool:** ${expiredRewardsHuman} ${pool.rewardTokenTicker}${usdText(expiredRewardsUsd)} (${stats.expiredUsers} user${stats.expiredUsers !== 1 ? 's' : ''})\n\n` +
+          `*Unclaimed rewards expire after 24 hours and are automatically returned to the pool supply.*`;
+        
+        // Post summary to thread if available
+        if (distribution.thread_id && pool.channelId) {
+          try {
+            const channel = await client.channels.fetch(pool.channelId);
+            if (channel) {
+              const thread = await channel.threads.cache.get(distribution.thread_id) || await channel.threads.fetch(distribution.thread_id);
+              if (thread) {
+                await thread.send(summaryMessage);
+                console.log(`[STAKING] Posted distribution summary for ${distribution.distribution_id} in pool ${distribution.pool_id}`);
+              }
+            }
+          } catch (threadError) {
+            console.error(`[STAKING] Error posting summary to thread for distribution ${distribution.distribution_id}:`, threadError.message);
+          }
+        }
+        
+        // Mark summary as posted
+        await dbStakingPools.markDistributionSummaryPosted(distribution.guild_id, distribution.distribution_id);
+        
+      } catch (distError) {
+        console.error(`[STAKING] Error generating summary for distribution ${distribution.distribution_id}:`, distError.message);
+      }
+    }
+  } catch (error) {
+    console.error('[STAKING] Error generating distribution summaries:', error.message);
+  }
+}
+
 // Auto-close staking pool after 48h low supply warning
 async function autoCloseStakingPool(guildId, poolId) {
   try {
@@ -19130,6 +19223,15 @@ client.on('ready', async () => {
       await dbStakingPools.expireOldRewards();
     } catch (error) {
       console.error('[STAKING] Error expiring rewards:', error.message);
+    }
+  }, 60 * 60 * 1000); // Every hour
+  
+  // Set up periodic generation of distribution cycle summaries (24h after distribution)
+  setInterval(async () => {
+    try {
+      await generateDistributionSummaries();
+    } catch (error) {
+      console.error('[STAKING] Error generating distribution summaries:', error.message);
     }
   }, 60 * 60 * 1000); // Every hour
   

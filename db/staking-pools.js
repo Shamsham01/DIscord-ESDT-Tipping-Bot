@@ -492,7 +492,36 @@ async function expireOldRewards() {
   try {
     const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
     
-    const { error } = await supabase
+    // Get all rewards that should be expired (grouped by pool)
+    const { data: rewardsToExpire, error: fetchError } = await supabase
+      .from('staking_pool_user_rewards')
+      .select('*')
+      .eq('claimed', false)
+      .eq('expired', false)
+      .lt('created_at', new Date(twentyFourHoursAgo).toISOString());
+    
+    if (fetchError) throw fetchError;
+    
+    if (!rewardsToExpire || rewardsToExpire.length === 0) {
+      return { expiredCount: 0, poolsUpdated: [] };
+    }
+    
+    // Group rewards by pool_id and guild_id to calculate totals
+    const poolRewards = {};
+    for (const reward of rewardsToExpire) {
+      const key = `${reward.guild_id}:${reward.pool_id}`;
+      if (!poolRewards[key]) {
+        poolRewards[key] = {
+          guildId: reward.guild_id,
+          poolId: reward.pool_id,
+          totalWei: new BigNumber('0')
+        };
+      }
+      poolRewards[key].totalWei = poolRewards[key].totalWei.plus(new BigNumber(reward.reward_amount_wei));
+    }
+    
+    // Mark rewards as expired
+    const { error: updateError } = await supabase
       .from('staking_pool_user_rewards')
       .update({
         expired: true
@@ -501,10 +530,164 @@ async function expireOldRewards() {
       .eq('expired', false)
       .lt('created_at', new Date(twentyFourHoursAgo).toISOString());
     
-    if (error) throw error;
-    return true;
+    if (updateError) throw updateError;
+    
+    // Return expired rewards to pool supply
+    const poolsUpdated = [];
+    for (const [key, poolData] of Object.entries(poolRewards)) {
+      try {
+        const pool = await getStakingPool(poolData.guildId, poolData.poolId);
+        if (pool) {
+          const currentSupplyBN = new BigNumber(pool.currentSupplyWei);
+          const newSupplyBN = currentSupplyBN.plus(poolData.totalWei);
+          
+          await updateStakingPool(poolData.guildId, poolData.poolId, {
+            currentSupplyWei: newSupplyBN.toString()
+          });
+          
+          poolsUpdated.push({
+            poolId: poolData.poolId,
+            guildId: poolData.guildId,
+            returnedWei: poolData.totalWei.toString()
+          });
+          
+          console.log(`[STAKING] Returned ${poolData.totalWei.dividedBy(new BigNumber(10).pow(pool.rewardTokenDecimals || 18)).toString()} ${pool.rewardTokenTicker} to pool ${poolData.poolId} from expired rewards`);
+        }
+      } catch (poolError) {
+        console.error(`[DB] Error returning expired rewards to pool ${poolData.poolId}:`, poolError);
+      }
+    }
+    
+    return { expiredCount: rewardsToExpire.length, poolsUpdated };
   } catch (error) {
     console.error('[DB] Error expiring old rewards:', error);
+    throw error;
+  }
+}
+
+async function getDistributionStats(guildId, poolId, distributionId) {
+  try {
+    // Get all rewards for this distribution
+    const { data: rewards, error } = await supabase
+      .from('staking_pool_user_rewards')
+      .select('*')
+      .eq('pool_id', poolId)
+      .eq('guild_id', guildId)
+      .eq('distribution_id', distributionId);
+    
+    if (error) throw error;
+    
+    if (!rewards || rewards.length === 0) {
+      return {
+        totalRewardsWei: '0',
+        claimedRewardsWei: '0',
+        unclaimedRewardsWei: '0',
+        expiredRewardsWei: '0',
+        totalUsers: 0,
+        claimedUsers: 0,
+        unclaimedUsers: 0,
+        expiredUsers: 0
+      };
+    }
+    
+    const totalRewardsBN = new BigNumber('0');
+    const claimedRewardsBN = new BigNumber('0');
+    const unclaimedRewardsBN = new BigNumber('0');
+    const expiredRewardsBN = new BigNumber('0');
+    
+    const claimedUserIds = new Set();
+    const unclaimedUserIds = new Set();
+    const expiredUserIds = new Set();
+    
+    for (const reward of rewards) {
+      const rewardBN = new BigNumber(reward.reward_amount_wei);
+      totalRewardsBN = totalRewardsBN.plus(rewardBN);
+      
+      if (reward.claimed) {
+        claimedRewardsBN = claimedRewardsBN.plus(rewardBN);
+        claimedUserIds.add(reward.user_id);
+      } else if (reward.expired) {
+        expiredRewardsBN = expiredRewardsBN.plus(rewardBN);
+        expiredUserIds.add(reward.user_id);
+      } else {
+        unclaimedRewardsBN = unclaimedRewardsBN.plus(rewardBN);
+        unclaimedUserIds.add(reward.user_id);
+      }
+    }
+    
+    return {
+      totalRewardsWei: totalRewardsBN.toString(),
+      claimedRewardsWei: claimedRewardsBN.toString(),
+      unclaimedRewardsWei: unclaimedRewardsBN.toString(),
+      expiredRewardsWei: expiredRewardsBN.toString(),
+      totalUsers: rewards.length,
+      claimedUsers: claimedUserIds.size,
+      unclaimedUsers: unclaimedUserIds.size,
+      expiredUsers: expiredUserIds.size
+    };
+  } catch (error) {
+    console.error('[DB] Error getting distribution stats:', error);
+    throw error;
+  }
+}
+
+async function getDistributionsForSummary() {
+  try {
+    // Get distributions that were created 24 hours ago (ready for summary)
+    // Check for distributions between 23-25 hours ago to catch them reliably
+    const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
+    const twentyFiveHoursAgo = Date.now() - (25 * 60 * 60 * 1000);
+    const twentyThreeHoursAgo = Date.now() - (23 * 60 * 60 * 1000);
+    
+    // Try to query with summary_posted filter, but handle case where column doesn't exist yet
+    let query = supabase
+      .from('staking_pool_reward_distributions')
+      .select('*')
+      .gte('distributed_at', twentyFiveHoursAgo)
+      .lte('distributed_at', twentyThreeHoursAgo);
+    
+    const { data, error } = await query;
+    
+    if (error) {
+      // If column doesn't exist, query without the filter
+      if (error.code === '42703' || error.message.includes('summary_posted')) {
+        const { data: allData, error: retryError } = await supabase
+          .from('staking_pool_reward_distributions')
+          .select('*')
+          .gte('distributed_at', twentyFiveHoursAgo)
+          .lte('distributed_at', twentyThreeHoursAgo);
+        
+        if (retryError) throw retryError;
+        // Filter manually - only include if summary_posted is false or doesn't exist
+        return (allData || []).filter(dist => !dist.summary_posted);
+      }
+      throw error;
+    }
+    
+    // Filter to only include distributions that haven't had summaries posted
+    return (data || []).filter(dist => !dist.summary_posted);
+  } catch (error) {
+    console.error('[DB] Error getting distributions for summary:', error);
+    throw error;
+  }
+}
+
+async function markDistributionSummaryPosted(guildId, distributionId) {
+  try {
+    const { error } = await supabase
+      .from('staking_pool_reward_distributions')
+      .update({ summary_posted: true })
+      .eq('guild_id', guildId)
+      .eq('distribution_id', distributionId);
+    
+    // If column doesn't exist, that's okay - we'll handle it gracefully
+    if (error && error.code !== '42703' && !error.message.includes('summary_posted')) {
+      throw error;
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('[DB] Error marking distribution summary as posted:', error);
     throw error;
   }
 }
@@ -534,6 +717,9 @@ module.exports = {
   createUserReward,
   getUserUnclaimedRewards,
   claimUserReward,
-  expireOldRewards
+  expireOldRewards,
+  getDistributionStats,
+  getDistributionsForSummary,
+  markDistributionSummaryPosted
 };
 
