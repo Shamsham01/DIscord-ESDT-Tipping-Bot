@@ -13863,27 +13863,74 @@ client.on('interactionCreate', async (interaction) => {
   
   if (interaction.commandName === 'update-staking-pool' && interaction.options.getFocused(true).name === 'staking_pool') {
     try {
-      const focusedValue = interaction.options.getFocused();
+      // Fixed: Handle null/undefined values and empty search terms for autocomplete [AUTOCOMPLETE-FIX-2024]
+      const focusedValue = (interaction.options.getFocused() || '').toString();
       const guildId = interaction.guildId;
       const userId = interaction.user.id;
       
-      // Get pools created by user
-      const pools = await dbStakingPools.getStakingPoolsByCreator(guildId, userId);
+      if (!guildId) {
+        console.error('[AUTOCOMPLETE] No guildId for update-staking-pool autocomplete');
+        await safeRespond(interaction, []);
+        return;
+      }
       
-      const filtered = pools.filter(pool => {
-        const poolName = pool.poolName || pool.collectionName;
-        return poolName.toLowerCase().includes(focusedValue.toLowerCase()) ||
-               pool.poolId.toLowerCase().includes(focusedValue.toLowerCase());
+      // Get pools created by user (both ACTIVE and PAUSED, since PAUSED pools can be updated to add supply)
+      const allPools = await dbStakingPools.getStakingPoolsByGuild(guildId);
+      console.log(`[AUTOCOMPLETE] Found ${allPools.length} total pools in guild ${guildId}`);
+      
+      const userPools = allPools.filter(pool => 
+        pool.creatorId === userId && (pool.status === 'ACTIVE' || pool.status === 'PAUSED')
+      );
+      console.log(`[AUTOCOMPLETE] Found ${userPools.length} pools created by user ${userId} (ACTIVE or PAUSED)`);
+      
+      // Fixed: Handle empty search terms and null-safe string conversion for autocomplete
+      const searchTerm = focusedValue.toLowerCase();
+      const filtered = userPools.filter(pool => {
+        const poolName = (pool.poolName || pool.collectionName || '').toString();
+        const poolId = (pool.poolId || '').toString();
+        
+        // If no search term, show all pools
+        if (!searchTerm) {
+          return true;
+        }
+        
+        // Filter by pool name or pool ID
+        return poolName.toLowerCase().includes(searchTerm) ||
+               poolId.toLowerCase().includes(searchTerm);
       });
       
+      console.log(`[AUTOCOMPLETE] Filtered to ${filtered.length} pools matching "${focusedValue}"`);
+      
+      if (filtered.length === 0) {
+        // If user has pools but none match the filter, show a message
+        if (userPools.length > 0) {
+          await safeRespond(interaction, [{
+            name: `No pools match "${focusedValue}". Try a different search.`,
+            value: 'none'
+          }]);
+        } else {
+          await safeRespond(interaction, [{
+            name: 'No staking pools found. Create one first!',
+            value: 'none'
+          }]);
+        }
+        return;
+      }
+      
       await safeRespond(interaction,
-        filtered.slice(0, 25).map(pool => ({
-          name: `${pool.poolName || pool.collectionName} (${pool.poolId.substring(0, 8)})`,
-          value: pool.poolId
-        }))
+        filtered.slice(0, 25).map(pool => {
+          const statusEmoji = pool.status === 'ACTIVE' ? '🟢' : pool.status === 'PAUSED' ? '⏸️' : '🔴';
+          const poolName = (pool.poolName || pool.collectionName || 'Unnamed Pool').toString();
+          const poolId = (pool.poolId || '').toString();
+          return {
+            name: `${statusEmoji} ${poolName} (${poolId.substring(0, 8)})`,
+            value: poolId
+          };
+        })
       );
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in update-staking-pool autocomplete:', error.message);
+      console.error('[AUTOCOMPLETE] Stack:', error.stack);
       await safeRespond(interaction, []);
     }
     return;
@@ -14083,24 +14130,37 @@ client.on('interactionCreate', async (interaction) => {
   
   if (interaction.commandName === 'close-staking-pool' && interaction.options.getFocused(true).name === 'staking_pool_name') {
     try {
-      const focusedValue = interaction.options.getFocused();
+      const focusedValue = (interaction.options.getFocused() || '').toString();
       const guildId = interaction.guildId;
       const userId = interaction.user.id;
       
       // Get pools created by user
       const pools = await dbStakingPools.getStakingPoolsByCreator(guildId, userId);
       
+      const searchTerm = focusedValue.toLowerCase();
       const filtered = pools.filter(pool => {
-        const poolName = pool.poolName || pool.collectionName;
-        return poolName.toLowerCase().includes(focusedValue.toLowerCase()) ||
-               pool.poolId.toLowerCase().includes(focusedValue.toLowerCase());
+        const poolName = (pool.poolName || pool.collectionName || '').toString();
+        const poolId = (pool.poolId || '').toString();
+        
+        // If no search term, show all pools
+        if (!searchTerm) {
+          return true;
+        }
+        
+        // Filter by pool name or pool ID
+        return poolName.toLowerCase().includes(searchTerm) ||
+               poolId.toLowerCase().includes(searchTerm);
       });
       
       await safeRespond(interaction,
-        filtered.slice(0, 25).map(pool => ({
-          name: `${pool.poolName || pool.collectionName} (${pool.poolId.substring(0, 8)})`,
-          value: pool.poolId
-        }))
+        filtered.slice(0, 25).map(pool => {
+          const poolName = (pool.poolName || pool.collectionName || 'Unnamed Pool').toString();
+          const poolId = (pool.poolId || '').toString();
+          return {
+            name: `${poolName} (${poolId.substring(0, 8)})`,
+            value: poolId
+          };
+        })
       );
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in close-staking-pool autocomplete:', error.message);

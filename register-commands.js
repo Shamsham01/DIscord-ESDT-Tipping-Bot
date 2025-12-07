@@ -1205,6 +1205,55 @@ const commands = [
         default_member_permissions: null,
     },
     {
+        name: 'update-lottery',
+        description: 'Update an existing lottery (Admin only)',
+        options: [
+            {
+                name: 'lottery_id',
+                description: 'Select the lottery to update',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'topup_prize_pool',
+                description: 'Amount to add to prize pool from house lottery balance',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 0.00000001
+            },
+            {
+                name: 'update_ticket_price',
+                description: 'New ticket price',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 0.00000001
+            }
+        ],
+        default_member_permissions: null, // Permissions checked in code
+    },
+    {
+        name: 'update-football-match',
+        description: 'Update an existing football match stake amount (Admin only)',
+        options: [
+            {
+                name: 'game_id',
+                description: 'Select the match to update',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'topup-pot-size',
+                description: 'New required stake amount (pot size)',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 0.1
+            }
+        ],
+        default_member_permissions: null, // Permissions checked in code
+    },
+    {
         name: 'create-staking-pool',
         description: 'Create a new NFT staking pool',
         options: [

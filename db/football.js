@@ -15,7 +15,7 @@ async function getMatch(matchId) {
     // Get guild relationships for this match (including guild-specific config)
     const { data: guildData, error: guildError } = await supabase
       .from('match_guilds')
-      .select('guild_id, message_id, thread_id, house_earnings_tracked, required_amount_wei, token_data')
+      .select('guild_id, message_id, thread_id, house_earnings_tracked, required_amount_wei, token_data, bonus_pot_wei')
       .eq('match_id', matchId);
     
     if (guildError) throw guildError;
@@ -26,6 +26,7 @@ async function getMatch(matchId) {
     const houseEarningsTrackedByGuild = {};
     const tokenByGuild = {};
     const requiredAmountWeiByGuild = {};
+    const bonusPotWeiByGuild = {};
     
     (guildData || []).forEach(row => {
       guildIds.push(row.guild_id);
@@ -47,6 +48,10 @@ async function getMatch(matchId) {
       if (row.required_amount_wei) {
         requiredAmountWeiByGuild[row.guild_id] = row.required_amount_wei;
       }
+      
+      if (row.bonus_pot_wei) {
+        bonusPotWeiByGuild[row.guild_id] = row.bonus_pot_wei;
+      }
     });
     
     return {
@@ -58,6 +63,7 @@ async function getMatch(matchId) {
       kickoffISO: matchData.kickoff_iso,
       tokenByGuild: tokenByGuild, // Per-guild token configuration (REQUIRED)
       requiredAmountWeiByGuild: requiredAmountWeiByGuild, // Per-guild stake configuration (REQUIRED)
+      bonusPotWeiByGuild: bonusPotWeiByGuild, // Per-guild bonus pot configuration
       status: matchData.status,
       ftScore: matchData.ft_score,
       houseEarningsTrackedByGuild: houseEarningsTrackedByGuild,
@@ -75,7 +81,7 @@ async function getMatchesByGuild(guildId) {
     // First, get all match-guild relationships for this guild (including guild-specific config)
     const { data: guildRelations, error: guildError } = await supabase
       .from('match_guilds')
-      .select('match_id, message_id, thread_id, house_earnings_tracked, required_amount_wei, token_data')
+      .select('match_id, message_id, thread_id, house_earnings_tracked, required_amount_wei, token_data, bonus_pot_wei')
       .eq('guild_id', guildId);
     
     if (guildError) throw guildError;
@@ -461,6 +467,78 @@ async function updateMatchGuildHouseEarnings(matchId, guildId, houseEarningsTrac
   }
 }
 
+async function updateMatchGuildStake(matchId, guildId, newStakeWei) {
+  try {
+    // First verify the match_guild relationship exists
+    const { data: existingGuild, error: checkError } = await supabase
+      .from('match_guilds')
+      .select('match_id, guild_id')
+      .eq('match_id', matchId)
+      .eq('guild_id', guildId)
+      .single();
+    
+    if (checkError && checkError.code === 'PGRST116') {
+      throw new Error(`Match ${matchId} is not associated with guild ${guildId}`);
+    }
+    if (checkError) throw checkError;
+    
+    if (!existingGuild) {
+      throw new Error(`Match ${matchId} is not associated with guild ${guildId}`);
+    }
+    
+    // Update required_amount_wei
+    const { error } = await supabase
+      .from('match_guilds')
+      .update({
+        required_amount_wei: newStakeWei
+      })
+      .eq('match_id', matchId)
+      .eq('guild_id', guildId);
+    
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('[DB] Error updating match-guild stake:', error);
+    throw error;
+  }
+}
+
+async function updateMatchGuildBonusPot(matchId, guildId, newBonusPotWei) {
+  try {
+    // First verify the match_guild relationship exists
+    const { data: existingGuild, error: checkError } = await supabase
+      .from('match_guilds')
+      .select('match_id, guild_id, bonus_pot_wei')
+      .eq('match_id', matchId)
+      .eq('guild_id', guildId)
+      .single();
+    
+    if (checkError && checkError.code === 'PGRST116') {
+      throw new Error(`Match ${matchId} is not associated with guild ${guildId}`);
+    }
+    if (checkError) throw checkError;
+    
+    if (!existingGuild) {
+      throw new Error(`Match ${matchId} is not associated with guild ${guildId}`);
+    }
+    
+    // Update bonus_pot_wei
+    const { error } = await supabase
+      .from('match_guilds')
+      .update({
+        bonus_pot_wei: newBonusPotWei
+      })
+      .eq('match_id', matchId)
+      .eq('guild_id', guildId);
+    
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('[DB] Error updating match-guild bonus pot:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   getMatch,
   getMatchesByGuild,
@@ -472,6 +550,8 @@ module.exports = {
   getBetsByMatch,
   getBetsByUser,
   updateBetPrize,
-  updateMatchGuildHouseEarnings
+  updateMatchGuildHouseEarnings,
+  updateMatchGuildStake,
+  updateMatchGuildBonusPot
 };
 

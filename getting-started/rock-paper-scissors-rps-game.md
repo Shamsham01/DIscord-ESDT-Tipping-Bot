@@ -14,12 +14,13 @@ description: >-
 #### 1. Challenge Creation
 
 * **Challenger**: Initiates the game by choosing a token and amount to wager.
-* The challenger must send the chosen amount of the selected token to the Community Fund wallet (set by server admins).
-* After sending, the challenger copies the transaction hash (tx hash) and uses the `/challenge-rps` command to create the challenge, providing:
+* The challenger uses `/challenge-rps` command with:
   * The Discord tag of the user they want to challenge
-  * The token ticker (e.g., WEGLD-bd4d79, USDC-c76f1f, REWARD-cf6eac)
-  * The amount
-  * The transaction hash (no URL, just the hash string)
+  * The token ticker (e.g., `REWARD-cf6eac`)
+  * The bet amount
+  * Optional memo
+* The bet amount is automatically deducted from the challenger's Virtual Account balance
+* **No transaction hash needed!** The bot uses Virtual Account balance automatically.
 
 #### 2. Challenge Notification
 
@@ -29,9 +30,12 @@ description: >-
 #### 3. Accepting the Challenge
 
 * The challenged user reviews the token and amount.
-* If they accept, they must send the **same amount** of the **same token** to the Community Fund wallet.
-* After sending, they copy their transaction hash and use the `/join-rps` command, selecting the challenge and providing their tx hash.
-* The bot verifies that both deposits match in token and amount.
+* If they accept, they can:
+  * Click the "Join Challenge" button on the challenge embed (opens a modal)
+  * Or use `/join-rps` command with the challenge ID
+* The bot automatically deducts the matching bet amount from their Virtual Account balance
+* The bot verifies that both deposits match in token and amount
+* **No transaction hash needed!** The bot uses Virtual Account balance automatically.
 
 #### 4. Game Play
 
@@ -50,12 +54,10 @@ description: >-
 
 ### Game Rules & Dynamics
 
-* **Both players must deposit the same amount and token.** The bot enforces this by verifying transaction hashes and amounts.
-* **No self-challenges:** You cannot challenge yourself.
-* **No duplicate tx hashes:** Each transaction hash can only be used once.
-* **Timeout & Refunds:** If the challenged user does not join within 30 minutes, the challenge expires and the challenger is automatically refunded.
-  * Refunds are processed automatically the next time any ESDT Tipping Bot command is used in the server.
-  * To trigger an automated refund, the challenger can run `/list-rps-challenges` after the 30-minute window.
+* **Both players must deposit the same amount and token.** The bot enforces this automatically
+* **No self-challenges:** You cannot challenge yourself
+* **Virtual Account Integration:** All bets use Virtual Account balance - no blockchain transactions needed for gameplay
+* **Timeout & Refunds:** If the challenged user does not join within 30 minutes, the challenge expires and the challenger is automatically refunded to their Virtual Account
 * **Transparency:** All moves, results, and prize transfers are announced in the channel for fairness.
 
 ### Example Flow

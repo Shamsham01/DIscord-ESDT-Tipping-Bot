@@ -181,6 +181,97 @@ Create an NFT or SFT auction.
 /create-auction COLLECTION-abc123 NFT-NAME 100 24 REWARD-cf6eac 10
 ```
 
+### `/update-lottery`
+Update an existing lottery (Admin only).
+
+**Usage**: `/update-lottery lottery_id [topup_prize_pool] [update_ticket_price]`
+
+**Parameters**:
+- `lottery_id` (Required): Select the lottery to update
+- `topup_prize_pool` (Optional): Amount to add to prize pool from Lottery House
+- `update_ticket_price` (Optional): New ticket price for future purchases
+
+**Important**: Only LIVE lotteries can be updated. At least one update option must be provided.
+
+**Example**:
+```
+/update-lottery lottery-123 topup_prize_pool:500 update_ticket_price:15
+```
+
+### `/update-football-match`
+Update an existing football match stake amount (Admin only).
+
+**Usage**: `/update-football-match game_id topup-pot-size`
+
+**Parameters**:
+- `game_id` (Required): Select the match to update
+- `topup-pot-size` (Required): New stake amount per bet
+
+**Important**: Only matches with status SCHEDULED, TIMED, or IN_PLAY can be updated.
+
+**Example**:
+```
+/update-football-match 12345 topup-pot-size:200
+```
+
+### `/create-staking-pool`
+Create a new NFT staking pool.
+
+**Usage**: `/create-staking-pool collection_ticker reward_token_identifier initial_supply reward_per_nft_per_day [pool_name] [staking_total_limit] [staking_limit_per_user] [duration_months]`
+
+**Parameters**:
+- `collection_ticker` (Required): Collection identifier for stakable NFTs
+- `reward_token_identifier` (Required): Token identifier for rewards
+- `initial_supply` (Required): Initial reward supply amount
+- `reward_per_nft_per_day` (Required): Daily reward per NFT
+- `pool_name` (Optional): Display name for the pool
+- `staking_total_limit` (Optional): Maximum NFTs that can be staked
+- `staking_limit_per_user` (Optional): Maximum NFTs per user
+- `duration_months` (Optional): Pool duration in months (1-12)
+
+**Example**:
+```
+/create-staking-pool COLLECTION-abc123 REWARD-cf6eac 10000 10 "My Pool" 1000 50 6
+```
+
+### `/update-staking-pool`
+Update an existing staking pool.
+
+**Usage**: `/update-staking-pool staking_pool [topup_staking_pool] [change_reward_per_nft] [increase_nft_pool_limit] [increase_user_staking_limit] [trait_filter_action] [trait_filter_type] [trait_filter_value] [trait_filter_index]`
+
+**Parameters**:
+- `staking_pool` (Required): Select the pool to update
+- `topup_staking_pool` (Optional): Add more tokens to pool supply
+- `change_reward_per_nft` (Optional): Update daily reward per NFT
+- `increase_nft_pool_limit` (Optional): Increase total NFT limit
+- `increase_user_staking_limit` (Optional): Increase per-user limit
+- `trait_filter_action` (Optional): Manage trait filters (`add`, `remove`, `clear`)
+- `trait_filter_type` (Optional): Trait type for filtering
+- `trait_filter_value` (Optional): Specific trait value
+- `trait_filter_index` (Optional): Filter index to remove
+
+**Note**: Only the pool creator can update their pool.
+
+**Example**:
+```
+/update-staking-pool pool-123 topup_staking_pool:5000 change_reward_per_nft:15
+```
+
+### `/close-staking-pool`
+Close a staking pool and return NFTs to users.
+
+**Usage**: `/close-staking-pool staking_pool_name`
+
+**Parameters**:
+- `staking_pool_name` (Required): Select the pool to close
+
+**Note**: Only the pool creator can close their pool. All NFTs are returned and final rewards are distributed.
+
+**Example**:
+```
+/close-staking-pool pool-123
+```
+
 ---
 
 ## Monitoring & Debugging

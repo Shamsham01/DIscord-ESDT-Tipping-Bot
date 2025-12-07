@@ -34,6 +34,7 @@ description: >-
 ### ⚽ Football Betting
 
 * **/create-fixtures** 🔴 Admin — Create football matches for betting.
+* **/update-football-match** 🔴 Admin — Update stake amount for an active match.
 * **/leaderboard** — View betting leaderboard.
 * **/leaderboard-filtered** — View leaderboard for date range.
 * **/my-football-stats** — View your betting statistics & PNL.
@@ -47,9 +48,18 @@ description: >-
 
 ***
 
+### 🎯 NFT Staking
+
+* **/create-staking-pool** 🔴 Admin — Create a new NFT staking pool with rewards.
+* **/update-staking-pool** 🔴 Admin — Update an existing staking pool (top up rewards, change rates, manage filters).
+* **/close-staking-pool** 🔴 Admin — Close a staking pool and return NFTs to users.
+
+***
+
 ### 🎰 Lottery & Auctions
 
 * **/create-lottery** 🔴 Admin — Create a new lottery game.
+* **/update-lottery** 🔴 Admin — Update an existing lottery (top up prize pool or change ticket price).
 * **/create-auction** 🔴 Admin — Create an NFT or SFT auction (supports amount for SFTs).
 
 ***

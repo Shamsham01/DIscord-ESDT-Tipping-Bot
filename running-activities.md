@@ -75,6 +75,37 @@ When creating a lottery, you can fund the initial prize pool from Lottery House 
 
 This allows you to seed lotteries with funds from previous lottery commissions.
 
+### Updating Lotteries
+
+Admins can update active lotteries using the `/update-lottery` command:
+
+```
+/update-lottery lottery_id topup_prize_pool [update_ticket_price]
+```
+
+#### Parameters Explained
+
+* **`lottery_id`** (Required): Select the lottery to update (autocomplete available)
+* **`topup_prize_pool`** (Optional): Amount to add to the prize pool from Lottery House balance
+* **`update_ticket_price`** (Optional): New ticket price for future ticket purchases
+
+#### Important Notes
+
+* Only **LIVE** lotteries can be updated
+* Prize pool top-ups are deducted from Lottery House balance for the lottery's token
+* Ticket price updates only affect new ticket purchases (existing tickets remain unchanged)
+* At least one update option (`topup_prize_pool` or `update_ticket_price`) must be provided
+
+#### Example
+
+```
+/update-lottery lottery-123 topup_prize_pool:500 update_ticket_price:15
+```
+
+This updates the lottery by:
+* Adding 500 tokens to the prize pool from Lottery House
+* Changing the ticket price to 15 tokens for new purchases
+
 ***
 
 ## Football Betting
@@ -135,6 +166,162 @@ When a match has **no winners**, all bets go to the Betting House. This balance 
 * Used to fund prizes for special matches
 * Tipped to users via `/house-tip`
 * Viewed with `/house-balance`
+
+### Updating Football Matches
+
+Admins can update active football matches to adjust the stake amount:
+
+```
+/update-football-match game_id topup-pot-size
+```
+
+#### Parameters Explained
+
+* **`game_id`** (Required): Select the match to update (autocomplete available)
+* **`topup-pot-size`** (Required): New stake amount per bet for this match
+
+#### Important Notes
+
+* Only matches with status **SCHEDULED**, **TIMED**, or **IN_PLAY** can be updated
+* The new stake amount applies to all future bets on this match
+* Existing bets are not affected by the update
+* The match must be available in your server
+
+#### Example
+
+```
+/update-football-match 12345 topup-pot-size:200
+```
+
+This updates the match to require 200 tokens per bet instead of the original amount.
+
+***
+
+## NFT Staking
+
+NFT staking allows users to stake their NFTs from their Virtual Account to earn rewards. Pool creators set up staking pools with reward tokens, and users can stake eligible NFTs to earn daily rewards.
+
+### Creating a Staking Pool
+
+Admins can create NFT staking pools using:
+
+```
+/create-staking-pool collection_ticker reward_token_identifier initial_supply reward_per_nft_per_day [pool_name] [staking_total_limit] [staking_limit_per_user] [duration_months]
+```
+
+#### Parameters Explained
+
+* **`collection_ticker`** (Required): Collection identifier for NFTs that can be staked
+* **`reward_token_identifier`** (Required): Token identifier for staking rewards (e.g., `REWARD-cf6eac`)
+* **`initial_supply`** (Required): Initial reward supply amount (e.g., `10000`)
+* **`reward_per_nft_per_day`** (Required): Daily reward amount per NFT (e.g., `10`)
+* **`pool_name`** (Optional): Display name for the pool (defaults to collection name)
+* **`staking_total_limit`** (Optional): Maximum NFTs that can be staked in the pool
+* **`staking_limit_per_user`** (Optional): Maximum NFTs a single user can stake
+* **`duration_months`** (Optional): Pool duration in months (1-12)
+
+#### Example
+
+```
+/create-staking-pool COLLECTION-abc123 REWARD-cf6eac 10000 10 "My Staking Pool" 1000 50 6
+```
+
+This creates a staking pool with:
+* Collection: COLLECTION-abc123
+* Reward token: REWARD-cf6eac
+* Initial supply: 10,000 tokens
+* Daily reward: 10 tokens per NFT
+* Pool name: "My Staking Pool"
+* Total limit: 1,000 NFTs
+* Per-user limit: 50 NFTs
+* Duration: 6 months
+
+### How NFT Staking Works
+
+1. **Pool Creation**: Admin creates a staking pool with reward configuration
+2. **Users Stake NFTs**: Users select NFTs from their Virtual Account to stake
+3. **Rewards Accumulate**: Rewards accumulate daily based on `reward_per_nft_per_day`
+4. **Reward Distribution**: Rewards are distributed automatically every 24 hours
+5. **Unstaking**: Users can unstake their NFTs at any time (no lock period)
+6. **Pool Closure**: Pool creator can close the pool, which returns all NFTs and distributes final rewards
+
+### Staking NFTs
+
+Users interact with staking pools through the pool embed:
+
+* **Stake Button**: Click to select NFTs from your Virtual Account to stake
+* **Unstake Button**: Click to unstake your NFTs and claim rewards
+* **View Staked NFTs**: See which NFTs you have staked in the pool
+
+**Requirements**:
+* NFTs must be in your Virtual Account (not staked elsewhere)
+* NFTs must match the pool's collection ticker
+* NFTs must meet any trait filter requirements (if set)
+* Pool must have available slots (if total limit is set)
+* You must not exceed your personal limit (if set)
+
+### Updating Staking Pools
+
+Pool creators can update their staking pools:
+
+```
+/update-staking-pool staking_pool [topup_staking_pool] [change_reward_per_nft] [increase_nft_pool_limit] [increase_user_staking_limit] [trait_filter_action] [trait_filter_type] [trait_filter_value] [trait_filter_index]
+```
+
+#### Update Options
+
+* **`topup_staking_pool`**: Add more reward tokens to the pool supply
+* **`change_reward_per_nft`**: Update the daily reward per NFT
+* **`increase_nft_pool_limit`**: Increase the total NFT limit (must be higher than current)
+* **`increase_user_staking_limit`**: Increase the per-user staking limit (must be higher than current)
+* **`trait_filter_action`**: Manage trait filters (`add`, `remove`, or `clear`)
+* **`trait_filter_type`**: Trait type to filter (when adding filters)
+* **`trait_filter_value`**: Specific trait value (optional, leave empty for any value)
+* **`trait_filter_index`**: Filter index to remove (when removing filters)
+
+#### Example
+
+```
+/update-staking-pool pool-123 topup_staking_pool:5000 change_reward_per_nft:15
+```
+
+This updates the pool by:
+* Adding 5,000 tokens to the reward supply
+* Changing daily reward to 15 tokens per NFT
+
+### Closing Staking Pools
+
+Pool creators can close their staking pools:
+
+```
+/close-staking-pool staking_pool_name
+```
+
+**What happens when a pool is closed**:
+* All staked NFTs are automatically returned to users' Virtual Accounts
+* Final rewards (last 24 hours) are automatically distributed to all stakers
+* Pool status changes to CLOSED
+* Users can no longer stake or unstake
+
+**Note**: Only the pool creator can close their pool.
+
+### Trait Filtering
+
+Staking pools can include trait filters to restrict which NFTs can be staked:
+
+* **Add Filter**: Restrict staking to NFTs with specific traits
+* **Remove Filter**: Remove a specific trait filter
+* **Clear Filters**: Remove all trait filters (allow all NFTs)
+
+Example: A pool might only allow NFTs with "Rarity: Legendary" to be staked.
+
+### Pool Status
+
+Staking pools can have the following statuses:
+
+* **ACTIVE**: Pool is open and accepting stakes
+* **PAUSED**: Pool is temporarily paused (no new stakes, rewards still accumulate)
+* **CLOSED**: Pool is closed (no new stakes, NFTs returned, final rewards distributed)
 
 ***
 
