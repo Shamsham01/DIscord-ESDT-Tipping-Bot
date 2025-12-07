@@ -183,6 +183,32 @@ async function getAllLotteriesForDrawCheck() {
   }
 }
 
+async function updateLotteryStatusAtomically(guildId, lotteryId, expectedStatus, newStatus) {
+  try {
+    // Atomically update status only if it matches expectedStatus
+    // This prevents race conditions when multiple processes try to process the same lottery
+    const { data, error } = await supabase
+      .from('lotteries')
+      .update({ 
+        status: newStatus,
+        updated_at: new Date().toISOString()
+      })
+      .eq('guild_id', guildId)
+      .eq('lottery_id', lotteryId)
+      .eq('status', expectedStatus)
+      .select('lottery_id');
+    
+    if (error) throw error;
+    
+    // If data is returned, the update succeeded (status matched expectedStatus)
+    // If data is empty, another process already changed the status
+    return data && data.length > 0;
+  } catch (error) {
+    console.error('[DB] Error atomically updating lottery status:', error);
+    throw error;
+  }
+}
+
 async function updateLottery(guildId, lotteryId, lotteryData) {
   try {
     const updateData = {
@@ -622,6 +648,7 @@ module.exports = {
   getActiveLotteries,
   getAllLotteriesForDrawCheck,
   updateLottery,
+  updateLotteryStatusAtomically,
   createTicket,
   getTicketsByLottery,
   getTicketsByUser,

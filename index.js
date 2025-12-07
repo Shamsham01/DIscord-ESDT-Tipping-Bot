@@ -17655,8 +17655,19 @@ async function processLotteryDraw(guildId, lotteryId) {
   try {
     console.log(`[LOTTERY] Processing draw for lottery ${lotteryId}`);
     
+    // CRITICAL: Atomically update status from LIVE to PROCESSING to prevent race conditions
+    // Only one process can successfully claim the lottery for processing
     const lottery = await dbLottery.getLottery(guildId, lotteryId);
     if (!lottery || lottery.status !== 'LIVE') {
+      console.log(`[LOTTERY] Lottery ${lotteryId} is not LIVE (status: ${lottery?.status || 'not found'}), skipping`);
+      return;
+    }
+    
+    // Atomically update status to PROCESSING - this prevents concurrent processing
+    // If another process already claimed it, this update will fail and we'll exit
+    const updateResult = await dbLottery.updateLotteryStatusAtomically(guildId, lotteryId, 'LIVE', 'PROCESSING');
+    if (!updateResult) {
+      console.log(`[LOTTERY] Lottery ${lotteryId} was already claimed by another process, skipping`);
       return;
     }
     
@@ -17695,6 +17706,14 @@ async function processLotteryDraw(guildId, lotteryId) {
       hasWinners: winningTickets.length > 0,
       status: 'EXPIRED'
     });
+    
+    // CRITICAL: Re-check lottery status after update to ensure we have the latest state
+    // This prevents creating rollovers if another process already found winners
+    const updatedLottery = await dbLottery.getLottery(guildId, lotteryId);
+    if (updatedLottery && updatedLottery.hasWinners && winningTickets.length === 0) {
+      console.log(`[LOTTERY] Lottery ${lotteryId} already has winners (detected after processing), aborting rollover creation`);
+      return;
+    }
     
     if (winningTickets.length > 0) {
       // We have winners!
@@ -17901,6 +17920,30 @@ async function processLotteryDraw(guildId, lotteryId) {
       // No winners - rollover
       console.log(`[LOTTERY] No winners found for lottery ${lotteryId}, creating rollover`);
       
+      // CRITICAL: Double-check that lottery doesn't have winners (race condition protection)
+      // Another process might have found winners and updated the lottery
+      const recheckLottery = await dbLottery.getLottery(guildId, lotteryId);
+      if (recheckLottery && recheckLottery.hasWinners) {
+        console.log(`[LOTTERY] Lottery ${lotteryId} already has winners (detected in rollover check), aborting rollover creation`);
+        // Update embed to show winners
+        await updateLotteryEmbed(guildId, lotteryId);
+        return;
+      }
+      
+      // CRITICAL: Check if rollover already exists to prevent duplicates
+      // This is an additional safety check in case the atomic status update wasn't enough
+      const existingRollovers = await dbLottery.getActiveLotteries(guildId);
+      const rolloverExists = Object.values(existingRollovers).some(
+        l => l.originalLotteryId === lotteryId && l.isRollover && l.status === 'LIVE'
+      );
+      
+      if (rolloverExists) {
+        console.log(`[LOTTERY] Rollover already exists for lottery ${lotteryId}, skipping rollover creation`);
+        // Still update the original lottery embed
+        await updateLotteryEmbed(guildId, lotteryId);
+        return;
+      }
+      
       // Create rollover lottery
       const rolloverLotteryId = `lottery_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const frequencyMs = lotteryHelpers.parseFrequency(lottery.drawingFrequency);
@@ -18028,6 +18071,16 @@ async function processLotteryDraw(guildId, lotteryId) {
     
   } catch (error) {
     console.error(`[LOTTERY] Error processing draw for lottery ${lotteryId}:`, error.message);
+    // Ensure lottery status is updated even if there's an error
+    // If we successfully claimed it (status is PROCESSING), update to EXPIRED
+    try {
+      const errorLottery = await dbLottery.getLottery(guildId, lotteryId);
+      if (errorLottery && errorLottery.status === 'PROCESSING') {
+        await dbLottery.updateLottery(guildId, lotteryId, { status: 'EXPIRED' });
+      }
+    } catch (cleanupError) {
+      console.error(`[LOTTERY] Error cleaning up lottery status after error:`, cleanupError.message);
+    }
   }
 }
 
