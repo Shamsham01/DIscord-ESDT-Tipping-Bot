@@ -1247,7 +1247,7 @@ const commands = [
                 name: 'topup-pot-size',
                 description: 'New required stake amount (pot size)',
                 type: ApplicationCommandOptionType.Number,
-                required: false,
+                required: true,
                 min_value: 0.1
             }
         ],

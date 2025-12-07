@@ -11138,8 +11138,8 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      if (pool.status !== 'ACTIVE') {
-        await interaction.editReply({ content: '❌ Pool must be ACTIVE to update.', flags: [MessageFlags.Ephemeral] });
+      if (pool.status !== 'ACTIVE' && pool.status !== 'PAUSED') {
+        await interaction.editReply({ content: '❌ Pool must be ACTIVE or PAUSED to update.', flags: [MessageFlags.Ephemeral] });
         return;
       }
       
