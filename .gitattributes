@@ -1,0 +1,3 @@
+# Ensure .gitconfig is tracked
+.gitconfig text eol=lf
+
