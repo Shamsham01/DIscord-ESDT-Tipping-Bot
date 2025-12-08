@@ -917,6 +917,13 @@ async function sendExpiredChallengeNotifications(guildId, challengeId, challenge
       );
     }
 
+    // Get token ticker and USD values for refund amount
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    const tokenTicker = tokenMetadata[challenge.token]?.ticker || challenge.token.split('-')[0];
+    const tokenPriceUsd = await getTokenPriceUsd(challenge.token);
+    const refundAmountUsd = tokenPriceUsd > 0 ? new BigNumber(challenge.humanAmount).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+    const refundAmountDisplay = refundAmountUsd ? `${challenge.humanAmount} ${tokenTicker} (≈ $${refundAmountUsd})` : `${challenge.humanAmount} ${tokenTicker}`;
+    
     // Create refund notification embed
     const refundEmbed = new EmbedBuilder()
       .setTitle('🕐 RPS Challenge Expired - Refund Issued')
@@ -925,7 +932,7 @@ async function sendExpiredChallengeNotifications(guildId, challengeId, challenge
         { name: 'Challenge ID', value: challengeId, inline: true },
         { name: 'Challenger', value: `<@${challenge.challengerId}>`, inline: true },
         { name: 'Challenged User', value: challenge.challengedTag, inline: true },
-        { name: 'Amount Refunded', value: `${challenge.humanAmount} ${challenge.token}`, inline: true },
+        { name: 'Amount Refunded', value: refundAmountDisplay, inline: true },
         { name: 'Reason', value: 'Challenge expired after 30 minutes of inactivity', inline: false }
       ])
       .setColor(0xffa500) // Orange color for timeout
@@ -966,13 +973,20 @@ async function sendExpiredChallengeNotifications(guildId, challengeId, challenge
         const communityFundProjectName = getCommunityFundProjectName();
         const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
         
+        // Get token ticker and USD values for refund amount
+        const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+        const tokenTicker = tokenMetadata[challenge.token]?.ticker || challenge.token.split('-')[0];
+        const tokenPriceUsd = await getTokenPriceUsd(challenge.token);
+        const refundAmountUsd = tokenPriceUsd > 0 ? new BigNumber(challenge.humanAmount).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+        const refundAmountDisplay = refundAmountUsd ? `${challenge.humanAmount} ${tokenTicker} (≈ $${refundAmountUsd})` : `${challenge.humanAmount} ${tokenTicker}`;
+        
         const dmEmbed = new EmbedBuilder()
           .setTitle('💰 RPS Challenge Refund')
           .setDescription(`Your RPS challenge has been refunded due to inactivity.`)
           .addFields([
             { name: 'Challenge ID', value: challengeId, inline: true },
             { name: 'Challenged User', value: challenge.challengedTag, inline: true },
-            { name: 'Amount Refunded', value: `${challenge.humanAmount} ${challenge.token}`, inline: true },
+            { name: 'Amount Refunded', value: refundAmountDisplay, inline: true },
             { name: 'Reason', value: 'Challenge expired after 30 minutes of inactivity', inline: false },
             { name: 'Refund Status', value: '✅ Successfully refunded to your virtual account', inline: false }
           ])
@@ -4389,14 +4403,22 @@ client.on('interactionCreate', async (interaction) => {
         rounds: [],
         currentRound: 1
       });
+      
+      // Get USD values for prize amounts
+      const tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
+      const prizeAmountUsd = tokenPriceUsd > 0 ? new BigNumber(amountNum).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+      const totalPrizeUsd = tokenPriceUsd > 0 ? new BigNumber(amountNum * 2).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+      
+      const prizeAmountDisplay = prizeAmountUsd ? `${amountNum} ${tokenTicker} (≈ $${prizeAmountUsd})` : `${amountNum} ${tokenTicker}`;
+      const totalPrizeDisplay = totalPrizeUsd ? `${amountNum * 2} ${tokenTicker} (≈ $${totalPrizeUsd})` : `${amountNum * 2} ${tokenTicker}`;
         
       const embed = new EmbedBuilder()
         .setTitle('🎮 Rock, Paper, Scissors Challenge Created!')
         .setDescription(`${interaction.user.tag} has challenged ${userTag} to a game!`)
         .addFields([
           { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-          { name: 'Prize Amount', value: `${amountNum} ${tokenTicker}`, inline: true },
-          { name: 'Total Prize', value: `${amountNum * 2} ${tokenTicker}`, inline: true },
+          { name: 'Prize Amount', value: prizeAmountDisplay, inline: true },
+          { name: 'Total Prize', value: totalPrizeDisplay, inline: true },
           { name: 'Challenger', value: `<@${interaction.user.id}>`, inline: true },
           { name: 'Challenged', value: `<@${targetUserId}>`, inline: true },
           { name: 'Status', value: '⏳ Waiting for opponent', inline: true },
@@ -4444,8 +4466,8 @@ client.on('interactionCreate', async (interaction) => {
             .setDescription(`${interaction.user.tag} has challenged you to Rock, Paper, Scissors!`)
             .addFields([
               { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-              { name: 'Prize Amount', value: `${amountNum} ${tokenTicker}`, inline: true },
-              { name: 'Total Prize', value: `${amountNum * 2} ${tokenTicker}`, inline: true },
+              { name: 'Prize Amount', value: prizeAmountDisplay, inline: true },
+              { name: 'Total Prize', value: totalPrizeDisplay, inline: true },
               { name: 'Expires', value: '<t:' + Math.floor((Date.now() + (30 * 60 * 1000)) / 1000) + ':R>', inline: true },
               { name: 'To Join', value: `Click the "Join Challenge" button in the challenge post`, inline: false },
               { name: 'Memo', value: memo, inline: false }
@@ -4508,6 +4530,13 @@ client.on('interactionCreate', async (interaction) => {
                   // Get updated virtual balance
                   const newBalance = await virtualAccounts.getUserBalance(guildId, challenge.challengerId, challenge.token);
                   
+                  // Get token ticker and USD values for refund amount
+                  const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+                  const tokenTicker = tokenMetadata[challenge.token]?.ticker || challenge.token.split('-')[0];
+                  const tokenPriceUsd = await getTokenPriceUsd(challenge.token);
+                  const refundAmountUsd = tokenPriceUsd > 0 ? new BigNumber(challenge.humanAmount).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+                  const refundAmountDisplay = refundAmountUsd ? `${challenge.humanAmount} ${tokenTicker} (≈ $${refundAmountUsd})` : `${challenge.humanAmount} ${tokenTicker}`;
+                  
                   // Get Community Fund project logo for RPS refund notification
                   const communityFundProjectName = getCommunityFundProjectName();
                   const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
@@ -4518,8 +4547,8 @@ client.on('interactionCreate', async (interaction) => {
                         .setTitle('RPS Challenge Refund')
                         .setDescription(`Your RPS challenge expired and your entry has been refunded to your virtual account.`)
                         .addFields([
-                          { name: 'Amount Refunded', value: `${challenge.humanAmount} ${challenge.token}`, inline: true },
-                          { name: 'New Virtual Balance', value: `${newBalance} ${challenge.token}`, inline: true },
+                          { name: 'Amount Refunded', value: refundAmountDisplay, inline: true },
+                          { name: 'New Virtual Balance', value: `${newBalance} ${tokenTicker}`, inline: true },
                           { name: 'Reason', value: 'Challenge expired (no opponent joined in time)', inline: false },
                           { name: 'Challenge ID', value: challengeId, inline: false }
                         ])
@@ -4538,6 +4567,13 @@ client.on('interactionCreate', async (interaction) => {
                 if (interaction.guild) {
                   const channel = interaction.channel || interaction.guild.channels.cache.find((c) => c.isTextBased && c.viewable);
                   if (channel) {
+                    // Get token ticker and USD values for refund amount (reuse if already calculated above)
+                    const tokenMetadataRefund = await dbServerData.getTokenMetadata(guildId);
+                    const tokenTickerRefund = tokenMetadataRefund[challenge.token]?.ticker || challenge.token.split('-')[0];
+                    const tokenPriceUsdRefund = await getTokenPriceUsd(challenge.token);
+                    const refundAmountUsdRefund = tokenPriceUsdRefund > 0 ? new BigNumber(challenge.humanAmount).multipliedBy(tokenPriceUsdRefund).toFixed(2) : null;
+                    const refundAmountDisplayRefund = refundAmountUsdRefund ? `${challenge.humanAmount} ${tokenTickerRefund} (≈ $${refundAmountUsdRefund})` : `${challenge.humanAmount} ${tokenTickerRefund}`;
+                    
                     await channel.send({
                       embeds: [
                         new EmbedBuilder()
@@ -4545,7 +4581,7 @@ client.on('interactionCreate', async (interaction) => {
                           .setDescription(`A refund has been issued for an expired RPS challenge.`)
                           .addFields([
                             { name: 'Challenger', value: `<@${challenge.challengerId}>`, inline: true },
-                            { name: 'Amount Refunded', value: `${challenge.humanAmount} ${challenge.token}`, inline: true },
+                            { name: 'Amount Refunded', value: refundAmountDisplayRefund, inline: true },
                             { name: 'Challenge ID', value: challengeId, inline: false },
                             ...(txHash ? [{ name: 'Transaction Hash', value: `[${txHash}](${explorerUrl})`, inline: false }] : [])
                           ])
@@ -4593,14 +4629,28 @@ client.on('interactionCreate', async (interaction) => {
         .setColor('#0099FF')
         .setFooter({ text: `Requested by ${interaction.user.tag}` })
         .setTimestamp();
+      
+      // Get token metadata for ticker display
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      
       for (const [challengeId, challenge] of activeChallenges) {
         const statusEmoji = challenge.status === 'waiting' ? '⏳' : '🎯';
         const statusText = challenge.status === 'waiting' ? 'Waiting for opponent' : 'Game Active';
         const expiresIn = Math.floor((challenge.expiresAt - Date.now()) / 1000);
         const expiresText = expiresIn > 0 ? `<t:${Math.floor(Date.now() / 1000) + expiresIn}:R>` : 'Expired';
+        
+        // Get token ticker and USD values
+        const tokenTicker = tokenMetadata[challenge.token]?.ticker || challenge.token.split('-')[0];
+        const tokenPriceUsd = await getTokenPriceUsd(challenge.token);
+        const prizeAmountUsd = tokenPriceUsd > 0 ? new BigNumber(challenge.humanAmount).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+        const totalPrizeUsd = tokenPriceUsd > 0 ? new BigNumber(Number(challenge.humanAmount) * 2).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+        
+        const prizeDisplay = prizeAmountUsd ? `${challenge.humanAmount} ${tokenTicker} (≈ $${prizeAmountUsd})` : `${challenge.humanAmount} ${tokenTicker}`;
+        const totalPrizeDisplay = totalPrizeUsd ? `${Number(challenge.humanAmount) * 2} ${tokenTicker} (≈ $${totalPrizeUsd})` : `${Number(challenge.humanAmount) * 2} ${tokenTicker}`;
+        
         embed.addFields({
           name: `${statusEmoji} Challenge ${challengeId}`,
-          value: `**Challenger:** ${challenge.challengerTag}\n**Challenged:** ${challenge.challengedTag}\n**Prize:** ${challenge.humanAmount} ${challenge.token}\n**Total Prize:** ${Number(challenge.humanAmount) * 2} ${challenge.token}\n**Status:** ${statusText}\n**Expires:** ${expiresText}\n**Memo:** ${challenge.memo}`,
+          value: `**Challenger:** ${challenge.challengerTag}\n**Challenged:** ${challenge.challengedTag}\n**Prize:** ${prizeDisplay}\n**Total Prize:** ${totalPrizeDisplay}\n**Status:** ${statusText}\n**Expires:** ${expiresText}\n**Memo:** ${challenge.memo}`,
           inline: false
         });
       }
@@ -14620,6 +14670,14 @@ client.on('interactionCreate', async (interaction) => {
           
           console.log(`[RPS DEBUG] After prize (second handler) - Winner final balance: ${winnerBalance}, Loser balance: ${loserBalance}`);
           
+          // Get token ticker and USD values for prize amounts
+          const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+          const tokenTicker = tokenMetadata[challenge.token]?.ticker || challenge.token.split('-')[0];
+          const tokenPriceUsd = await getTokenPriceUsd(challenge.token);
+          const prizeWonUsd = tokenPriceUsd > 0 ? new BigNumber(totalPrizeHuman).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+          
+          const prizeWonDisplay = prizeWonUsd ? `${totalPrizeHuman} ${tokenTicker} (≈ $${prizeWonUsd})` : `${totalPrizeHuman} ${tokenTicker}`;
+          
           // Winner embed for channel
           const winnerEmbed = new EmbedBuilder()
             .setTitle('🎉 RPS Game Complete!')
@@ -14628,9 +14686,9 @@ client.on('interactionCreate', async (interaction) => {
               { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
               { name: 'Winner', value: `<@${winnerId}>`, inline: true },
               { name: 'Loser', value: `<@${loserId}>`, inline: true },
-              { name: 'Prize Won', value: `${totalPrizeHuman} ${challenge.token}`, inline: true },
-              { name: 'Winner New Balance', value: `${winnerBalance} ${challenge.token}`, inline: true },
-              { name: 'Loser New Balance', value: `${loserBalance} ${challenge.token}`, inline: true }
+              { name: 'Prize Won', value: prizeWonDisplay, inline: true },
+              { name: 'Winner New Balance', value: `${winnerBalance} ${tokenTicker}`, inline: true },
+              { name: 'Loser New Balance', value: `${loserBalance} ${tokenTicker}`, inline: true }
             ])
             .setColor('#00FF00')
             .setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif')
@@ -14649,11 +14707,11 @@ client.on('interactionCreate', async (interaction) => {
               
               const winnerDMEmbed = new EmbedBuilder()
                 .setTitle('🎉 You Won Rock, Paper, Scissors!')
-                .setDescription(`Congratulations! You won the RPS game and received **${totalPrizeHuman} ${challenge.token}** in your virtual account.`)
+                .setDescription(`Congratulations! You won the RPS game and received **${prizeWonDisplay}** in your virtual account.`)
                 .addFields([
                   { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-                  { name: 'Prize Won', value: `${totalPrizeHuman} ${challenge.token}`, inline: true },
-                  { name: 'Your New Balance', value: `${winnerBalance} ${challenge.token}`, inline: true }
+                  { name: 'Prize Won', value: prizeWonDisplay, inline: true },
+                  { name: 'Your New Balance', value: `${winnerBalance} ${tokenTicker}`, inline: true }
                 ])
                 .setColor('#00FF00')
                 .setThumbnail(projectLogoUrl)
@@ -17121,14 +17179,24 @@ client.on('interactionCreate', async (interaction) => {
             joinerMemo: memo
           });
 
+          // Get token ticker and USD values for prize amounts
+          const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+          const tokenTicker = tokenMetadata[challenge.token]?.ticker || challenge.token.split('-')[0];
+          const tokenPriceUsd = await getTokenPriceUsd(challenge.token);
+          const prizeAmountUsd = tokenPriceUsd > 0 ? new BigNumber(challenge.humanAmount).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+          const totalPrizeUsd = tokenPriceUsd > 0 ? new BigNumber(Number(challenge.humanAmount) * 2).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+          
+          const prizeAmountDisplay = prizeAmountUsd ? `${challenge.humanAmount} ${tokenTicker} (≈ $${prizeAmountUsd})` : `${challenge.humanAmount} ${tokenTicker}`;
+          const totalPrizeDisplay = totalPrizeUsd ? `${Number(challenge.humanAmount) * 2} ${tokenTicker} (≈ $${totalPrizeUsd})` : `${Number(challenge.humanAmount) * 2} ${tokenTicker}`;
+
           // Create the embed for game start
           const embed = new EmbedBuilder()
             .setTitle('🎮 Rock, Paper, Scissors Challenge Started!')
             .setDescription(`${interaction.user.tag} has joined the challenge!`)
             .addFields([
               { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-              { name: 'Prize Amount', value: `${challenge.humanAmount} ${challenge.token}`, inline: true },
-              { name: 'Total Prize', value: `${Number(challenge.humanAmount) * 2} ${challenge.token}`, inline: true },
+              { name: 'Prize Amount', value: prizeAmountDisplay, inline: true },
+              { name: 'Total Prize', value: totalPrizeDisplay, inline: true },
               { name: 'Challenger', value: `<@${challenge.challengerId}>`, inline: true },
               { name: 'Challenged', value: `<@${challenge.challengedId}>`, inline: true },
               { name: 'Status', value: '🎯 Game Active', inline: true },
