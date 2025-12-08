@@ -166,6 +166,9 @@ CREATE TABLE IF NOT EXISTS rps_games (
     loser_id TEXT,
     loser_tag TEXT,
     rounds JSONB DEFAULT '[]',
+    channel_id TEXT,
+    message_id TEXT,
+    thread_id TEXT,
     UNIQUE(game_id, guild_id)
 );
 

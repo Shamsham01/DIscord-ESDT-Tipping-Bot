@@ -802,6 +802,115 @@ async function getRPSChallenges(guildId) {
   return await dbRpsGames.getRpsGames(guildId);
 }
 
+// Update original RPS challenge embed when game finishes or is refunded
+async function updateRPSChallengeEmbed(guildId, challengeId, challenge, statusText, reason = null) {
+  try {
+    if (!challenge.channelId || !challenge.messageId) {
+      console.log(`[RPS] Cannot update embed for challenge ${challengeId}: missing channel or message ID`);
+      return;
+    }
+
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) {
+      console.error(`[RPS] Guild not found: ${guildId}`);
+      return;
+    }
+
+    const channel = guild.channels.cache.get(challenge.channelId);
+    if (!channel) {
+      console.error(`[RPS] Channel not found: ${challenge.channelId}`);
+      return;
+    }
+
+    // Check if it's a thread
+    let messageChannel = channel;
+    if (channel.isThread()) {
+      messageChannel = channel;
+    } else if (challenge.threadId) {
+      const thread = await guild.channels.fetch(challenge.threadId).catch(() => null);
+      if (thread) {
+        messageChannel = thread;
+      }
+    }
+
+    try {
+      const message = await messageChannel.messages.fetch(challenge.messageId);
+      if (!message) {
+        console.error(`[RPS] Message not found: ${challenge.messageId}`);
+        return;
+      }
+
+      // Get token ticker and USD values
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      const tokenTicker = tokenMetadata[challenge.token]?.ticker || challenge.token.split('-')[0];
+      const tokenPriceUsd = await getTokenPriceUsd(challenge.token);
+      const prizeAmountUsd = tokenPriceUsd > 0 ? new BigNumber(challenge.humanAmount).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+      const totalPrizeUsd = tokenPriceUsd > 0 ? new BigNumber(Number(challenge.humanAmount) * 2).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+      
+      const prizeAmountDisplay = prizeAmountUsd ? `${challenge.humanAmount} ${tokenTicker} (≈ $${prizeAmountUsd})` : `${challenge.humanAmount} ${tokenTicker}`;
+      const totalPrizeDisplay = totalPrizeUsd ? `${Number(challenge.humanAmount) * 2} ${tokenTicker} (≈ $${totalPrizeUsd})` : `${Number(challenge.humanAmount) * 2} ${tokenTicker}`;
+
+      // Get existing embed or create new one
+      const existingEmbed = message.embeds[0];
+      const embed = existingEmbed ? EmbedBuilder.from(existingEmbed) : new EmbedBuilder();
+
+      // Update fields
+      const fields = [
+        { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
+        { name: 'Prize Amount', value: prizeAmountDisplay, inline: true },
+        { name: 'Total Prize', value: totalPrizeDisplay, inline: true },
+        { name: 'Challenger', value: `<@${challenge.challengerId}>`, inline: true },
+        { name: 'Challenged', value: `<@${challenge.challengedId}>`, inline: true },
+        { name: 'Status', value: statusText, inline: true }
+      ];
+
+      // Add expiry field if challenge hasn't completed
+      if (challenge.status === 'expired' && challenge.expiresAt) {
+        fields.push({ name: 'Expired', value: '<t:' + Math.floor(challenge.expiresAt / 1000) + ':R>', inline: true });
+      }
+
+      // Add memo if exists
+      if (challenge.memo) {
+        fields.push({ name: 'Memo', value: challenge.memo, inline: false });
+      }
+
+      // Add reason if provided
+      if (reason) {
+        fields.push({ name: 'Reason', value: reason, inline: false });
+      }
+
+      // Update embed with new fields and red color
+      embed.setFields(fields);
+      embed.setColor('#FF0000'); // Red color for finished/refunded
+      
+      // Update title based on status
+      if (challenge.status === 'completed') {
+        embed.setTitle('🎮 Rock, Paper, Scissors Challenge - Finished');
+      } else if (challenge.status === 'expired') {
+        embed.setTitle('🕐 Rock, Paper, Scissors Challenge - Expired');
+      } else {
+        embed.setTitle('🎮 Rock, Paper, Scissors Challenge');
+      }
+      
+      embed.setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif');
+      embed.setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      embed.setTimestamp();
+
+      // Update message with new embed and remove button
+      await message.edit({
+        embeds: [embed],
+        components: [] // Remove buttons
+      });
+
+      console.log(`[RPS] Updated original embed for challenge ${challengeId} with status: ${statusText}`);
+    } catch (fetchError) {
+      console.error(`[RPS] Error fetching/updating message for challenge ${challengeId}:`, fetchError.message);
+    }
+  } catch (error) {
+    console.error(`[RPS] Error updating challenge embed for ${challengeId}:`, error.message);
+  }
+}
+
 // Generate a unique challenge ID
 function generateChallengeId() {
   return 'rps_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -867,6 +976,12 @@ async function cleanupExpiredChallenges() {
                 
                 if (refundResult && refundResult.success) {
                   console.log(`[RPS CLEANUP] Refunded challenger for expired challenge ${gameId}: ${challenge.humanAmount} ${challenge.token}`);
+                  
+                  // Update original challenge embed - reload challenge to get latest data
+                  const updatedChallenge = await dbRpsGames.getGame(guildId, gameId);
+                  if (updatedChallenge) {
+                    await updateRPSChallengeEmbed(guildId, gameId, updatedChallenge, '❌ Challenge Expired - Refunded', 'Challenge expired after 30 minutes of inactivity');
+                  }
                   
                   // Send notifications for successful refund
                   await sendExpiredChallengeNotifications(guildId, gameId, challenge);
@@ -4448,10 +4563,17 @@ client.on('interactionCreate', async (interaction) => {
       });
       
       // Post public announcement with button
-      await interaction.channel.send({ 
+      const challengeMessage = await interaction.channel.send({ 
         content: `🎮 **Rock, Paper, Scissors Challenge!** 🎮`,
         embeds: [embed],
         components: [joinButton]
+      });
+      
+      // Store channel, message, and thread IDs
+      await dbRpsGames.updateGame(guildId, challengeId, {
+        channelId: interaction.channel.id,
+        messageId: challengeMessage.id,
+        threadId: interaction.channel.isThread() ? interaction.channel.id : null
       });
       
       // Send DM to challenged user
@@ -4522,6 +4644,16 @@ client.on('interactionCreate', async (interaction) => {
                 'rps_refund',
                 null // Username will be updated when user runs commands
               );
+              
+              // Update original challenge embed if refund successful
+              if (refundResult && refundResult.success) {
+                // Reload challenge to get latest data including channel/message IDs
+                const updatedChallenge = await dbRpsGames.getGame(guildId, challengeId);
+                if (updatedChallenge) {
+                  await updateRPSChallengeEmbed(guildId, challengeId, updatedChallenge, '❌ Challenge Expired - Refunded', 'Challenge expired after 30 minutes of inactivity');
+                }
+              }
+              
               // DM notification to challenger
               try {
                 const guild = interaction.guild || await client.guilds.fetch(guildId);
@@ -14696,6 +14828,12 @@ client.on('interactionCreate', async (interaction) => {
             .setTimestamp();
           
           await interaction.channel.send({ embeds: [winnerEmbed] });
+          
+          // Update original challenge embed - reload challenge to get latest data
+          const updatedChallenge = await dbRpsGames.getGame(guildId, challengeId);
+          if (updatedChallenge) {
+            await updateRPSChallengeEmbed(guildId, challengeId, updatedChallenge, `✅ Game Finished - ${winnerTag} won!`);
+          }
           
           // DM winner
           try {

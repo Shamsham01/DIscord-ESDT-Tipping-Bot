@@ -39,7 +39,10 @@ async function getGame(guildId, gameId) {
       winnerTag: data.winner_tag,
       loserId: data.loser_id,
       loserTag: data.loser_tag,
-      rounds: data.rounds || []
+      rounds: data.rounds || [],
+      channelId: data.channel_id,
+      messageId: data.message_id,
+      threadId: data.thread_id
     };
   } catch (error) {
     console.error('[DB] Error getting RPS game:', error);
@@ -86,7 +89,10 @@ async function getGamesByGuild(guildId) {
         winnerTag: row.winner_tag,
         loserId: row.loser_id,
         loserTag: row.loser_tag,
-        rounds: row.rounds || []
+        rounds: row.rounds || [],
+        channelId: row.channel_id,
+        messageId: row.message_id,
+        threadId: row.thread_id
       };
     });
     return games;
@@ -134,7 +140,10 @@ async function getActiveGames(guildId) {
       winnerTag: row.winner_tag,
       loserId: row.loser_id,
       loserTag: row.loser_tag,
-      rounds: row.rounds || []
+      rounds: row.rounds || [],
+      channelId: row.channel_id,
+      messageId: row.message_id,
+      threadId: row.thread_id
     }));
   } catch (error) {
     console.error('[DB] Error getting active RPS games:', error);
@@ -173,7 +182,10 @@ async function createGame(guildId, gameId, gameData) {
         winner_tag: gameData.winnerTag || null,
         loser_id: gameData.loserId || null,
         loser_tag: gameData.loserTag || null,
-        rounds: gameData.rounds || []
+        rounds: gameData.rounds || [],
+        channel_id: gameData.channelId || null,
+        message_id: gameData.messageId || null,
+        thread_id: gameData.threadId || null
       });
     
     if (error) throw error;
@@ -213,6 +225,9 @@ async function updateGame(guildId, gameId, gameData) {
     if (gameData.loserId !== undefined) updateData.loser_id = gameData.loserId;
     if (gameData.loserTag !== undefined) updateData.loser_tag = gameData.loserTag;
     if (gameData.rounds !== undefined) updateData.rounds = gameData.rounds;
+    if (gameData.channelId !== undefined) updateData.channel_id = gameData.channelId;
+    if (gameData.messageId !== undefined) updateData.message_id = gameData.messageId;
+    if (gameData.threadId !== undefined) updateData.thread_id = gameData.threadId;
     
     const { error } = await supabase
       .from('rps_games')
