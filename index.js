@@ -802,6 +802,205 @@ async function getRPSChallenges(guildId) {
   return await dbRpsGames.getRpsGames(guildId);
 }
 
+// Update main RPS game embed with current state (used during gameplay)
+async function updateRPSGameEmbed(guildId, challengeId, challenge) {
+  try {
+    if (!challenge.channelId || !challenge.messageId) {
+      console.log(`[RPS] Cannot update embed for challenge ${challengeId}: missing channel or message ID`);
+      return;
+    }
+
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) {
+      console.error(`[RPS] Guild not found: ${guildId}`);
+      return;
+    }
+
+    const channel = guild.channels.cache.get(challenge.channelId);
+    if (!channel) {
+      console.error(`[RPS] Channel not found: ${challenge.channelId}`);
+      return;
+    }
+
+    // Check if it's a thread
+    let messageChannel = channel;
+    if (channel.isThread()) {
+      messageChannel = channel;
+    } else if (challenge.threadId) {
+      const thread = await guild.channels.fetch(challenge.threadId).catch(() => null);
+      if (thread) {
+        messageChannel = thread;
+      }
+    }
+
+    try {
+      const message = await messageChannel.messages.fetch(challenge.messageId);
+      if (!message) {
+        console.error(`[RPS] Message not found: ${challenge.messageId}`);
+        return;
+      }
+
+      // Get token ticker and USD values
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      const tokenTicker = tokenMetadata[challenge.token]?.ticker || challenge.token.split('-')[0];
+      const tokenPriceUsd = await getTokenPriceUsd(challenge.token);
+      const prizeAmountUsd = tokenPriceUsd > 0 ? new BigNumber(challenge.humanAmount).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+      const totalPrizeUsd = tokenPriceUsd > 0 ? new BigNumber(Number(challenge.humanAmount) * 2).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+      
+      const prizeAmountDisplay = prizeAmountUsd ? `${challenge.humanAmount} ${tokenTicker} (≈ $${prizeAmountUsd})` : `${challenge.humanAmount} ${tokenTicker}`;
+      const totalPrizeDisplay = totalPrizeUsd ? `${Number(challenge.humanAmount) * 2} ${tokenTicker} (≈ $${totalPrizeUsd})` : `${Number(challenge.humanAmount) * 2} ${tokenTicker}`;
+
+      const embed = new EmbedBuilder();
+      let statusText = '';
+      let statusEmoji = '';
+      let embedColor = '#FF6B35'; // Default orange
+      let showButtons = false;
+      let buttons = [];
+
+      // Determine status, color, and buttons based on game state
+      if (challenge.status === 'waiting') {
+        statusText = '⏳ Waiting for opponent';
+        statusEmoji = '⏳';
+        embedColor = '#FF6B35'; // Orange
+        embed.setTitle('🎮 Rock, Paper, Scissors Challenge Created!');
+        embed.setDescription(`${challenge.challengerTag} has challenged ${challenge.challengedTag} to a game!`);
+        showButtons = true;
+        buttons = [
+          new ActionRowBuilder()
+            .addComponents(
+              new ButtonBuilder()
+                .setCustomId(`join-rps-modal:${challengeId}`)
+                .setLabel('Join Challenge')
+                .setStyle(ButtonStyle.Primary)
+                .setEmoji('🎯')
+            )
+        ];
+      } else if (challenge.status === 'active') {
+        statusText = '🎯 Game Active';
+        statusEmoji = '🎯';
+        embedColor = '#00FF00'; // Green
+        embed.setTitle('🎮 Rock, Paper, Scissors Challenge');
+        embed.setDescription(`${challenge.challengedTag} has joined! Game is now active.`);
+        
+        // Show current round info
+        const currentRound = challenge.rounds[challenge.currentRound - 1];
+        if (currentRound) {
+          const challengerChoice = currentRound.challengerChoice ? currentRound.challengerChoice.charAt(0).toUpperCase() + currentRound.challengerChoice.slice(1) : 'Not chosen';
+          const challengedChoice = currentRound.challengedChoice ? currentRound.challengedChoice.charAt(0).toUpperCase() + currentRound.challengedChoice.slice(1) : 'Not chosen';
+          
+          if (currentRound.challengerChoice && currentRound.challengedChoice) {
+            // Both have chosen, check if it's a draw (will be processed next)
+            if (currentRound.result === 'draw') {
+              embed.setDescription(`Round ${currentRound.round} ended in a draw! Both players, choose again for round ${challenge.currentRound}.`);
+              embedColor = '#FFD700'; // Gold for draw
+            } else {
+              embed.setDescription(`Round ${challenge.currentRound} - Both players have chosen. Processing result...`);
+            }
+          } else {
+            embed.setDescription(`Round ${challenge.currentRound} - Waiting for both players to make their move.`);
+          }
+        } else {
+          embed.setDescription(`Round ${challenge.currentRound} - Make your move!`);
+        }
+        
+        showButtons = true;
+        buttons = [
+          new ActionRowBuilder()
+            .addComponents(
+              new ButtonBuilder()
+                .setCustomId(`rps-move:${challengeId}:rock`)
+                .setLabel('🪨 Rock')
+                .setStyle(ButtonStyle.Primary),
+              new ButtonBuilder()
+                .setCustomId(`rps-move:${challengeId}:paper`)
+                .setLabel('📄 Paper')
+                .setStyle(ButtonStyle.Primary),
+              new ButtonBuilder()
+                .setCustomId(`rps-move:${challengeId}:scissors`)
+                .setLabel('✂️ Scissors')
+                .setStyle(ButtonStyle.Primary)
+            )
+        ];
+      } else if (challenge.status === 'completed') {
+        statusText = `✅ Game Finished - ${challenge.winnerTag || 'Winner'} won!`;
+        statusEmoji = '✅';
+        embedColor = '#FF0000'; // Red
+        embed.setTitle('🎮 Rock, Paper, Scissors Challenge - Finished');
+        embed.setDescription(`**${challenge.winnerTag || 'Winner'} wins the game!**`);
+        showButtons = false;
+      } else if (challenge.status === 'expired') {
+        statusText = '❌ Challenge Expired - Refunded';
+        statusEmoji = '❌';
+        embedColor = '#FF0000'; // Red
+        embed.setTitle('🕐 Rock, Paper, Scissors Challenge - Expired');
+        embed.setDescription(`The RPS challenge has expired due to inactivity and the challenger has been refunded.`);
+        showButtons = false;
+      }
+
+      // Build fields
+      const fields = [
+        { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
+        { name: 'Prize Amount', value: prizeAmountDisplay, inline: true },
+        { name: 'Total Prize', value: totalPrizeDisplay, inline: true },
+        { name: 'Challenger', value: `<@${challenge.challengerId}>`, inline: true },
+        { name: 'Challenged', value: `<@${challenge.challengedId}>`, inline: true },
+        { name: 'Status', value: statusText, inline: true }
+      ];
+
+      // Add round info if game is active
+      if (challenge.status === 'active' && challenge.currentRound) {
+        const currentRound = challenge.rounds[challenge.currentRound - 1];
+        if (currentRound) {
+          const challengerChoice = currentRound.challengerChoice ? currentRound.challengerChoice.charAt(0).toUpperCase() + currentRound.challengerChoice.slice(1) : 'Not chosen';
+          const challengedChoice = currentRound.challengedChoice ? currentRound.challengedChoice.charAt(0).toUpperCase() + currentRound.challengedChoice.slice(1) : 'Not chosen';
+          
+          fields.push({ name: 'Round', value: `${challenge.currentRound}`, inline: true });
+          fields.push({ name: 'Challenger Choice', value: challengerChoice, inline: true });
+          fields.push({ name: 'Challenged Choice', value: challengedChoice, inline: true });
+        }
+      }
+
+      // Add winner/loser if completed
+      if (challenge.status === 'completed') {
+        if (challenge.winnerId) {
+          fields.push({ name: 'Winner', value: `<@${challenge.winnerId}>`, inline: true });
+        }
+        if (challenge.loserId) {
+          fields.push({ name: 'Loser', value: `<@${challenge.loserId}>`, inline: true });
+        }
+      }
+
+      // Add expiry if waiting
+      if (challenge.status === 'waiting' && challenge.expiresAt) {
+        fields.push({ name: 'Expires', value: '<t:' + Math.floor(challenge.expiresAt / 1000) + ':R>', inline: true });
+      }
+
+      // Add memo
+      if (challenge.memo) {
+        fields.push({ name: 'Memo', value: challenge.memo, inline: false });
+      }
+
+      embed.setFields(fields);
+      embed.setColor(embedColor);
+      embed.setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif');
+      embed.setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      embed.setTimestamp();
+
+      // Update message
+      await message.edit({
+        embeds: [embed],
+        components: showButtons ? buttons : []
+      });
+
+      console.log(`[RPS] Updated main game embed for challenge ${challengeId} with status: ${challenge.status}`);
+    } catch (fetchError) {
+      console.error(`[RPS] Error fetching/updating message for challenge ${challengeId}:`, fetchError.message);
+    }
+  } catch (error) {
+    console.error(`[RPS] Error updating game embed for ${challengeId}:`, error.message);
+  }
+}
+
 // Update original RPS challenge embed when game finishes or is refunded
 async function updateRPSChallengeEmbed(guildId, challengeId, challenge, statusText, reason = null) {
   try {
@@ -14664,6 +14863,12 @@ client.on('interactionCreate', async (interaction) => {
       // Update game in database with the new move
       await dbRpsGames.updateGame(guildId, challengeId, { rounds: challenge.rounds });
       
+      // Update main game embed to show current move state
+      const updatedChallengeMove = await dbRpsGames.getGame(guildId, challengeId);
+      if (updatedChallengeMove) {
+        await updateRPSGameEmbed(guildId, challengeId, updatedChallengeMove);
+      }
+      
       // Send game state embed to user after their move
       const moveEmbed = new EmbedBuilder()
         .setTitle('🎮 RPS Move Submitted')
@@ -14705,40 +14910,11 @@ client.on('interactionCreate', async (interaction) => {
             currentRound: challenge.currentRound
           });
           
-          const roundEmbed = new EmbedBuilder()
-            .setTitle('🎮 RPS Round Draw!')
-            .setDescription(`Round ${currentRound.round} ended in a draw! Both players, choose again for round ${challenge.currentRound}.`)
-            .addFields([
-              { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-              { name: 'Round', value: `${challenge.currentRound}`, inline: true },
-              { name: 'Challenger', value: `<@${challenge.challengerId}>`, inline: true },
-              { name: 'Challenged', value: `<@${challenge.challengedId}>`, inline: true }
-            ])
-            .setColor('#FFD700')
-            .setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif')
-            .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-            .setTimestamp();
-          
-          await interaction.channel.send({ 
-            embeds: [roundEmbed],
-            components: [
-              new ActionRowBuilder()
-                .addComponents(
-                  new ButtonBuilder()
-                    .setCustomId(`rps-move:${challengeId}:rock`)
-                    .setLabel('🪨 Rock')
-                    .setStyle(ButtonStyle.Primary),
-                  new ButtonBuilder()
-                    .setCustomId(`rps-move:${challengeId}:paper`)
-                    .setLabel('📄 Paper')
-                    .setStyle(ButtonStyle.Primary),
-                  new ButtonBuilder()
-                    .setCustomId(`rps-move:${challengeId}:scissors`)
-                    .setLabel('✂️ Scissors')
-                    .setStyle(ButtonStyle.Primary)
-                )
-            ]
-          });
+          // Update original challenge embed to show draw and new round
+          const updatedChallengeDraw = await dbRpsGames.getGame(guildId, challengeId);
+          if (updatedChallengeDraw) {
+            await updateRPSGameEmbed(guildId, challengeId, updatedChallengeDraw);
+          }
         } else {
           currentRound.result = 'winner';
           challenge.status = 'completed';
@@ -14810,29 +14986,10 @@ client.on('interactionCreate', async (interaction) => {
           
           const prizeWonDisplay = prizeWonUsd ? `${totalPrizeHuman} ${tokenTicker} (≈ $${prizeWonUsd})` : `${totalPrizeHuman} ${tokenTicker}`;
           
-          // Winner embed for channel
-          const winnerEmbed = new EmbedBuilder()
-            .setTitle('🎉 RPS Game Complete!')
-            .setDescription(`**${winnerTag} wins the game!**`)
-            .addFields([
-              { name: 'Challenge ID', value: `\`${challengeId}\``, inline: true },
-              { name: 'Winner', value: `<@${winnerId}>`, inline: true },
-              { name: 'Loser', value: `<@${loserId}>`, inline: true },
-              { name: 'Prize Won', value: prizeWonDisplay, inline: true },
-              { name: 'Winner New Balance', value: `${winnerBalance} ${tokenTicker}`, inline: true },
-              { name: 'Loser New Balance', value: `${loserBalance} ${tokenTicker}`, inline: true }
-            ])
-            .setColor('#00FF00')
-            .setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif')
-            .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-            .setTimestamp();
-          
-          await interaction.channel.send({ embeds: [winnerEmbed] });
-          
-          // Update original challenge embed - reload challenge to get latest data
+          // Update original challenge embed to show game is complete
           const updatedChallenge = await dbRpsGames.getGame(guildId, challengeId);
           if (updatedChallenge) {
-            await updateRPSChallengeEmbed(guildId, challengeId, updatedChallenge, `✅ Game Finished - ${winnerTag} won!`);
+            await updateRPSGameEmbed(guildId, challengeId, updatedChallenge);
           }
           
           // DM winner
@@ -17349,32 +17506,14 @@ client.on('interactionCreate', async (interaction) => {
 
           await interaction.editReply({ 
             content: `✅ Successfully joined the challenge!`, 
-            embeds: [embed],
             flags: [MessageFlags.Ephemeral] 
           });
 
-          // Post public announcement
-          await interaction.channel.send({ 
-            content: `🎮 **Rock, Paper, Scissors Challenge Started!** 🎮`,
-            embeds: [embed],
-            components: [
-              new ActionRowBuilder()
-                .addComponents(
-                  new ButtonBuilder()
-                    .setCustomId(`rps-move:${challengeId}:rock`)
-                    .setLabel('🪨 Rock')
-                    .setStyle(ButtonStyle.Primary),
-                  new ButtonBuilder()
-                    .setCustomId(`rps-move:${challengeId}:paper`)
-                    .setLabel('📄 Paper')
-                    .setStyle(ButtonStyle.Primary),
-                  new ButtonBuilder()
-                    .setCustomId(`rps-move:${challengeId}:scissors`)
-                    .setLabel('✂️ Scissors')
-                    .setStyle(ButtonStyle.Primary)
-                )
-            ]
-          });
+          // Update original challenge embed to show game is active
+          const updatedChallenge = await dbRpsGames.getGame(guildId, challengeId);
+          if (updatedChallenge) {
+            await updateRPSGameEmbed(guildId, challengeId, updatedChallenge);
+          }
 
           console.log(`RPS challenge joined via modal: ${challengeId} by ${interaction.user.tag}`);
 
