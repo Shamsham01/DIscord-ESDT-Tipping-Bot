@@ -3,27 +3,47 @@ require('dotenv').config();
 // Configure git to handle divergent branches (runs before anything else)
 try {
   const { execSync } = require('child_process');
-  console.log('[STARTUP] Configuring git to handle divergent branches...');
-  execSync('git config pull.rebase false', { stdio: 'ignore' });
-  execSync('git config pull.ff only', { stdio: 'ignore' });
+  console.log('[STARTUP] ============================================');
+  console.log('[STARTUP] Bot starting - configuring git...');
+  console.log('[STARTUP] ============================================');
+  
+  // Configure git to handle merges
+  try {
+    execSync('git config pull.rebase false', { stdio: 'pipe' });
+    execSync('git config pull.ff only', { stdio: 'pipe' });
+    console.log('[STARTUP] Git configuration set');
+  } catch (configError) {
+    console.log('[STARTUP] Git config warning (non-critical):', configError.message);
+  }
   
   // Try to sync with remote if we're in a git repo
   try {
-    execSync('git fetch origin', { stdio: 'ignore', timeout: 5000 });
-    // Check if we're behind remote
-    const status = execSync('git status -sb', { encoding: 'utf8', stdio: 'pipe' });
-    if (status.includes('behind')) {
-      console.log('[STARTUP] Local branch is behind remote, resetting to match remote...');
-      execSync('git reset --hard origin/main', { stdio: 'ignore' });
-      console.log('[STARTUP] Reset to remote main branch');
+    console.log('[STARTUP] Fetching latest from remote...');
+    execSync('git fetch origin', { stdio: 'pipe', timeout: 10000 });
+    
+    // Check if we're behind remote or have divergent branches
+    try {
+      const status = execSync('git status -sb', { encoding: 'utf8', stdio: 'pipe' });
+      if (status.includes('behind') || status.includes('diverged')) {
+        console.log('[STARTUP] Local branch is behind/diverged, resetting to match remote...');
+        execSync('git reset --hard origin/main', { stdio: 'pipe' });
+        console.log('[STARTUP] ✅ Reset to remote main branch - restart recommended');
+        // Note: We continue running with old code, but next restart will use new code
+      } else {
+        console.log('[STARTUP] ✅ Git repository is up to date');
+      }
+    } catch (statusError) {
+      console.log('[STARTUP] Could not check git status (non-critical)');
     }
   } catch (gitError) {
     // Ignore git errors - we'll continue anyway
-    console.log('[STARTUP] Git sync skipped (not critical)');
+    console.log('[STARTUP] Git sync skipped (not critical for bot operation)');
   }
+  
+  console.log('[STARTUP] ============================================');
 } catch (error) {
   // Ignore git configuration errors - not critical for bot operation
-  console.log('[STARTUP] Git configuration skipped');
+  console.log('[STARTUP] Git configuration skipped (non-critical)');
 }
 
 console.log('Starting Multi-Server ESDT Tipping Bot with Virtual Accounts...');
