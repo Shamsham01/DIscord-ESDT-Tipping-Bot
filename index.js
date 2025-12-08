@@ -5,8 +5,18 @@ console.log('Environment variables:', {
   API_BASE_URL: process.env.API_BASE_URL ? 'Set' : 'Missing',
   API_TOKEN: process.env.API_TOKEN ? 'Set' : 'Missing',
   FD_TOKEN: process.env.FD_TOKEN ? 'Set' : 'Missing',
-  API_BASE_URL: process.env.API_BASE_URL ? 'Set' : 'Missing',
+  SUPABASE_URL: process.env.SUPABASE_URL ? 'Set' : 'Missing',
+  SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY ? 'Set' : 'Missing',
 });
+
+// Validate critical environment variables before proceeding
+const requiredEnvVars = ['TOKEN', 'SUPABASE_URL', 'SUPABASE_ANON_KEY'];
+const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+if (missingVars.length > 0) {
+  console.error('[FATAL] Missing required environment variables:', missingVars.join(', '));
+  console.error('[FATAL] Please set these in your .env file or environment variables.');
+  process.exit(1);
+}
 
 const { Client, IntentsBitField, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags, ChannelType, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } = require('discord.js');
 const fetch = require('node-fetch');
@@ -19697,8 +19707,15 @@ process.on('unhandledRejection', (error) => {
 
 // Login to Discord
 console.log('Attempting to connect to Discord...');
+if (!process.env.TOKEN) {
+  console.error('[FATAL] Missing TOKEN environment variable!');
+  console.error('[FATAL] Please set TOKEN in your .env file or environment variables.');
+  process.exit(1);
+}
 client.login(process.env.TOKEN).catch(error => {
-  console.error('Failed to login:', error);
+  console.error('[FATAL] Failed to login to Discord:', error.message);
+  console.error('[FATAL] Please check your TOKEN in .env file.');
+  process.exit(1);
 }); 
 
 // --- RPS Games Data (now in database) ---
