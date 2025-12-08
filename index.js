@@ -16853,7 +16853,7 @@ client.on('interactionCreate', async (interaction) => {
             matchId: matchId,
             userId: interaction.user.id,
             outcome: outcome,
-            tokenData: token,
+            token: token, // Fixed: was tokenData, but createBet expects token
             amountWei: betAmountWei,
             txHash: 'VIRTUAL_BET',
             createdAtISO: new Date().toISOString(),
@@ -19396,9 +19396,11 @@ client.on('ready', async () => {
       let auctionsDeleted = 0;
       let errors = 0;
       
+      // Require supabase once for both listings and auctions cleanup
+      const supabase = require('./supabase-client');
+      
       // Clean up old listings
       try {
-        const supabase = require('./supabase-client');
         const { data: listings } = await supabase
           .from('nft_listings')
           .select('listing_id, guild_id, message_id, channel_id, thread_id, status, title')
