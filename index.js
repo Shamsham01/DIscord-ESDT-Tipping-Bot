@@ -20515,14 +20515,25 @@ async function processAuctionClosure(guildId, auctionId) {
 
       const auctionAmount = auction.amount || 1;
       // Transfer NFT/SFT via blockchain (auto-detects SFT vs NFT based on amount)
-      transferResult = await transferNFTFromCommunityFund(
-        winnerWallet,
-        auction.collection,
-        auction.nftNonce,
-        auction.projectName,
-        guildId,
-        auctionAmount
-      );
+      try {
+        transferResult = await transferNFTFromCommunityFund(
+          winnerWallet,
+          auction.collection,
+          auction.nftNonce,
+          auction.projectName,
+          guildId,
+          auctionAmount
+        );
+      } catch (transferError) {
+        // Capture any errors thrown by transferNFTFromCommunityFund
+        console.error(`[AUCTIONS] Error during NFT transfer for auction ${auctionId}:`, transferError);
+        console.error(`[AUCTIONS] Transfer details - Collection: ${auction.collection}, Nonce: ${auction.nftNonce}, Amount: ${auctionAmount}, Winner Wallet: ${winnerWallet}, Project: ${auction.projectName}`);
+        transferResult = {
+          success: false,
+          errorMessage: transferError.message || 'Transaction failed',
+          txHash: null
+        };
+      }
 
       // For project wallet auctions, track earnings for house balance
       if (transferResult.success) {
