@@ -27,6 +27,24 @@ const dbLottery = require('./db/lottery');
 const dbStakingPools = require('./db/staking-pools');
 const nftMetadataCache = require('./db/nft-metadata-cache');
 
+// Validate dbFootball module is loaded correctly
+if (!dbFootball || typeof dbFootball !== 'object') {
+  console.error('[ERROR] dbFootball module failed to load correctly!');
+  process.exit(1);
+}
+
+if (typeof dbFootball.getMatch !== 'function') {
+  console.error('[ERROR] dbFootball.getMatch is not a function! Available methods:', Object.keys(dbFootball));
+  process.exit(1);
+}
+
+if (typeof dbFootball.getScheduledMatches !== 'function') {
+  console.error('[ERROR] dbFootball.getScheduledMatches is not a function! Available methods:', Object.keys(dbFootball));
+  process.exit(1);
+}
+
+console.log('[FOOTBALL] ✅ dbFootball module loaded successfully with methods:', Object.keys(dbFootball));
+
 // Import lottery helpers
 const lotteryHelpers = require('./utils/lottery-helpers');
 const traitValidator = require('./utils/trait-validator');
@@ -14213,6 +14231,16 @@ client.on('interactionCreate', async (interaction) => {
   if (customId.startsWith('bet:')) {
     try {
       const matchId = customId.split(':')[1];
+      
+      // Validate dbFootball is still available
+      if (!dbFootball || typeof dbFootball.getMatch !== 'function') {
+        console.error('[FOOTBALL] CRITICAL: dbFootball.getMatch is not available!');
+        console.error('[FOOTBALL] dbFootball type:', typeof dbFootball);
+        console.error('[FOOTBALL] dbFootball keys:', dbFootball ? Object.keys(dbFootball) : 'dbFootball is null/undefined');
+        await interaction.reply({ content: '❌ Internal error: Database module not available. Please contact an administrator.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const match = await dbFootball.getMatch(matchId);
       
       if (!match || !match.guildIds || !match.guildIds.includes(guildId)) {
@@ -21796,8 +21824,17 @@ let allMatches = [];
 
 // Initialize the match list
 async function initializeMatchList() {
-  // Get all unfinished matches from database (including PAUSED matches)
-  const scheduledMatches = await dbFootball.getScheduledMatches();
+  try {
+    // Validate dbFootball is still available
+    if (!dbFootball || typeof dbFootball.getScheduledMatches !== 'function') {
+      console.error('[FOOTBALL] CRITICAL: dbFootball.getScheduledMatches is not available!');
+      console.error('[FOOTBALL] dbFootball type:', typeof dbFootball);
+      console.error('[FOOTBALL] dbFootball keys:', dbFootball ? Object.keys(dbFootball) : 'dbFootball is null/undefined');
+      return;
+    }
+    
+    // Get all unfinished matches from database (including PAUSED matches)
+    const scheduledMatches = await dbFootball.getScheduledMatches();
   const pausedMatches = await dbFootball.getPausedMatches();
   const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches];
   const unfinishedMatches = allUnfinishedMatches.filter(match => 
@@ -21811,9 +21848,13 @@ async function initializeMatchList() {
     return timeA - timeB;
   });
   
-  console.log(`[FOOTBALL] 📋 Loaded ${allMatches.length} matches for round-robin checking (sorted by kickoff time)`);
-  if (allMatches.length > 0) {
-    console.log(`[FOOTBALL] 🕐 Next match: ${allMatches[0].home} vs ${allMatches[0].away} at ${allMatches[0].kickoffISO}`);
+    console.log(`[FOOTBALL] 📋 Loaded ${allMatches.length} matches for round-robin checking (sorted by kickoff time)`);
+    if (allMatches.length > 0) {
+      console.log(`[FOOTBALL] 🕐 Next match: ${allMatches[0].home} vs ${allMatches[0].away} at ${allMatches[0].kickoffISO}`);
+    }
+  } catch (error) {
+    console.error('[FOOTBALL] Error initializing match list:', error.message);
+    console.error('[FOOTBALL] Error stack:', error.stack);
   }
 }
 
@@ -21872,6 +21913,14 @@ async function checkSingleMatch() {
       });
       
       // Get full match data with guild relationships
+      // Validate dbFootball is still available
+      if (!dbFootball || typeof dbFootball.getMatch !== 'function') {
+        console.error('[FOOTBALL] CRITICAL: dbFootball.getMatch is not available in checkSingleMatch!');
+        console.error('[FOOTBALL] dbFootball type:', typeof dbFootball);
+        console.error('[FOOTBALL] dbFootball keys:', dbFootball ? Object.keys(dbFootball) : 'dbFootball is null/undefined');
+        return;
+      }
+      
       const fullMatch = await dbFootball.getMatch(match.matchId);
       if (!fullMatch || !fullMatch.guildIds || fullMatch.guildIds.length === 0) {
         console.log(`[FOOTBALL] ⚠️ Match ${match.matchId} has no guild relationships, skipping embed/prize updates`);
