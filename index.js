@@ -951,8 +951,15 @@ async function updateRPSGameEmbed(guildId, challengeId, challenge) {
       if (challenge.status === 'active' && challenge.currentRound) {
         const currentRound = challenge.rounds[challenge.currentRound - 1];
         if (currentRound) {
-          const challengerChoice = currentRound.challengerChoice ? currentRound.challengerChoice.charAt(0).toUpperCase() + currentRound.challengerChoice.slice(1) : 'Not chosen';
-          const challengedChoice = currentRound.challengedChoice ? currentRound.challengedChoice.charAt(0).toUpperCase() + currentRound.challengedChoice.slice(1) : 'Not chosen';
+          const bothChosen = currentRound.challengerChoice && currentRound.challengedChoice;
+          
+          // Only show choices if both players have chosen (for fairness)
+          const challengerChoice = bothChosen 
+            ? (currentRound.challengerChoice ? currentRound.challengerChoice.charAt(0).toUpperCase() + currentRound.challengerChoice.slice(1) : 'Not chosen')
+            : (currentRound.challengerChoice ? '✅ Chosen' : '❌ Not chosen');
+          const challengedChoice = bothChosen
+            ? (currentRound.challengedChoice ? currentRound.challengedChoice.charAt(0).toUpperCase() + currentRound.challengedChoice.slice(1) : 'Not chosen')
+            : (currentRound.challengedChoice ? '✅ Chosen' : '❌ Not chosen');
           
           fields.push({ name: 'Round', value: `${challenge.currentRound}`, inline: true });
           fields.push({ name: 'Challenger Choice', value: challengerChoice, inline: true });
@@ -1150,46 +1157,109 @@ async function cleanupExpiredChallenges() {
         const allGames = await dbRpsGames.getGamesByGuild(guildId);
         
         for (const [gameId, challenge] of Object.entries(allGames)) {
-          // Check if challenge is expired (waiting or active status)
-          if ((challenge.status === 'waiting' || challenge.status === 'active') && 
-              challenge.expiresAt && 
-              now > challenge.expiresAt) {
-            
+          let shouldExpire = false;
+          let isActiveGameTimeout = false;
+          
+          // Check if waiting challenge expired (30 min from creation)
+          if (challenge.status === 'waiting' && challenge.expiresAt && now > challenge.expiresAt) {
+            shouldExpire = true;
+            isActiveGameTimeout = false;
+          }
+          
+          // Check if active game timed out (30 min from when game started/joined)
+          if (challenge.status === 'active' && challenge.joinedAt) {
+            const activeGameTimeout = challenge.joinedAt + (30 * 60 * 1000); // 30 minutes from when game started
+            if (now > activeGameTimeout) {
+              shouldExpire = true;
+              isActiveGameTimeout = true;
+            }
+          }
+          
+          if (shouldExpire) {
             // Mark as expired in database
             await dbRpsGames.updateGame(guildId, gameId, { status: 'expired' });
             changed = true;
             
-            // Refund challenger to virtual account
-            try {
-              if (challenge.humanAmount && challenge.token) {
-                const memo = `RPS refund: challenge expired (${gameId})`;
-                const refundResult = await virtualAccounts.addFundsToAccount(
-                  guildId,
-                  challenge.challengerId,
-                  challenge.token,
-                  challenge.humanAmount,
-                  null, // No transaction hash for virtual refund
-                  'rps_refund',
-                  null // Username will be updated when user runs commands
-                );
-                
-                if (refundResult && refundResult.success) {
-                  console.log(`[RPS CLEANUP] Refunded challenger for expired challenge ${gameId}: ${challenge.humanAmount} ${challenge.token}`);
+            // Refund logic
+            if (isActiveGameTimeout) {
+              // Active game timeout: refund both players
+              try {
+                if (challenge.humanAmount && challenge.token) {
+                  const memo = `RPS refund: active game timed out (${gameId})`;
                   
-                  // Update original challenge embed - reload challenge to get latest data
-                  const updatedChallenge = await dbRpsGames.getGame(guildId, gameId);
-                  if (updatedChallenge) {
-                    await updateRPSChallengeEmbed(guildId, gameId, updatedChallenge, '❌ Challenge Expired - Refunded', 'Challenge expired after 30 minutes of inactivity');
+                  // Refund challenger
+                  const challengerRefund = await virtualAccounts.addFundsToAccount(
+                    guildId,
+                    challenge.challengerId,
+                    challenge.token,
+                    challenge.humanAmount,
+                    null,
+                    'rps_refund',
+                    null
+                  );
+                  
+                  // Refund challenged player
+                  const challengedRefund = await virtualAccounts.addFundsToAccount(
+                    guildId,
+                    challenge.challengedId,
+                    challenge.token,
+                    challenge.humanAmount,
+                    null,
+                    'rps_refund',
+                    null
+                  );
+                  
+                  if (challengerRefund && challengerRefund.success && challengedRefund && challengedRefund.success) {
+                    console.log(`[RPS CLEANUP] Refunded both players for timed out active game ${gameId}: ${challenge.humanAmount} ${challenge.token} each`);
+                    
+                    // Update original challenge embed
+                    const updatedChallenge = await dbRpsGames.getGame(guildId, gameId);
+                    if (updatedChallenge) {
+                      await updateRPSChallengeEmbed(guildId, gameId, updatedChallenge, '❌ Game Timed Out - Both Players Refunded', 'Active game timed out after 30 minutes - both players refunded');
+                    }
+                    
+                    // Send notifications to both players
+                    await sendActiveGameTimeoutNotifications(guildId, gameId, challenge);
+                  } else {
+                    console.error(`[RPS CLEANUP] Failed to refund both players for timed out game ${gameId}`);
                   }
-                  
-                  // Send notifications for successful refund
-                  await sendExpiredChallengeNotifications(guildId, gameId, challenge);
-                } else {
-                  console.error(`[RPS CLEANUP] Refund failed for challenge ${gameId}:`, refundResult?.error || 'Unknown error');
                 }
+              } catch (refundError) {
+                console.error(`[RPS CLEANUP] Failed to refund players for timed out active game ${gameId}:`, refundError.message);
               }
-            } catch (refundError) {
-              console.error(`[RPS CLEANUP] Failed to refund challenger for expired challenge ${gameId}:`, refundError.message);
+            } else {
+              // Waiting challenge expired: refund only challenger
+              try {
+                if (challenge.humanAmount && challenge.token) {
+                  const memo = `RPS refund: challenge expired (${gameId})`;
+                  const refundResult = await virtualAccounts.addFundsToAccount(
+                    guildId,
+                    challenge.challengerId,
+                    challenge.token,
+                    challenge.humanAmount,
+                    null, // No transaction hash for virtual refund
+                    'rps_refund',
+                    null // Username will be updated when user runs commands
+                  );
+                  
+                  if (refundResult && refundResult.success) {
+                    console.log(`[RPS CLEANUP] Refunded challenger for expired challenge ${gameId}: ${challenge.humanAmount} ${challenge.token}`);
+                    
+                    // Update original challenge embed - reload challenge to get latest data
+                    const updatedChallenge = await dbRpsGames.getGame(guildId, gameId);
+                    if (updatedChallenge) {
+                      await updateRPSChallengeEmbed(guildId, gameId, updatedChallenge, '❌ Challenge Expired - Refunded', 'Challenge expired after 30 minutes of inactivity');
+                    }
+                    
+                    // Send notifications for successful refund
+                    await sendExpiredChallengeNotifications(guildId, gameId, challenge);
+                  } else {
+                    console.error(`[RPS CLEANUP] Refund failed for challenge ${gameId}:`, refundResult?.error || 'Unknown error');
+                  }
+                }
+              } catch (refundError) {
+                console.error(`[RPS CLEANUP] Failed to refund challenger for expired challenge ${gameId}:`, refundError.message);
+              }
             }
           }
         }
@@ -1318,6 +1388,117 @@ async function sendExpiredChallengeNotifications(guildId, challengeId, challenge
 
   } catch (error) {
     console.error(`[RPS CLEANUP] Error sending notifications for challenge ${challengeId}:`, error.message);
+  }
+}
+
+// Send notifications for active game timeouts (both players refunded)
+async function sendActiveGameTimeoutNotifications(guildId, challengeId, challenge) {
+  try {
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) {
+      console.error(`[RPS CLEANUP] Guild not found: ${guildId}`);
+      return;
+    }
+
+    // Try to find the original channel
+    let originalChannel = null;
+    if (challenge.channelId) {
+      originalChannel = guild.channels.cache.get(challenge.channelId);
+    }
+    
+    if (!originalChannel) {
+      originalChannel = guild.channels.cache.find((c) => 
+        c.isTextBased() && 
+        c.viewable && 
+        c.permissionsFor(guild.members.me)?.has([PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.EmbedLinks])
+      );
+    }
+
+    // Get token ticker and USD values
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    const tokenTicker = tokenMetadata[challenge.token]?.ticker || challenge.token.split('-')[0];
+    const tokenPriceUsd = await getTokenPriceUsd(challenge.token);
+    const refundAmountUsd = tokenPriceUsd > 0 ? new BigNumber(challenge.humanAmount).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+    const refundAmountDisplay = refundAmountUsd ? `${challenge.humanAmount} ${tokenTicker} (≈ $${refundAmountUsd})` : `${challenge.humanAmount} ${tokenTicker}`;
+    
+    // Create refund notification embed
+    const refundEmbed = new EmbedBuilder()
+      .setTitle('🕐 RPS Game Timed Out - Both Players Refunded')
+      .setDescription(`The active RPS game has timed out after 30 minutes and both players have been refunded.`)
+      .addFields([
+        { name: 'Challenge ID', value: challengeId, inline: true },
+        { name: 'Challenger', value: `<@${challenge.challengerId}>`, inline: true },
+        { name: 'Challenged', value: `<@${challenge.challengedId}>`, inline: true },
+        { name: 'Amount Refunded (Each)', value: refundAmountDisplay, inline: true },
+        { name: 'Reason', value: 'Active game timed out after 30 minutes - both players refunded', inline: false }
+      ])
+      .setColor(0xff0000) // Red color for timeout
+      .setThumbnail('https://i.ibb.co/W4Z5Zn0q/rock-paper-scissors.gif')
+      .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+      .setTimestamp();
+
+    // Send channel announcement (if channel found)
+    if (originalChannel) {
+      try {
+        const botMember = guild.members.cache.get(client.user.id);
+        const hasChannelPermissions = botMember?.permissionsIn(originalChannel).has([
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks
+        ]);
+
+        if (hasChannelPermissions) {
+          await originalChannel.send({ 
+            content: `🕐 **RPS Game Timeout** 🕐`,
+            embeds: [refundEmbed]
+          });
+          console.log(`[RPS CLEANUP] Sent channel notification for timed out active game ${challengeId}`);
+        } else {
+          console.warn(`[RPS CLEANUP] Bot lacks permissions to send messages in channel ${originalChannel.id}`);
+        }
+      } catch (channelError) {
+        console.error(`[RPS CLEANUP] Failed to send channel notification:`, channelError.message);
+      }
+    } else {
+      console.warn(`[RPS CLEANUP] No suitable channel found to send notification for timed out game ${challengeId}`);
+    }
+
+    // Send DM to both players
+    const players = [
+      { id: challenge.challengerId, tag: challenge.challengerTag },
+      { id: challenge.challengedId, tag: challenge.challengedTag }
+    ];
+
+    for (const player of players) {
+      try {
+        const user = await client.users.fetch(player.id);
+        if (user) {
+          const communityFundProjectName = getCommunityFundProjectName();
+          const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
+          
+          const dmEmbed = new EmbedBuilder()
+            .setTitle('💰 RPS Game Timeout - Refund Issued')
+            .setDescription(`The active RPS game has timed out and you have been refunded.`)
+            .addFields([
+              { name: 'Challenge ID', value: challengeId, inline: true },
+              { name: 'Amount Refunded', value: refundAmountDisplay, inline: true },
+              { name: 'Reason', value: 'Active game timed out after 30 minutes - both players refunded', inline: false },
+              { name: 'Refund Status', value: '✅ Successfully refunded to your virtual account', inline: false }
+            ])
+            .setColor(0x4d55dc)
+            .setThumbnail(projectLogoUrl)
+            .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+            .setTimestamp();
+
+          await user.send({ embeds: [dmEmbed] });
+          console.log(`[RPS CLEANUP] Sent DM to ${player.tag} for timed out game ${challengeId}`);
+        }
+      } catch (dmError) {
+        console.error(`[RPS CLEANUP] Failed to send DM to ${player.tag}:`, dmError.message);
+      }
+    }
+
+  } catch (error) {
+    console.error(`[RPS CLEANUP] Error sending notifications for timed out game ${challengeId}:`, error.message);
   }
 }
 
