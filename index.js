@@ -1,4 +1,31 @@
 require('dotenv').config();
+
+// Configure git to handle divergent branches (runs before anything else)
+try {
+  const { execSync } = require('child_process');
+  console.log('[STARTUP] Configuring git to handle divergent branches...');
+  execSync('git config pull.rebase false', { stdio: 'ignore' });
+  execSync('git config pull.ff only', { stdio: 'ignore' });
+  
+  // Try to sync with remote if we're in a git repo
+  try {
+    execSync('git fetch origin', { stdio: 'ignore', timeout: 5000 });
+    // Check if we're behind remote
+    const status = execSync('git status -sb', { encoding: 'utf8', stdio: 'pipe' });
+    if (status.includes('behind')) {
+      console.log('[STARTUP] Local branch is behind remote, resetting to match remote...');
+      execSync('git reset --hard origin/main', { stdio: 'ignore' });
+      console.log('[STARTUP] Reset to remote main branch');
+    }
+  } catch (gitError) {
+    // Ignore git errors - we'll continue anyway
+    console.log('[STARTUP] Git sync skipped (not critical)');
+  }
+} catch (error) {
+  // Ignore git configuration errors - not critical for bot operation
+  console.log('[STARTUP] Git configuration skipped');
+}
+
 console.log('Starting Multi-Server ESDT Tipping Bot with Virtual Accounts...');
 console.log('Environment variables:', {
   TOKEN: process.env.TOKEN ? 'Set' : 'Missing',
