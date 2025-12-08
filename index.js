@@ -967,13 +967,44 @@ async function updateRPSGameEmbed(guildId, challengeId, challenge) {
         }
       }
 
-      // Add winner/loser if completed
+      // Add winner/loser and final choices if completed
       if (challenge.status === 'completed') {
         if (challenge.winnerId) {
           fields.push({ name: 'Winner', value: `<@${challenge.winnerId}>`, inline: true });
         }
         if (challenge.loserId) {
           fields.push({ name: 'Loser', value: `<@${challenge.loserId}>`, inline: true });
+        }
+        
+        // Show final round choices (the round that determined the winner)
+        if (challenge.rounds && challenge.rounds.length > 0) {
+          // Find the last round that had a winner (not a draw)
+          let finalRound = null;
+          for (let i = challenge.rounds.length - 1; i >= 0; i--) {
+            const round = challenge.rounds[i];
+            if (round && round.winner && round.winner !== 'draw' && round.challengerChoice && round.challengedChoice) {
+              finalRound = round;
+              break;
+            }
+          }
+          
+          if (finalRound) {
+            const getChoiceEmoji = (choice) => {
+              if (!choice) return '❓';
+              const choiceLower = choice.toLowerCase();
+              if (choiceLower === 'rock') return '🪨';
+              if (choiceLower === 'paper') return '📄';
+              if (choiceLower === 'scissors') return '✂️';
+              return '❓';
+            };
+            
+            const challengerChoice = finalRound.challengerChoice ? finalRound.challengerChoice.charAt(0).toUpperCase() + finalRound.challengerChoice.slice(1) : 'Unknown';
+            const challengedChoice = finalRound.challengedChoice ? finalRound.challengedChoice.charAt(0).toUpperCase() + finalRound.challengedChoice.slice(1) : 'Unknown';
+            
+            fields.push({ name: 'Final Round', value: `Round ${finalRound.round}`, inline: true });
+            fields.push({ name: 'Challenger Choice', value: `${getChoiceEmoji(finalRound.challengerChoice)} ${challengerChoice}`, inline: true });
+            fields.push({ name: 'Challenged Choice', value: `${getChoiceEmoji(finalRound.challengedChoice)} ${challengedChoice}`, inline: true });
+          }
         }
       }
 
