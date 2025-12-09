@@ -11993,6 +11993,7 @@ client.on('interactionCreate', async (interaction) => {
       // STEP 1: Calculate and auto-distribute final rewards (current/live 24h cycle) to all stakers
       let totalRewardsDistributed = new BigNumber('0');
       let rewardsDistributedCount = 0;
+      const tokenDecimals = pool.rewardTokenDecimals || 18;
       const rewardPerNftWei = new BigNumber(pool.rewardPerNftPerDayWei);
       
       if (stakedNFTs.length > 0 && rewardPerNftWei.isGreaterThan(0)) {
@@ -12113,7 +12114,6 @@ client.on('interactionCreate', async (interaction) => {
       let refundAmountHuman = null;
       if (pool.currentSupplyWei && new BigNumber(pool.currentSupplyWei).isGreaterThan(0)) {
         try {
-          const tokenDecimals = pool.rewardTokenDecimals || 18;
           refundAmountHuman = new BigNumber(pool.currentSupplyWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
           
           // Add remaining supply back to creator's VA
@@ -12148,7 +12148,6 @@ client.on('interactionCreate', async (interaction) => {
       await updateStakingPoolEmbed(guildId, poolId);
       
       // STEP 6: Create and post closing summary embed in thread
-      const tokenDecimals = pool.rewardTokenDecimals || 18;
       const tokenPriceUsd = await getTokenPriceUsd(pool.rewardTokenIdentifier);
       
       if (pool.threadId) {
