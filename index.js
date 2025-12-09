@@ -19507,7 +19507,7 @@ async function createStakingPoolEmbed(guildId, pool) {
       }
     }
     
-    // Fallback: use first staked NFT's image if collection image is still missing
+    // Fallback 1: use first staked NFT's image if collection image is still missing
     if (!thumbnailUrl && pool.totalNftsStaked > 0) {
       try {
         const stakedNFTs = await dbStakingPools.getAllStakedNFTs(guildId, pool.poolId);
@@ -19516,6 +19516,44 @@ async function createStakingPoolEmbed(guildId, pool) {
         }
       } catch (error) {
         console.error('[STAKING] Error fetching staked NFTs for thumbnail fallback:', error.message);
+      }
+    }
+    
+    // Fallback 2: use creator's VA NFT image from the collection if still missing
+    if (!thumbnailUrl) {
+      try {
+        const creatorNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, pool.creatorId, pool.collectionTicker, true); // includeStaked = true to get all NFTs
+        if (creatorNFTs && creatorNFTs.length > 0) {
+          // Find first NFT with an image URL
+          const nftWithImage = creatorNFTs.find(nft => nft.nft_image_url);
+          if (nftWithImage && nftWithImage.nft_image_url) {
+            thumbnailUrl = nftWithImage.nft_image_url;
+            console.log(`[STAKING] Using creator's VA NFT image as thumbnail fallback for pool ${pool.poolId}`);
+          }
+        }
+      } catch (error) {
+        console.error('[STAKING] Error fetching creator NFTs for thumbnail fallback:', error.message);
+      }
+    }
+    
+    // Fallback 3: check staking_pool_balances for any NFTs from this collection in the guild
+    if (!thumbnailUrl) {
+      try {
+        const supabase = require('./supabase-client');
+        const { data: stakingBalances, error } = await supabase
+          .from('staking_pool_balances')
+          .select('nft_image_url')
+          .eq('guild_id', guildId)
+          .eq('collection', pool.collectionTicker)
+          .not('nft_image_url', 'is', null)
+          .limit(1);
+        
+        if (!error && stakingBalances && stakingBalances.length > 0 && stakingBalances[0].nft_image_url) {
+          thumbnailUrl = stakingBalances[0].nft_image_url;
+          console.log(`[STAKING] Using staking_pool_balances NFT image as thumbnail fallback for pool ${pool.poolId}`);
+        }
+      } catch (error) {
+        console.error('[STAKING] Error fetching from staking_pool_balances for thumbnail fallback:', error.message);
       }
     }
     
