@@ -19009,7 +19009,17 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
       
       // Update loading message with error
       if (loadingMessage) {
-        await loadingMessage.edit({ embeds: [embed] });
+        try {
+          await loadingMessage.edit({ embeds: [embed] });
+        } catch (editError) {
+          // Message might have been deleted, try alternative method
+          console.warn('[STAKING] Could not edit loading message, trying alternative:', editError.message);
+          if (interaction.deferred || interaction.replied) {
+            await interaction.followUp({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+          } else {
+            await interaction.editReply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+          }
+        }
       } else if (interaction.deferred || interaction.replied) {
         await interaction.followUp({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
       } else {
@@ -19039,7 +19049,12 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
       .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
     
     if (loadingMessage) {
-      await loadingMessage.edit({ embeds: [feeChargedEmbed] });
+      try {
+        await loadingMessage.edit({ embeds: [feeChargedEmbed] });
+      } catch (editError) {
+        // Message might have been deleted, continue without updating
+        console.warn('[STAKING] Could not update loading message after fee charge:', editError.message);
+      }
     }
     
     // Deduct initial supply from user's VA balance
@@ -19070,7 +19085,17 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
         
         // Update loading message with error
         if (loadingMessage) {
-          await loadingMessage.edit({ embeds: [embed] });
+          try {
+            await loadingMessage.edit({ embeds: [embed] });
+          } catch (editError) {
+            // Message might have been deleted, try alternative method
+            console.warn('[STAKING] Could not edit loading message, trying alternative:', editError.message);
+            if (interaction.deferred || interaction.replied) {
+              await interaction.followUp({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+            } else {
+              await interaction.editReply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+            }
+          }
         } else if (interaction.deferred || interaction.replied) {
           await interaction.followUp({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
         } else {
@@ -19122,7 +19147,12 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
       
       if (loadingMessage) {
-        await loadingMessage.edit({ embeds: [supplyDeductedEmbed] });
+        try {
+          await loadingMessage.edit({ embeds: [supplyDeductedEmbed] });
+        } catch (editError) {
+          // Message might have been deleted, continue without updating
+          console.warn('[STAKING] Could not update loading message after initial supply deduction:', editError.message);
+        }
       }
     } catch (error) {
       console.error('[STAKING] Error deducting initial supply:', error);
@@ -19138,7 +19168,12 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
       
       if (loadingMessage) {
-        await loadingMessage.edit({ embeds: [errorEmbed] });
+        try {
+          await loadingMessage.edit({ embeds: [errorEmbed] });
+        } catch (editError) {
+          // Message might have been deleted, continue without updating
+          console.warn('[STAKING] Could not update loading message with error:', editError.message);
+        }
       }
       throw error;
     }
@@ -19247,7 +19282,12 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
       .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
     
     if (loadingMessage) {
-      await loadingMessage.edit({ embeds: [successEmbed] });
+      try {
+        await loadingMessage.edit({ embeds: [successEmbed] });
+      } catch (editError) {
+        // Message might have been deleted, continue without updating
+        console.warn('[STAKING] Could not update loading message with success:', editError.message);
+      }
     }
     
     if (interaction.deferred || interaction.replied) {
