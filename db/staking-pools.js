@@ -590,10 +590,10 @@ async function getDistributionStats(guildId, poolId, distributionId) {
       };
     }
     
-    const totalRewardsBN = new BigNumber('0');
-    const claimedRewardsBN = new BigNumber('0');
-    const unclaimedRewardsBN = new BigNumber('0');
-    const expiredRewardsBN = new BigNumber('0');
+    let totalRewardsBN = new BigNumber('0');
+    let claimedRewardsBN = new BigNumber('0');
+    let unclaimedRewardsBN = new BigNumber('0');
+    let expiredRewardsBN = new BigNumber('0');
     
     const claimedUserIds = new Set();
     const unclaimedUserIds = new Set();
