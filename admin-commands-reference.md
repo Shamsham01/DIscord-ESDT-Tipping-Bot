@@ -221,6 +221,8 @@ Create a new NFT staking pool.
 
 **Usage**: `/create-staking-pool collection_ticker reward_token_identifier initial_supply reward_per_nft_per_day duration_months [pool_name] [staking_total_limit] [staking_limit_per_user]`
 
+**Note:** Required parameters must be provided before optional parameters.
+
 **Parameters**:
 - `collection_ticker` (Required): Collection identifier for stakable NFTs
 - `reward_token_identifier` (Required): Token identifier for rewards

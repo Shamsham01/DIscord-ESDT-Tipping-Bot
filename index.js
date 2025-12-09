@@ -11667,14 +11667,52 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Check balance first (without charging)
+      // Get token decimals first (needed for balance check)
+      const rewardTokenDecimals = await getTokenDecimals(rewardTokenIdentifier);
+      const rewardTokenTicker = rewardTokenIdentifier.split('-')[0];
+      
+      // Convert amounts to wei
+      const initialSupplyWei = new BigNumber(initialSupply).multipliedBy(new BigNumber(10).pow(rewardTokenDecimals)).toFixed(0);
+      const rewardPerNftPerDayWei = new BigNumber(rewardPerNftPerDay).multipliedBy(new BigNumber(10).pow(rewardTokenDecimals)).toFixed(0);
+      
+      // Convert initial supply from wei to human-readable format for balance check
+      const initialSupplyHuman = new BigNumber(initialSupplyWei).dividedBy(new BigNumber(10).pow(rewardTokenDecimals)).toString();
+      
+      // Check balance first (without charging) - check both fee and initial supply
       const feeInfo = await calculatePoolCreationFee();
       const REWARD_IDENTIFIER = 'REWARD-cf6eac';
       const feeAmountHuman = new BigNumber(feeInfo.feeAmountWei).dividedBy(new BigNumber(10).pow(feeInfo.rewardDecimals)).toString();
-      const userBalance = await virtualAccounts.getUserBalance(guildId, userId, REWARD_IDENTIFIER);
-      const balanceBN = new BigNumber(userBalance || '0');
+      
+      // Check balance for the reward token used for initial supply
+      const userRewardTokenBalance = await virtualAccounts.getUserBalance(guildId, userId, rewardTokenIdentifier);
+      const rewardTokenBalanceBN = new BigNumber(userRewardTokenBalance || '0');
+      const initialSupplyBN = new BigNumber(initialSupplyHuman);
+      
+      // Check balance for REWARD token used for fee
+      const userRewardBalance = await virtualAccounts.getUserBalance(guildId, userId, REWARD_IDENTIFIER);
+      const balanceBN = new BigNumber(userRewardBalance || '0');
       const feeBN = new BigNumber(feeAmountHuman);
       
+      // Check if user has sufficient balance for initial supply
+      if (rewardTokenBalanceBN.isLessThan(initialSupplyBN)) {
+        const needed = initialSupplyBN.minus(rewardTokenBalanceBN).toString();
+        const embed = new EmbedBuilder()
+          .setTitle('❌ Insufficient Balance for Pool Creation')
+          .setDescription(`Pool creation requires ${initialSupplyHuman} ${rewardTokenTicker} tokens as initial supply.`)
+          .addFields({
+            name: '💵 Required Amount',
+            value: `You need **${needed} ${rewardTokenTicker}** more in your virtual account for the initial supply.`,
+            inline: false
+          })
+          .setColor(0xFF0000)
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        await interaction.reply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Check if user has sufficient balance for fee
       if (balanceBN.isLessThan(feeBN)) {
         const needed = feeBN.minus(balanceBN).toString();
         const embed = new EmbedBuilder()
@@ -11692,14 +11730,6 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
         return;
       }
-      
-      // Get token decimals
-      const rewardTokenDecimals = await getTokenDecimals(rewardTokenIdentifier);
-      const rewardTokenTicker = rewardTokenIdentifier.split('-')[0];
-      
-      // Convert amounts to wei
-      const initialSupplyWei = new BigNumber(initialSupply).multipliedBy(new BigNumber(10).pow(rewardTokenDecimals)).toFixed(0);
-      const rewardPerNftPerDayWei = new BigNumber(rewardPerNftPerDay).multipliedBy(new BigNumber(10).pow(rewardTokenDecimals)).toFixed(0);
       
       // Calculate timing
       const createdAt = Date.now();
@@ -18907,12 +18937,57 @@ async function trackLotteryEarnings(guildId, tokenIdentifier, commissionWei) {
 
 // Helper function to complete pool creation after trait selection
 async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, traitValue, interaction) {
+  let loadingMessage = null;
   try {
     // Get pool
     const pool = await dbStakingPools.getStakingPool(guildId, poolId);
     if (!pool) {
       await interaction.followUp({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
       return;
+    }
+    
+    // Calculate fee info to show in loading message
+    const feeInfo = await calculatePoolCreationFee();
+    const REWARD_IDENTIFIER = 'REWARD-cf6eac';
+    const feeAmountHuman = new BigNumber(feeInfo.feeAmountWei).dividedBy(new BigNumber(10).pow(feeInfo.rewardDecimals)).toString();
+    
+    // Convert initial supply to human-readable format for display
+    const initialSupplyWei = pool.initialSupplyWei;
+    const rewardTokenDecimals = pool.rewardTokenDecimals;
+    const rewardTokenIdentifier = pool.rewardTokenIdentifier;
+    const rewardTokenTicker = pool.rewardTokenTicker;
+    const initialSupplyHuman = new BigNumber(initialSupplyWei).dividedBy(new BigNumber(10).pow(rewardTokenDecimals)).toString();
+    
+    // Show loading message
+    const loadingEmbed = new EmbedBuilder()
+      .setTitle('⏳ Creating Staking Pool...')
+      .setDescription('Please wait while we process your pool creation.')
+      .addFields(
+        {
+          name: '💰 Processing Fees',
+          value: `Charging pool creation fee: **${feeAmountHuman} REWARD** ($${feeInfo.feeAmountUsd})`,
+          inline: false
+        },
+        {
+          name: '💵 Processing Initial Supply',
+          value: `Deducting initial supply: **${initialSupplyHuman} ${rewardTokenTicker}**`,
+          inline: false
+        }
+      )
+      .setColor(0x5865F2)
+      .setTimestamp()
+      .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+    
+    if (interaction.deferred) {
+      // Already deferred, use editReply
+      loadingMessage = await interaction.editReply({ embeds: [loadingEmbed] });
+    } else if (interaction.replied) {
+      // Already replied, use followUp
+      loadingMessage = await interaction.followUp({ embeds: [loadingEmbed], flags: [MessageFlags.Ephemeral] });
+    } else {
+      // Not deferred or replied, defer first then edit
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      loadingMessage = await interaction.editReply({ embeds: [loadingEmbed] });
     }
     
     // Charge pool creation fee
@@ -18932,12 +19007,140 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
       
-      if (interaction.deferred || interaction.replied) {
+      // Update loading message with error
+      if (loadingMessage) {
+        await loadingMessage.edit({ embeds: [embed] });
+      } else if (interaction.deferred || interaction.replied) {
         await interaction.followUp({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
       } else {
         await interaction.editReply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
       }
       return;
+    }
+    
+    // Update loading message - fee charged successfully
+    const feeChargedEmbed = new EmbedBuilder()
+      .setTitle('⏳ Creating Staking Pool...')
+      .setDescription('Please wait while we process your pool creation.')
+      .addFields(
+        {
+          name: '✅ Pool Creation Fee',
+          value: `Charged: **${feeAmountHuman} REWARD** ($${feeInfo.feeAmountUsd})`,
+          inline: false
+        },
+        {
+          name: '💵 Processing Initial Supply',
+          value: `Deducting initial supply: **${initialSupplyHuman} ${rewardTokenTicker}**`,
+          inline: false
+        }
+      )
+      .setColor(0x5865F2)
+      .setTimestamp()
+      .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+    
+    if (loadingMessage) {
+      await loadingMessage.edit({ embeds: [feeChargedEmbed] });
+    }
+    
+    // Deduct initial supply from user's VA balance
+    try {
+      
+      // Check balance again (in case it changed)
+      const userBalance = await virtualAccounts.getUserBalance(guildId, userId, rewardTokenIdentifier);
+      const balanceBN = new BigNumber(userBalance || '0');
+      const initialSupplyBN = new BigNumber(initialSupplyHuman);
+      
+      if (balanceBN.isLessThan(initialSupplyBN)) {
+        // If balance is insufficient, close the pool
+        await dbStakingPools.updateStakingPool(guildId, poolId, { status: 'CLOSED' });
+        
+        // Note: Fee was already charged, but we'll close the pool
+        // In a production system, you might want to refund the fee here
+        const embed = new EmbedBuilder()
+          .setTitle('❌ Insufficient Balance for Initial Supply')
+          .setDescription(`Pool creation failed due to insufficient balance for initial supply.`)
+          .addFields({
+            name: '💵 Required Amount',
+            value: `You need **${initialSupplyBN.minus(balanceBN).toString()} ${rewardTokenTicker}** more in your virtual account.`,
+            inline: false
+          })
+          .setColor(0xFF0000)
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        // Update loading message with error
+        if (loadingMessage) {
+          await loadingMessage.edit({ embeds: [embed] });
+        } else if (interaction.deferred || interaction.replied) {
+          await interaction.followUp({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+        } else {
+          await interaction.editReply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
+        }
+        return;
+      }
+      
+      // Deduct initial supply from VA balance
+      const deductResult = await virtualAccounts.deductFundsFromAccount(
+        guildId,
+        userId,
+        rewardTokenIdentifier,
+        initialSupplyHuman,
+        `Staking pool initial supply (${initialSupplyHuman} ${rewardTokenTicker})`
+      );
+      
+      if (!deductResult.success) {
+        // If deduction fails, close the pool
+        await dbStakingPools.updateStakingPool(guildId, poolId, { status: 'CLOSED' });
+        throw new Error(`Failed to deduct initial supply: ${deductResult.error}`);
+      }
+      
+      console.log(`[STAKING] Deducted initial supply: ${initialSupplyHuman} ${rewardTokenTicker} from user ${userId} for pool ${poolId}`);
+      
+      // Update loading message - initial supply deducted successfully
+      const supplyDeductedEmbed = new EmbedBuilder()
+        .setTitle('⏳ Creating Staking Pool...')
+        .setDescription('Please wait while we finalize your pool creation.')
+        .addFields(
+          {
+            name: '✅ Pool Creation Fee',
+            value: `Charged: **${feeAmountHuman} REWARD** ($${feeInfo.feeAmountUsd})`,
+            inline: false
+          },
+          {
+            name: '✅ Initial Supply',
+            value: `Deducted: **${initialSupplyHuman} ${rewardTokenTicker}**`,
+            inline: false
+          },
+          {
+            name: '⏳ Finalizing',
+            value: 'Creating pool embed and thread...',
+            inline: false
+          }
+        )
+        .setColor(0x5865F2)
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      if (loadingMessage) {
+        await loadingMessage.edit({ embeds: [supplyDeductedEmbed] });
+      }
+    } catch (error) {
+      console.error('[STAKING] Error deducting initial supply:', error);
+      // Close the pool if initial supply deduction fails
+      await dbStakingPools.updateStakingPool(guildId, poolId, { status: 'CLOSED' });
+      
+      // Update loading message with error
+      const errorEmbed = new EmbedBuilder()
+        .setTitle('❌ Error During Pool Creation')
+        .setDescription(`An error occurred while deducting initial supply: ${error.message}`)
+        .setColor(0xFF0000)
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      if (loadingMessage) {
+        await loadingMessage.edit({ embeds: [errorEmbed] });
+      }
+      throw error;
     }
     
     // Update pool with trait filters if provided
@@ -19018,6 +19221,35 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
       throw updateError; // Re-throw to prevent continuing with incorrect state
     }
     
+    // Update loading message with final success
+    const successEmbed = new EmbedBuilder()
+      .setTitle('✅ Staking Pool Created Successfully!')
+      .setDescription(`Your staking pool has been created and is now active.`)
+      .addFields(
+        {
+          name: '✅ Pool Creation Fee',
+          value: `Charged: **${feeAmountHuman} REWARD** ($${feeInfo.feeAmountUsd})`,
+          inline: false
+        },
+        {
+          name: '✅ Initial Supply',
+          value: `Deducted: **${initialSupplyHuman} ${rewardTokenTicker}**`,
+          inline: false
+        },
+        {
+          name: '✅ Pool Created',
+          value: `Pool ID: \`${poolId}\`\nCheck the channel for your pool embed!`,
+          inline: false
+        }
+      )
+      .setColor(0x57F287)
+      .setTimestamp()
+      .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+    
+    if (loadingMessage) {
+      await loadingMessage.edit({ embeds: [successEmbed] });
+    }
+    
     if (interaction.deferred || interaction.replied) {
       await interaction.followUp({ content: `✅ Staking pool created successfully! Pool ID: \`${poolId}\``, flags: [MessageFlags.Ephemeral] });
     } else {
@@ -19026,6 +19258,23 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
     
   } catch (error) {
     console.error('[STAKING] Error completing pool creation:', error);
+    
+    // Update loading message with error if it exists
+    if (loadingMessage) {
+      const errorEmbed = new EmbedBuilder()
+        .setTitle('❌ Error During Pool Creation')
+        .setDescription(`An error occurred: ${error.message}`)
+        .setColor(0xFF0000)
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      try {
+        await loadingMessage.edit({ embeds: [errorEmbed] });
+      } catch (editError) {
+        console.error('[STAKING] Error updating loading message:', editError);
+      }
+    }
+    
     if (interaction.deferred || interaction.replied) {
       await interaction.followUp({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
     } else {

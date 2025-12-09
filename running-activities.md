@@ -209,6 +209,8 @@ Admins can create NFT staking pools using:
 /create-staking-pool collection_ticker reward_token_identifier initial_supply reward_per_nft_per_day duration_months [pool_name] [staking_total_limit] [staking_limit_per_user]
 ```
 
+**Note:** All required parameters must be provided. Optional parameters can be omitted.
+
 #### Parameters Explained
 
 * **`collection_ticker`** (Required): Collection identifier for NFTs that can be staked

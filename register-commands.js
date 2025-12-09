@@ -1284,24 +1284,6 @@ const commands = [
                 required: true
             },
             {
-                name: 'pool_name',
-                description: 'Display name for the pool (defaults to collection name)',
-                type: ApplicationCommandOptionType.String,
-                required: false
-            },
-            {
-                name: 'staking_total_limit',
-                description: 'Maximum NFTs that can be staked in the pool',
-                type: ApplicationCommandOptionType.Integer,
-                required: false
-            },
-            {
-                name: 'staking_limit_per_user',
-                description: 'Maximum NFTs a user can stake',
-                type: ApplicationCommandOptionType.Integer,
-                required: false
-            },
-            {
                 name: 'duration_months',
                 description: 'Pool duration in months (1-12, required)',
                 type: ApplicationCommandOptionType.Integer,
@@ -1320,6 +1302,24 @@ const commands = [
                     { name: '11 months', value: 11 },
                     { name: '12 months', value: 12 }
                 ]
+            },
+            {
+                name: 'pool_name',
+                description: 'Display name for the pool (defaults to collection name)',
+                type: ApplicationCommandOptionType.String,
+                required: false
+            },
+            {
+                name: 'staking_total_limit',
+                description: 'Maximum NFTs that can be staked in the pool',
+                type: ApplicationCommandOptionType.Integer,
+                required: false
+            },
+            {
+                name: 'staking_limit_per_user',
+                description: 'Maximum NFTs a user can stake',
+                type: ApplicationCommandOptionType.Integer,
+                required: false
             }
         ],
         default_member_permissions: null
