@@ -9181,13 +9181,12 @@ client.on('interactionCreate', async (interaction) => {
           const pool = await dbStakingPools.getStakingPool(guildId, nft.staking_pool_id);
           if (pool) {
             const poolName = pool.poolName || pool.collectionName;
-            const poolIdShort = pool.poolId.substring(0, 8);
-            statusValue = `**🔒 Staked in Pool**\n**Pool Name:** ${poolName}\n**Pool ID:** \`${poolIdShort}\`\n**Owner:** ${interaction.user.tag}\n**Added:** <t:${Math.floor(new Date(nft.created_at).getTime() / 1000)}:R>`;
+            statusValue = `**🔒 Staked in Pool**\n**Pool Name:** ${poolName}\n**Pool ID:** \`${pool.poolId}\`\n**Owner:** ${interaction.user.tag}\n**Added:** <t:${Math.floor(new Date(nft.created_at).getTime() / 1000)}:R>`;
           }
         } catch (poolError) {
           console.error(`[SHOW-NFT] Error fetching staking pool info:`, poolError.message);
           // Fallback to showing staked status without pool details
-          statusValue = `**🔒 Staked**\n**Pool ID:** \`${nft.staking_pool_id.substring(0, 8)}\`\n**Owner:** ${interaction.user.tag}\n**Added:** <t:${Math.floor(new Date(nft.created_at).getTime() / 1000)}:R>`;
+          statusValue = `**🔒 Staked**\n**Pool ID:** \`${nft.staking_pool_id}\`\n**Owner:** ${interaction.user.tag}\n**Added:** <t:${Math.floor(new Date(nft.created_at).getTime() / 1000)}:R>`;
         }
       }
       
@@ -12178,7 +12177,7 @@ client.on('interactionCreate', async (interaction) => {
                 .setDescription(`The staking pool has been closed by the creator.`)
                 .setColor(0xFF0000) // Red color
                 .setTimestamp()
-                .setFooter({ text: `Pool ID: ${pool.poolId.substring(0, 8)}`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+                .setFooter({ text: `Pool ID: ${pool.poolId}`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
               
               // Add fields
               if (rewardsDistributedCount > 0) {
@@ -14675,8 +14674,14 @@ client.on('interactionCreate', async (interaction) => {
           const statusEmoji = pool.status === 'ACTIVE' ? '🟢' : pool.status === 'PAUSED' ? '⏸️' : '🔴';
           const poolName = (pool.poolName || pool.collectionName || 'Unnamed Pool').toString();
           const poolId = (pool.poolId || '').toString();
+          // Show full pool ID to differentiate between pools
+          // Discord autocomplete name limit is 100 chars, so truncate pool name if needed
+          const maxNameLength = 100 - poolId.length - 5; // 5 for emoji, spaces, and parentheses
+          const displayName = poolName.length > maxNameLength 
+            ? poolName.substring(0, maxNameLength - 3) + '...' 
+            : poolName;
           return {
-            name: `${statusEmoji} ${poolName} (${poolId.substring(0, 8)})`,
+            name: `${statusEmoji} ${displayName} (${poolId})`,
             value: poolId
           };
         })
@@ -14909,8 +14914,14 @@ client.on('interactionCreate', async (interaction) => {
         filtered.slice(0, 25).map(pool => {
           const poolName = (pool.poolName || pool.collectionName || 'Unnamed Pool').toString();
           const poolId = (pool.poolId || '').toString();
+          // Show full pool ID to differentiate between pools
+          // Discord autocomplete name limit is 100 chars, so truncate pool name if needed
+          const maxNameLength = 100 - poolId.length - 5; // 5 for spaces and parentheses
+          const displayName = poolName.length > maxNameLength 
+            ? poolName.substring(0, maxNameLength - 3) + '...' 
+            : poolName;
           return {
-            name: `${poolName} (${poolId.substring(0, 8)})`,
+            name: `${displayName} (${poolId})`,
             value: poolId
           };
         })
@@ -16631,7 +16642,7 @@ client.on('interactionCreate', async (interaction) => {
         .setDescription(`You have **${userStakedNFTs.length} NFT(s)** staked in this pool`)
         .setColor(0x00FF00)
         .setFooter({ 
-          text: `Page ${currentPage}/${totalPages} • Pool: ${pool.poolId.substring(0, 8)}`, 
+          text: `Page ${currentPage}/${totalPages} • Pool: ${pool.poolId}`, 
           iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' 
         })
         .setTimestamp();
@@ -19229,7 +19240,7 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
     let threadId = null;
     try {
       const thread = await poolMessage.startThread({
-        name: `Staking Pool ${poolId.substring(0, 8)}`,
+        name: `Staking Pool ${poolId.length > 50 ? poolId.substring(0, 47) + '...' : poolId}`,
         autoArchiveDuration: 1440
       });
       threadId = thread.id;
@@ -19486,7 +19497,7 @@ async function createStakingPoolEmbed(guildId, pool) {
       .setDescription(`**Staking Pool** - ${pool.collectionName}`)
       .setColor(embedColor)
       .setTimestamp()
-      .setFooter({ text: `Pool ID: ${pool.poolId.substring(0, 8)} | Created by ${pool.creatorTag || pool.creatorId}`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      .setFooter({ text: `Pool ID: ${pool.poolId} | Created by ${pool.creatorTag || pool.creatorId}`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
     
     // Set thumbnail: use collection image URL, or fallback to first staked NFT's image
     let thumbnailUrl = pool.collectionImageUrl;
@@ -19671,13 +19682,16 @@ async function updateStakingPoolEmbed(guildId, poolId) {
     
     // If messageId is temp, try to find the actual message by searching recent messages
     if (!pool.messageId || pool.messageId.startsWith('temp_')) {
-      // Search for messages with the pool embed (look for pool ID substring in embed footer)
-      const poolIdSubstring = poolId.substring(0, 8); // Footer shows first 8 chars
+      // Search for messages with the pool embed (look for pool ID in embed footer)
+      // Check both full ID and truncated ID for backward compatibility with old embeds
+      const poolIdSubstring = poolId.substring(0, 8);
       const messages = await channel.messages.fetch({ limit: 50 });
       message = messages.find(msg => {
         if (!msg.embeds || msg.embeds.length === 0) return false;
         const embed = msg.embeds[0];
-        return embed.footer && embed.footer.text && embed.footer.text.includes(poolIdSubstring);
+        if (!embed.footer || !embed.footer.text) return false;
+        // Check for full pool ID first, then fallback to truncated for old embeds
+        return embed.footer.text.includes(poolId) || embed.footer.text.includes(poolIdSubstring);
       });
       
       // If found, update the pool with the correct message_id
@@ -19697,12 +19711,15 @@ async function updateStakingPoolEmbed(guildId, poolId) {
       } catch (fetchError) {
         // Message might have been deleted, try to find it
         console.warn(`[STAKING] Failed to fetch message ${pool.messageId} for pool ${poolId}, searching...`);
-        const poolIdSubstring = poolId.substring(0, 8); // Footer shows first 8 chars
+        // Check both full ID and truncated ID for backward compatibility with old embeds
+        const poolIdSubstring = poolId.substring(0, 8);
         const messages = await channel.messages.fetch({ limit: 50 });
         message = messages.find(msg => {
           if (!msg.embeds || msg.embeds.length === 0) return false;
           const embed = msg.embeds[0];
-          return embed.footer && embed.footer.text && embed.footer.text.includes(poolIdSubstring);
+          if (!embed.footer || !embed.footer.text) return false;
+          // Check for full pool ID first, then fallback to truncated for old embeds
+          return embed.footer.text.includes(poolId) || embed.footer.text.includes(poolIdSubstring);
         });
         
         if (message) {
@@ -20216,7 +20233,7 @@ async function autoCloseStakingPool(guildId, poolId) {
               .setDescription(`The staking pool has been automatically closed due to low supply and no top-up within 48 hours.`)
               .setColor(0xFF0000) // Red color
               .setTimestamp()
-              .setFooter({ text: `Pool ID: ${pool.poolId.substring(0, 8)}`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+              .setFooter({ text: `Pool ID: ${pool.poolId}`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
             
             // Add fields
             if (rewardsDistributedCount > 0) {
