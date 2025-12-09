@@ -10324,88 +10324,100 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      await interaction.editReply({ 
-        content: `🔄 **Processing withdrawal...**\n\nWithdrawing **${withdrawAmount}** ${tokenTicker} to your wallet...\nMemo: ${memo}`, 
-        flags: [MessageFlags.Ephemeral] 
+      // CRITICAL: Prevent race conditions by locking withdrawals for this user+token combination
+      // This prevents concurrent withdrawals that could result in double-spending
+      const withdrawalLockKey = `${guildId}:${userId}:${tokenIdentifier}`;
+      
+      // Check if there's already an active withdrawal for this user+token
+      if (withdrawalLocks.has(withdrawalLockKey)) {
+        await interaction.editReply({ 
+          content: `⏳ **Withdrawal already in progress!**\n\nYou have a withdrawal for ${tokenTicker} currently processing. Please wait for it to complete before initiating another withdrawal.\n\nThis prevents double-spending and ensures your balance is correctly updated.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Create withdrawal lock promise IMMEDIATELY to prevent concurrent withdrawals
+      let withdrawalResolve;
+      const withdrawalPromise = new Promise((resolve) => {
+        withdrawalResolve = resolve;
       });
+      withdrawalLocks.set(withdrawalLockKey, withdrawalPromise);
       
-      // Use internal project name "Community Fund" for the transfer function
-      const communityFundProjectName = getCommunityFundProjectName();
+      // Ensure withdrawAmount is a string (deductFundsFromAccount expects string or number)
+      const withdrawAmountStr = typeof withdrawAmount === 'object' && withdrawAmount.toString 
+        ? withdrawAmount.toString() 
+        : String(withdrawAmount);
       
-      console.log(`User ${interaction.user.tag} (${userId}) is withdrawing ${withdrawAmount} ${tokenTicker} to wallet ${userWallet} using Community Fund (${fundProject})`);
+      // CRITICAL FIX: Deduct balance BEFORE blockchain transaction to prevent race conditions
+      // This ensures that if a second withdrawal is attempted, it will see the reduced balance
+      console.log(`[WITHDRAW] Pre-deducting ${withdrawAmountStr} ${tokenIdentifier} from virtual account for user ${userId} (BEFORE blockchain transaction)`);
       
-      // tokenIdentifier was already resolved above
-      // Perform the blockchain transfer (use internal project name, not display name)
-      const transferResult = await transferESDTFromCommunityFund(userWallet, tokenIdentifier, withdrawAmount, communityFundProjectName, guildId);
+      let deductResult;
+      let balanceBeforeDeduction = null;
+      let balanceRestored = false;
       
-      if (transferResult.success) {
-        // Deduct funds from virtual account
-        // Ensure withdrawAmount is a string (deductFundsFromAccount expects string or number)
-        const withdrawAmountStr = typeof withdrawAmount === 'object' && withdrawAmount.toString 
-          ? withdrawAmount.toString() 
-          : String(withdrawAmount);
+      try {
+        // Get balance before deduction for potential restoration
+        balanceBeforeDeduction = await virtualAccounts.getUserBalance(guildId, userId, tokenIdentifier);
         
-        console.log(`[WITHDRAW] Deducting ${withdrawAmountStr} ${tokenIdentifier} from virtual account for user ${userId}`);
+        // Deduct funds from virtual account BEFORE blockchain transaction
+        deductResult = await virtualAccounts.deductFundsFromAccount(guildId, userId, tokenIdentifier, withdrawAmountStr, 'withdrawal (pending blockchain confirmation)', memo);
         
-        // CRITICAL: Wrap deduction in try-catch to ensure it always executes
-        // If deduction fails, this is a critical error that needs immediate attention
-        let deductResult;
-        let deductionError = null;
-        
-        try {
-          deductResult = await virtualAccounts.deductFundsFromAccount(guildId, userId, tokenIdentifier, withdrawAmountStr, `withdrawal${transferResult.txHash ? ` (tx: ${transferResult.txHash})` : ''}`, memo);
-          console.log(`[WITHDRAW] Deduction result:`, deductResult);
-        } catch (deductionException) {
-          console.error(`[WITHDRAW] CRITICAL ERROR: Exception during deduction after successful blockchain transaction!`, deductionException);
-          deductionError = deductionException.message || String(deductionException);
-          deductResult = { success: false, error: deductionError };
-        }
-        
-        // If deduction failed, this is CRITICAL - blockchain transaction succeeded but balance wasn't updated
-        // Log as critical error and attempt manual deduction
         if (!deductResult.success) {
-          console.error(`[WITHDRAW] CRITICAL: Blockchain transaction succeeded (txHash: ${transferResult.txHash || 'unknown'}) but virtual account deduction failed!`);
-          console.error(`[WITHDRAW] CRITICAL: User ${userId} (${interaction.user.tag}) withdrew ${withdrawAmountStr} ${tokenIdentifier} but balance was NOT updated!`);
-          console.error(`[WITHDRAW] CRITICAL: Error: ${deductResult.error || deductionError}`);
-          console.error(`[WITHDRAW] CRITICAL: This requires manual intervention to fix the balance mismatch!`);
-          
-          // Attempt to manually deduct using updateAccountBalance as a fallback
-          try {
-            console.log(`[WITHDRAW] Attempting manual balance correction...`);
-            const dbVirtualAccounts = require('./db/virtual-accounts');
-            const currentBalance = await virtualAccounts.getUserBalance(guildId, userId, tokenIdentifier);
-            const currentBalanceBN = new BigNumber(currentBalance);
-            const withdrawAmountBN = new BigNumber(withdrawAmountStr);
-            
-            if (currentBalanceBN.isGreaterThanOrEqualTo(withdrawAmountBN)) {
-              const negativeAmount = withdrawAmountBN.negated().toString();
-              const correctedBalance = await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, negativeAmount);
-              console.log(`[WITHDRAW] Manual balance correction successful! New balance: ${correctedBalance}`);
-              
-              // Record the transaction manually
-              const transaction = {
-                id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                type: 'deduction',
-                token: tokenIdentifier,
-                amount: withdrawAmountStr,
-                balanceBefore: currentBalance,
-                balanceAfter: correctedBalance,
-                description: `withdrawal (tx: ${transferResult.txHash || 'unknown'}) - MANUAL CORRECTION`,
-                timestamp: Date.now()
-              };
-              await dbVirtualAccounts.addTransaction(guildId, userId, transaction);
-              
-              deductResult = { success: true, newBalance: correctedBalance };
-              console.log(`[WITHDRAW] Balance correction completed successfully!`);
-            } else {
-              console.error(`[WITHDRAW] Cannot correct balance - insufficient balance for correction (current: ${currentBalance}, required: ${withdrawAmountStr})`);
-            }
-          } catch (correctionError) {
-            console.error(`[WITHDRAW] Failed to manually correct balance:`, correctionError);
+          // Release lock before returning
+          withdrawalLocks.delete(withdrawalLockKey);
+          if (withdrawalResolve) {
+            withdrawalResolve();
           }
+          await interaction.editReply({ 
+            content: `❌ **Insufficient balance!**\n\nYou have: **${balanceBeforeDeduction}** ${tokenTicker}\nRequested: **${withdrawAmount}** ${tokenTicker}\n\nYour balance may have changed. Please check your balance and try again.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
         }
         
-        if (deductResult.success) {
+        console.log(`[WITHDRAW] Balance deducted successfully. New balance: ${deductResult.newBalance}`);
+      } catch (deductionException) {
+        // Release lock before returning
+        withdrawalLocks.delete(withdrawalLockKey);
+        if (withdrawalResolve) {
+          withdrawalResolve();
+        }
+        console.error(`[WITHDRAW] CRITICAL ERROR: Exception during pre-deduction!`, deductionException);
+        await interaction.editReply({ 
+          content: `❌ **Withdrawal failed!**\n\nError deducting balance: ${deductionException.message || String(deductionException)}\n\nPlease try again or contact an admin if the issue persists.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      try {
+        await interaction.editReply({ 
+          content: `🔄 **Processing withdrawal...**\n\nWithdrawing **${withdrawAmount}** ${tokenTicker} to your wallet...\nMemo: ${memo}\n\n⏳ Balance has been reserved. Blockchain transaction in progress...`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        
+        // Use internal project name "Community Fund" for the transfer function
+        const communityFundProjectName = getCommunityFundProjectName();
+        
+        console.log(`User ${interaction.user.tag} (${userId}) is withdrawing ${withdrawAmount} ${tokenTicker} to wallet ${userWallet} using Community Fund (${fundProject})`);
+        
+        // Perform the blockchain transfer AFTER balance has been deducted
+        const transferResult = await transferESDTFromCommunityFund(userWallet, tokenIdentifier, withdrawAmount, communityFundProjectName, guildId);
+        
+        if (transferResult.success) {
+          // Update transaction description with actual tx hash
+          try {
+            const dbVirtualAccounts = require('./db/virtual-accounts');
+            // Update the most recent withdrawal transaction with the actual tx hash
+            // This is done by finding the transaction and updating it
+            // For now, we'll just log it - the transaction was already recorded with "pending" status
+            console.log(`[WITHDRAW] Blockchain transaction successful. TxHash: ${transferResult.txHash}`);
+          } catch (updateError) {
+            console.error(`[WITHDRAW] Error updating transaction with tx hash:`, updateError);
+          }
+          
           const explorerUrl = transferResult.txHash
             ? `https://explorer.multiversx.com/transactions/${transferResult.txHash}`
             : null;
@@ -10414,7 +10426,6 @@ client.on('interactionCreate', async (interaction) => {
             : 'Not available';
           
           // Get Community Fund project logo for withdrawal notification
-          const communityFundProjectName = getCommunityFundProjectName();
           const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
           
           const successEmbed = new EmbedBuilder()
@@ -10441,17 +10452,46 @@ client.on('interactionCreate', async (interaction) => {
           
           console.log(`Withdrawal successful: ${withdrawAmount} ${tokenTicker} sent to ${userWallet}, new balance: ${deductResult.newBalance}`);
         } else {
-          // This should rarely happen now due to fallback correction, but handle it just in case
+          // Blockchain transaction failed - RESTORE the balance
+          console.error(`[WITHDRAW] Blockchain transaction failed. Restoring balance...`);
+          console.error(`[WITHDRAW] Error: ${transferResult.errorMessage || 'Unknown error'}`);
+          
+          try {
+            const dbVirtualAccounts = require('./db/virtual-accounts');
+            // Restore the balance by adding back the withdrawn amount
+            const restoredBalance = await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, withdrawAmountStr);
+            balanceRestored = true;
+            console.log(`[WITHDRAW] Balance restored successfully. New balance: ${restoredBalance}`);
+            
+            // Record a reversal transaction
+            const reversalTransaction = {
+              id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+              type: 'deposit',
+              token: tokenIdentifier,
+              amount: withdrawAmountStr,
+              balanceBefore: deductResult.newBalance,
+              balanceAfter: restoredBalance,
+              description: `withdrawal reversal (blockchain transaction failed)`,
+              timestamp: Date.now()
+            };
+            await dbVirtualAccounts.addTransaction(guildId, userId, reversalTransaction);
+          } catch (restoreError) {
+            console.error(`[WITHDRAW] CRITICAL: Failed to restore balance after blockchain failure!`, restoreError);
+            console.error(`[WITHDRAW] CRITICAL: User ${userId} balance needs manual correction!`);
+            console.error(`[WITHDRAW] CRITICAL: Should restore ${withdrawAmountStr} ${tokenIdentifier}`);
+          }
+          
           await interaction.editReply({ 
-            content: `⚠️ **Withdrawal completed on blockchain but balance update failed!**\n\nYour tokens have been sent to your wallet, but there was an error updating your virtual account balance.\n\n**Transaction Hash:** ${transferResult.txHash || 'Not available'}\n**Error:** ${deductResult.error || deductionError || 'Unknown error'}\n\nPlease contact an admin immediately. This is a critical error that requires manual intervention.`, 
+            content: `❌ **Withdrawal failed!**\n\nBlockchain transaction failed: ${transferResult.errorMessage || 'Unknown error'}\n\n${balanceRestored ? '✅ Your balance has been restored.' : '⚠️ **CRITICAL:** Balance restoration failed. Please contact an admin immediately.'}\n\nYour virtual account balance was not affected.`, 
             flags: [MessageFlags.Ephemeral] 
           });
         }
-      } else {
-        await interaction.editReply({ 
-          content: `❌ **Withdrawal failed!**\n\nBlockchain transaction failed: ${transferResult.errorMessage || 'Unknown error'}`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
+      } finally {
+        // Always release the withdrawal lock
+        withdrawalLocks.delete(withdrawalLockKey);
+        if (withdrawalResolve) {
+          withdrawalResolve();
+        }
       }
     } catch (error) {
       console.error('Error in withdraw command:', error.message);
@@ -20840,6 +20880,11 @@ client.login(process.env.TOKEN).catch(error => {
 
 // --- Token Decimals Helpers ---
 const tokenDecimalsCache = {};
+
+// Withdrawal lock to prevent race conditions (concurrent withdrawals for same user+token)
+// Key format: `${guildId}:${userId}:${tokenIdentifier}`
+// Value: Promise that resolves when withdrawal completes
+const withdrawalLocks = new Map();
 
 async function getTokenDecimals(tokenIdentifier) {
   if (tokenDecimalsCache[tokenIdentifier] !== undefined) {
