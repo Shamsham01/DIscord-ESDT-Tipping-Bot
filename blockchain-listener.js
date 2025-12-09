@@ -28,6 +28,80 @@ const supabase = require('./supabase-client');
 const POLLING_INTERVAL = 10000; // 10 seconds
 const API_BASE_URL = 'https://api.multiversx.com';
 
+// Rate limiting configuration for MultiversX API
+const MAX_RETRIES = 3;
+const INITIAL_RETRY_DELAY = 1000; // 1 second
+const MAX_RETRY_DELAY = 30000; // 30 seconds
+
+// Helper function to sleep
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper function to fetch with exponential backoff retry for rate limiting
+async function fetchWithRetry(url, maxRetries = MAX_RETRIES) {
+  let lastError;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url);
+      
+      // If rate limited (429), retry with exponential backoff
+      if (response.status === 429) {
+        if (attempt < maxRetries) {
+          // Calculate exponential backoff delay
+          const delay = Math.min(
+            INITIAL_RETRY_DELAY * Math.pow(2, attempt),
+            MAX_RETRY_DELAY
+          );
+          
+          // Check for Retry-After header
+          const retryAfter = response.headers.get('Retry-After');
+          const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : delay;
+          
+          console.warn(`[BLOCKCHAIN] Rate limited (429) for ${url}, retrying in ${waitTime}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
+          await sleep(waitTime);
+          continue;
+        } else {
+          throw new Error(`Failed to fetch: ${response.status} ${response.statusText} (rate limited after ${maxRetries + 1} attempts)`);
+        }
+      }
+      
+      // For other errors, throw immediately
+      if (!response.ok) {
+        throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`);
+      }
+      
+      return response;
+    } catch (error) {
+      lastError = error;
+      
+      // If it's a 429 error and we have retries left, continue
+      if (error.message && error.message.includes('429') && attempt < maxRetries) {
+        const delay = Math.min(
+          INITIAL_RETRY_DELAY * Math.pow(2, attempt),
+          MAX_RETRY_DELAY
+        );
+        console.warn(`[BLOCKCHAIN] Rate limited (429) for ${url}, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
+        await sleep(delay);
+        continue;
+      }
+      
+      // For network errors on last attempt, throw
+      if (attempt === maxRetries) {
+        throw error;
+      }
+      
+      // For other errors, wait a bit and retry
+      const delay = Math.min(
+        INITIAL_RETRY_DELAY * Math.pow(2, attempt),
+        MAX_RETRY_DELAY
+      );
+      await sleep(delay);
+    }
+  }
+  
+  throw lastError;
+}
+
 // Track processed transactions to avoid duplicates
 let processedTransactions = new Set();
 
@@ -655,7 +729,7 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
     
     console.log(`[BLOCKCHAIN] Found user ${userId} for wallet ${senderWallet} in guild ${guildId}`);
     
-    // Fetch NFT metadata from MultiversX API
+    // Fetch NFT metadata from MultiversX API with rate limiting
     let nftMetadata = {
       nft_name: null,
       nft_image_url: null,
@@ -664,7 +738,7 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
     
     try {
       const nftUrl = `https://api.multiversx.com/nfts/${identifier}`;
-      const nftResponse = await fetch(nftUrl);
+      const nftResponse = await fetchWithRetry(nftUrl);
       
       if (nftResponse.ok) {
         const nftData = await nftResponse.json();

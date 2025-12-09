@@ -21526,21 +21526,98 @@ async function processAuctionClosure(guildId, auctionId) {
         return;
       }
 
+      // Validate project exists and has wallet configured
+      if (!auction.projectName) {
+        console.error(`[AUCTIONS] Auction ${auctionId} is missing projectName for Project Wallet auction`);
+        if (thread) {
+          await thread.send(`❌ **Error:** Auction is missing project information. Please contact an administrator.`);
+        }
+        // Refund the deduction
+        await virtualAccounts.addFundsToAccount(
+          guildId,
+          auction.highestBidderId,
+          tokenIdentifier,
+          auction.currentBid,
+          null,
+          'auction_refund',
+          null
+        );
+        return;
+      }
+
+      const projects = await getProjects(guildId);
+      const project = projects[auction.projectName];
+      
+      if (!project) {
+        console.error(`[AUCTIONS] Project "${auction.projectName}" not found for auction ${auctionId}`);
+        if (thread) {
+          await thread.send(`❌ **Error:** Project "${auction.projectName}" not found. Please contact an administrator.`);
+        }
+        // Refund the deduction
+        await virtualAccounts.addFundsToAccount(
+          guildId,
+          auction.highestBidderId,
+          tokenIdentifier,
+          auction.currentBid,
+          null,
+          'auction_refund',
+          null
+        );
+        return;
+      }
+
+      if (!project.walletPem || project.walletPem.trim().length === 0) {
+        console.error(`[AUCTIONS] Project "${auction.projectName}" has no wallet PEM configured for auction ${auctionId}`);
+        if (thread) {
+          await thread.send(`❌ **Error:** Project "${auction.projectName}" has no wallet configured. Please contact an administrator.`);
+        }
+        // Refund the deduction
+        await virtualAccounts.addFundsToAccount(
+          guildId,
+          auction.highestBidderId,
+          tokenIdentifier,
+          auction.currentBid,
+          null,
+          'auction_refund',
+          null
+        );
+        return;
+      }
+
       const auctionAmount = auction.amount || 1;
-      // Transfer NFT/SFT via blockchain (auto-detects SFT vs NFT based on amount)
+      // Use token_type from database for reliable detection (bulletproof)
+      const tokenType = auction.tokenType || (auctionAmount > 1 ? 'SFT' : 'NFT');
+      
+      // Transfer NFT/SFT via blockchain
       try {
+        console.log(`[AUCTIONS] Starting NFT transfer for auction ${auctionId}:`);
+        console.log(`[AUCTIONS] - Collection: ${auction.collection}`);
+        console.log(`[AUCTIONS] - Nonce: ${auction.nftNonce}`);
+        console.log(`[AUCTIONS] - Amount: ${auctionAmount}`);
+        console.log(`[AUCTIONS] - Token Type: ${tokenType}`);
+        console.log(`[AUCTIONS] - Winner Wallet: ${winnerWallet}`);
+        console.log(`[AUCTIONS] - Project: ${auction.projectName}`);
+        
         transferResult = await transferNFTFromCommunityFund(
           winnerWallet,
           auction.collection,
           auction.nftNonce,
           auction.projectName,
           guildId,
-          auctionAmount
+          auctionAmount,
+          tokenType  // Pass tokenType for reliable detection
         );
+        
+        console.log(`[AUCTIONS] Transfer result for auction ${auctionId}:`, {
+          success: transferResult.success,
+          txHash: transferResult.txHash,
+          errorMessage: transferResult.errorMessage
+        });
       } catch (transferError) {
         // Capture any errors thrown by transferNFTFromCommunityFund
         console.error(`[AUCTIONS] Error during NFT transfer for auction ${auctionId}:`, transferError);
-        console.error(`[AUCTIONS] Transfer details - Collection: ${auction.collection}, Nonce: ${auction.nftNonce}, Amount: ${auctionAmount}, Winner Wallet: ${winnerWallet}, Project: ${auction.projectName}`);
+        console.error(`[AUCTIONS] Error stack:`, transferError.stack);
+        console.error(`[AUCTIONS] Transfer details - Collection: ${auction.collection}, Nonce: ${auction.nftNonce}, Amount: ${auctionAmount}, Token Type: ${tokenType}, Winner Wallet: ${winnerWallet}, Project: ${auction.projectName}`);
         transferResult = {
           success: false,
           errorMessage: transferError.message || 'Transaction failed',

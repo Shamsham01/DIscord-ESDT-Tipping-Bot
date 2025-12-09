@@ -2,6 +2,81 @@ const supabase = require('../supabase-client');
 const fetch = require('node-fetch');
 
 const CACHE_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const MAX_RETRIES = 3;
+const INITIAL_RETRY_DELAY = 1000; // 1 second
+const MAX_RETRY_DELAY = 30000; // 30 seconds
+
+// Helper function to sleep
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper function to fetch with exponential backoff retry
+async function fetchWithRetry(url, maxRetries = MAX_RETRIES) {
+  let lastError;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url);
+      
+      // If rate limited (429), retry with exponential backoff
+      if (response.status === 429) {
+        if (attempt < maxRetries) {
+          // Calculate exponential backoff delay
+          const delay = Math.min(
+            INITIAL_RETRY_DELAY * Math.pow(2, attempt),
+            MAX_RETRY_DELAY
+          );
+          
+          // Check for Retry-After header
+          const retryAfter = response.headers.get('Retry-After');
+          const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : delay;
+          
+          console.warn(`[NFT-CACHE] Rate limited (429) for ${url}, retrying in ${waitTime}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
+          await sleep(waitTime);
+          continue;
+        } else {
+          throw new Error(`Failed to fetch NFT: ${response.status} ${response.statusText} (rate limited after ${maxRetries + 1} attempts)`);
+        }
+      }
+      
+      // For other errors, throw immediately
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(`NFT not found: ${url}`);
+        }
+        throw new Error(`Failed to fetch NFT: ${response.status} ${response.statusText}`);
+      }
+      
+      return response;
+    } catch (error) {
+      lastError = error;
+      
+      // If it's a 429 error and we have retries left, continue
+      if (error.message && error.message.includes('429') && attempt < maxRetries) {
+        const delay = Math.min(
+          INITIAL_RETRY_DELAY * Math.pow(2, attempt),
+          MAX_RETRY_DELAY
+        );
+        console.warn(`[NFT-CACHE] Rate limited (429) for ${url}, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
+        await sleep(delay);
+        continue;
+      }
+      
+      // For network errors on last attempt, throw
+      if (attempt === maxRetries) {
+        throw error;
+      }
+      
+      // For other errors, wait a bit and retry
+      const delay = Math.min(
+        INITIAL_RETRY_DELAY * Math.pow(2, attempt),
+        MAX_RETRY_DELAY
+      );
+      await sleep(delay);
+    }
+  }
+  
+  throw lastError;
+}
 
 async function getNFTMetadata(collection, nonce, forceRefresh = false, identifierOverride = null) {
   try {
@@ -25,8 +100,8 @@ async function getNFTMetadata(collection, nonce, forceRefresh = false, identifie
       }
     }
     
-    // Fetch from API using the identifier (same format as /show-my-nft)
-    const nftResponse = await fetch(`https://api.multiversx.com/nfts/${identifier}`);
+    // Fetch from API using the identifier (same format as /show-my-nft) with retry logic
+    const nftResponse = await fetchWithRetry(`https://api.multiversx.com/nfts/${identifier}`);
     
     if (!nftResponse.ok) {
       if (nftResponse.status === 404) {
@@ -281,24 +356,34 @@ async function getNFTMetadataBatch(nfts, forceRefresh = false) {
       identifier: nft.identifier || `${nft.collection}-${nft.nonce.toString().padStart(4, '0')}`
     }));
     
-    const results = await Promise.allSettled(
-      nftsWithIdentifiers.map(nft => {
-        // Use the identifier directly (same as /show-my-nft command)
-        // This ensures we use the exact format stored in the database (e.g., "d0" hex format)
-        return getNFTMetadata(nft.collection, nft.nonce, forceRefresh, nft.identifier);
-      })
-    );
-    
+    // Process requests sequentially with delays to avoid rate limiting
+    // Rate limit: Max 10 requests per second (100ms delay between requests)
+    const REQUEST_DELAY_MS = 150; // 150ms = ~6.7 requests/second (safe margin)
     const metadataMap = {};
+    
     for (let i = 0; i < nftsWithIdentifiers.length; i++) {
       const nft = nftsWithIdentifiers[i];
       const identifier = nft.identifier;
       
-      if (results[i].status === 'fulfilled') {
-        metadataMap[identifier] = results[i].value;
-      } else {
+      try {
+        // Add delay between requests (except for the first one)
+        if (i > 0) {
+          await sleep(REQUEST_DELAY_MS);
+        }
+        
+        // Use the identifier directly (same as /show-my-nft command)
+        // This ensures we use the exact format stored in the database (e.g., "d0" hex format)
+        const attributes = await getNFTMetadata(nft.collection, nft.nonce, forceRefresh, nft.identifier);
+        metadataMap[identifier] = attributes;
+      } catch (error) {
         metadataMap[identifier] = null;
-        console.warn(`[NFT-CACHE] Failed to fetch metadata for ${identifier}:`, results[i].reason?.message);
+        console.warn(`[NFT-CACHE] Failed to fetch metadata for ${identifier}:`, error.message);
+        
+        // If we hit a rate limit, add extra delay before continuing
+        if (error.message && error.message.includes('429')) {
+          console.warn(`[NFT-CACHE] Rate limit detected, waiting 2 seconds before continuing batch...`);
+          await sleep(2000);
+        }
       }
     }
     
