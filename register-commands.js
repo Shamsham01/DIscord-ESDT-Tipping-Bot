@@ -1303,9 +1303,9 @@ const commands = [
             },
             {
                 name: 'duration_months',
-                description: 'Pool duration in months (1-12, optional)',
+                description: 'Pool duration in months (1-12, required)',
                 type: ApplicationCommandOptionType.Integer,
-                required: false,
+                required: true,
                 choices: [
                     { name: '1 month', value: 1 },
                     { name: '2 months', value: 2 },

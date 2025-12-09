@@ -206,7 +206,7 @@ NFT staking allows users to stake their NFTs from their Virtual Account to earn 
 Admins can create NFT staking pools using:
 
 ```
-/create-staking-pool collection_ticker reward_token_identifier initial_supply reward_per_nft_per_day [pool_name] [staking_total_limit] [staking_limit_per_user] [duration_months]
+/create-staking-pool collection_ticker reward_token_identifier initial_supply reward_per_nft_per_day duration_months [pool_name] [staking_total_limit] [staking_limit_per_user]
 ```
 
 #### Parameters Explained
@@ -215,10 +215,10 @@ Admins can create NFT staking pools using:
 * **`reward_token_identifier`** (Required): Token identifier for staking rewards (e.g., `REWARD-cf6eac`)
 * **`initial_supply`** (Required): Initial reward supply amount (e.g., `10000`)
 * **`reward_per_nft_per_day`** (Required): Daily reward amount per NFT (e.g., `10`)
+* **`duration_months`** (Required): Pool duration in months (1-12)
 * **`pool_name`** (Optional): Display name for the pool (defaults to collection name)
 * **`staking_total_limit`** (Optional): Maximum NFTs that can be staked in the pool
 * **`staking_limit_per_user`** (Optional): Maximum NFTs a single user can stake
-* **`duration_months`** (Optional): Pool duration in months (1-12)
 
 #### Example
 

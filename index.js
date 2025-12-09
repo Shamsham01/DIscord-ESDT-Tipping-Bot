@@ -11645,6 +11645,12 @@ client.on('interactionCreate', async (interaction) => {
       const stakingLimitPerUser = interaction.options.getInteger('staking_limit_per_user');
       const durationMonths = interaction.options.getInteger('duration_months');
       
+      // Validate duration_months is provided (now required)
+      if (!durationMonths || durationMonths < 1 || durationMonths > 12) {
+        await interaction.reply({ content: '❌ Pool duration is required and must be between 1-12 months.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       // Validate collection exists in user's VA
       const userCollections = await virtualAccountsNFT.getUserCollections(guildId, userId);
       if (!userCollections.includes(collectionTicker)) {
@@ -11698,7 +11704,7 @@ client.on('interactionCreate', async (interaction) => {
       // Calculate timing
       const createdAt = Date.now();
       const nextRewardDistributionAt = createdAt + (24 * 60 * 60 * 1000);
-      const expiresAt = durationMonths ? createdAt + (durationMonths * 30 * 24 * 60 * 60 * 1000) : null;
+      const expiresAt = createdAt + (durationMonths * 30 * 24 * 60 * 60 * 1000); // durationMonths is now required
       
       // Generate pool ID
       const poolId = `pool_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -11719,7 +11725,7 @@ client.on('interactionCreate', async (interaction) => {
         rewardPerNftPerDayWei: rewardPerNftPerDayWei,
         stakingTotalLimit: stakingTotalLimit || null,
         stakingLimitPerUser: stakingLimitPerUser || null,
-        durationMonths: durationMonths || null,
+        durationMonths: durationMonths, // Now required, no need for || null
         createdAt: createdAt,
         expiresAt: expiresAt,
         nextRewardDistributionAt: nextRewardDistributionAt,
@@ -19028,13 +19034,22 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
   }
 }
 
-// Calculate pool creation fee ($5 worth of REWARD)
+// Calculate pool creation fee (configurable via STAKING_POOL_CREATION_FEE_USD env variable, default $5)
+// Set STAKING_POOL_CREATION_FEE_USD in .env file to change the fee amount (e.g., STAKING_POOL_CREATION_FEE_USD=10 for $10)
 async function calculatePoolCreationFee() {
   try {
     const REWARD_IDENTIFIER = 'REWARD-cf6eac';
     const rewardPriceUsd = await getTokenPriceUsd(REWARD_IDENTIFIER);
     const rewardDecimals = await getTokenDecimals(REWARD_IDENTIFIER);
-    const feeAmountUsd = 5;
+    // Get fee from environment variable, default to 5 if not set
+    const feeAmountUsdEnv = process.env.STAKING_POOL_CREATION_FEE_USD || '5';
+    let feeAmountUsd = parseFloat(feeAmountUsdEnv);
+    
+    // Validate fee amount
+    if (isNaN(feeAmountUsd) || feeAmountUsd <= 0) {
+      console.warn(`[STAKING] Invalid STAKING_POOL_CREATION_FEE_USD value: ${feeAmountUsdEnv}, using default $5`);
+      feeAmountUsd = 5;
+    }
     
     if (rewardPriceUsd <= 0) {
       throw new Error('REWARD token price not available');

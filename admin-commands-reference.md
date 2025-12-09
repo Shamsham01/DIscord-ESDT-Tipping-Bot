@@ -219,17 +219,17 @@ This adds 200 tokens to the bonus pot, increasing the total prize pool for this 
 ### `/create-staking-pool`
 Create a new NFT staking pool.
 
-**Usage**: `/create-staking-pool collection_ticker reward_token_identifier initial_supply reward_per_nft_per_day [pool_name] [staking_total_limit] [staking_limit_per_user] [duration_months]`
+**Usage**: `/create-staking-pool collection_ticker reward_token_identifier initial_supply reward_per_nft_per_day duration_months [pool_name] [staking_total_limit] [staking_limit_per_user]`
 
 **Parameters**:
 - `collection_ticker` (Required): Collection identifier for stakable NFTs
 - `reward_token_identifier` (Required): Token identifier for rewards
 - `initial_supply` (Required): Initial reward supply amount
 - `reward_per_nft_per_day` (Required): Daily reward per NFT
+- `duration_months` (Required): Pool duration in months (1-12)
 - `pool_name` (Optional): Display name for the pool
 - `staking_total_limit` (Optional): Maximum NFTs that can be staked
 - `staking_limit_per_user` (Optional): Maximum NFTs per user
-- `duration_months` (Optional): Pool duration in months (1-12)
 
 **Example**:
 ```
