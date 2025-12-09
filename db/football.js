@@ -318,6 +318,83 @@ async function getPausedMatches() {
   }
 }
 
+// Get all in-play matches (status = 'IN_PLAY')
+async function getInPlayMatches() {
+  try {
+    const { data, error } = await supabase
+      .from('football_matches')
+      .select('*')
+      .eq('status', 'IN_PLAY');
+    
+    if (error) throw error;
+    
+    const matches = [];
+    
+    for (const matchData of data || []) {
+      // Get guild relationships
+      const { data: rels } = await supabase
+        .from('match_guilds')
+        .select('*')
+        .eq('match_id', matchData.match_id);
+      
+      const embeds = {};
+      const guildIds = [];
+      const tokenByGuild = {};
+      const requiredAmountWeiByGuild = {};
+      const bonusPotWeiByGuild = {};
+      
+      if (rels) {
+        for (const rel of rels) {
+          guildIds.push(rel.guild_id);
+          embeds[rel.guild_id] = {
+            messageId: rel.message_id || null,
+            threadId: rel.thread_id || null
+          };
+          // Populate per-guild token and stake from match_guilds table
+          if (rel.token_data) {
+            tokenByGuild[rel.guild_id] = rel.token_data;
+          }
+          if (rel.required_amount_wei) {
+            requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
+          }
+          bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
+        }
+      }
+      
+      // Get default token/amount from the first guild if available (for backward compatibility)
+      const firstGuildRel = rels && rels.length > 0 ? rels[0] : null;
+      const defaultToken = firstGuildRel?.token_data || null;
+      const defaultRequiredAmountWei = firstGuildRel?.required_amount_wei || null;
+      
+      matches.push({
+        matchId: matchData.match_id,
+        compCode: matchData.comp_code,
+        compName: matchData.comp_name,
+        home: matchData.home_team,
+        away: matchData.away_team,
+        kickoffISO: matchData.kickoff_iso,
+        token: defaultToken, // For backward compatibility
+        requiredAmountWei: defaultRequiredAmountWei, // For backward compatibility
+        tokenByGuild: tokenByGuild,
+        requiredAmountWeiByGuild: requiredAmountWeiByGuild,
+        bonusPotWeiByGuild: bonusPotWeiByGuild,
+        status: matchData.status,
+        ftScore: matchData.ft_score || { home: 0, away: 0 },
+        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false,
+        guildIds: guildIds,
+        embeds: embeds,
+        createdAt: matchData.created_at,
+        updatedAt: matchData.updated_at
+      });
+    }
+    
+    return matches;
+  } catch (error) {
+    console.error('[DB] Error getting in-play matches:', error);
+    throw error;
+  }
+}
+
 // Create a new match
 async function createMatch(matchData) {
   try {
@@ -661,6 +738,7 @@ module.exports = {
   getMatchesByGuild,
   getScheduledMatches,
   getPausedMatches,
+  getInPlayMatches,
   createMatch,
   updateMatch,
   createBet,

@@ -21917,10 +21917,11 @@ async function checkAndUpdateMatchResults() {
     let totalMatches = 0;
     let updatedMatches = 0;
     
-    // Get all unfinished matches from database (including PAUSED matches)
+    // Get all unfinished matches from database (including PAUSED and IN_PLAY matches)
     const scheduledMatches = await dbFootball.getScheduledMatches();
     const pausedMatches = await dbFootball.getPausedMatches();
-    const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches];
+    const inPlayMatches = await dbFootball.getInPlayMatches();
+    const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches, ...inPlayMatches];
     const unfinishedMatches = allUnfinishedMatches.filter(match => 
       match.status !== 'FINISHED' && match.compCode
     );
