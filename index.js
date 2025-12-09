@@ -10346,9 +10346,64 @@ client.on('interactionCreate', async (interaction) => {
           : String(withdrawAmount);
         
         console.log(`[WITHDRAW] Deducting ${withdrawAmountStr} ${tokenIdentifier} from virtual account for user ${userId}`);
-        const deductResult = await virtualAccounts.deductFundsFromAccount(guildId, userId, tokenIdentifier, withdrawAmountStr, 'withdrawal', memo);
         
-        console.log(`[WITHDRAW] Deduction result:`, deductResult);
+        // CRITICAL: Wrap deduction in try-catch to ensure it always executes
+        // If deduction fails, this is a critical error that needs immediate attention
+        let deductResult;
+        let deductionError = null;
+        
+        try {
+          deductResult = await virtualAccounts.deductFundsFromAccount(guildId, userId, tokenIdentifier, withdrawAmountStr, `withdrawal${transferResult.txHash ? ` (tx: ${transferResult.txHash})` : ''}`, memo);
+          console.log(`[WITHDRAW] Deduction result:`, deductResult);
+        } catch (deductionException) {
+          console.error(`[WITHDRAW] CRITICAL ERROR: Exception during deduction after successful blockchain transaction!`, deductionException);
+          deductionError = deductionException.message || String(deductionException);
+          deductResult = { success: false, error: deductionError };
+        }
+        
+        // If deduction failed, this is CRITICAL - blockchain transaction succeeded but balance wasn't updated
+        // Log as critical error and attempt manual deduction
+        if (!deductResult.success) {
+          console.error(`[WITHDRAW] CRITICAL: Blockchain transaction succeeded (txHash: ${transferResult.txHash || 'unknown'}) but virtual account deduction failed!`);
+          console.error(`[WITHDRAW] CRITICAL: User ${userId} (${interaction.user.tag}) withdrew ${withdrawAmountStr} ${tokenIdentifier} but balance was NOT updated!`);
+          console.error(`[WITHDRAW] CRITICAL: Error: ${deductResult.error || deductionError}`);
+          console.error(`[WITHDRAW] CRITICAL: This requires manual intervention to fix the balance mismatch!`);
+          
+          // Attempt to manually deduct using updateAccountBalance as a fallback
+          try {
+            console.log(`[WITHDRAW] Attempting manual balance correction...`);
+            const dbVirtualAccounts = require('./db/virtual-accounts');
+            const currentBalance = await virtualAccounts.getUserBalance(guildId, userId, tokenIdentifier);
+            const currentBalanceBN = new BigNumber(currentBalance);
+            const withdrawAmountBN = new BigNumber(withdrawAmountStr);
+            
+            if (currentBalanceBN.isGreaterThanOrEqualTo(withdrawAmountBN)) {
+              const negativeAmount = withdrawAmountBN.negated().toString();
+              const correctedBalance = await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, negativeAmount);
+              console.log(`[WITHDRAW] Manual balance correction successful! New balance: ${correctedBalance}`);
+              
+              // Record the transaction manually
+              const transaction = {
+                id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                type: 'deduction',
+                token: tokenIdentifier,
+                amount: withdrawAmountStr,
+                balanceBefore: currentBalance,
+                balanceAfter: correctedBalance,
+                description: `withdrawal (tx: ${transferResult.txHash || 'unknown'}) - MANUAL CORRECTION`,
+                timestamp: Date.now()
+              };
+              await dbVirtualAccounts.addTransaction(guildId, userId, transaction);
+              
+              deductResult = { success: true, newBalance: correctedBalance };
+              console.log(`[WITHDRAW] Balance correction completed successfully!`);
+            } else {
+              console.error(`[WITHDRAW] Cannot correct balance - insufficient balance for correction (current: ${currentBalance}, required: ${withdrawAmountStr})`);
+            }
+          } catch (correctionError) {
+            console.error(`[WITHDRAW] Failed to manually correct balance:`, correctionError);
+          }
+        }
         
         if (deductResult.success) {
           const explorerUrl = transferResult.txHash
@@ -10386,8 +10441,9 @@ client.on('interactionCreate', async (interaction) => {
           
           console.log(`Withdrawal successful: ${withdrawAmount} ${tokenTicker} sent to ${userWallet}, new balance: ${deductResult.newBalance}`);
         } else {
+          // This should rarely happen now due to fallback correction, but handle it just in case
           await interaction.editReply({ 
-            content: `❌ **Withdrawal failed!**\n\nBlockchain transaction succeeded but failed to update virtual account: ${deductResult.error}`, 
+            content: `⚠️ **Withdrawal completed on blockchain but balance update failed!**\n\nYour tokens have been sent to your wallet, but there was an error updating your virtual account balance.\n\n**Transaction Hash:** ${transferResult.txHash || 'Not available'}\n**Error:** ${deductResult.error || deductionError || 'Unknown error'}\n\nPlease contact an admin immediately. This is a critical error that requires manual intervention.`, 
             flags: [MessageFlags.Ephemeral] 
           });
         }
