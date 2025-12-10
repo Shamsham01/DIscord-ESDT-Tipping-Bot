@@ -13983,20 +13983,18 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Get matches for this guild
+      // Get matches for this guild (using lightweight autocomplete function for speed)
       console.log('[AUTOCOMPLETE] Fetching matches for guild:', guildId);
-      const guildMatches = await dbFootball.getMatchesByGuild(guildId);
-      console.log('[AUTOCOMPLETE] getMatchesByGuild returned:', typeof guildMatches, 'keys:', guildMatches ? Object.keys(guildMatches).length : 0);
+      const allMatches = await dbFootball.getMatchesForAutocomplete(guildId);
+      console.log('[AUTOCOMPLETE] getMatchesForAutocomplete returned:', allMatches.length, 'matches');
       
-      // Ensure guildMatches is an object
-      if (!guildMatches || typeof guildMatches !== 'object') {
-        console.log('[AUTOCOMPLETE] Invalid guildMatches returned:', typeof guildMatches, guildMatches);
+      // Ensure allMatches is an array
+      if (!Array.isArray(allMatches)) {
+        console.log('[AUTOCOMPLETE] Invalid matches returned:', typeof allMatches, allMatches);
         await safeRespond(interaction, []);
         return;
       }
       
-      // Filter active matches (SCHEDULED, TIMED, IN_PLAY) and validate required properties
-      const allMatches = Object.values(guildMatches);
       console.log('[AUTOCOMPLETE] Total matches found:', allMatches.length);
       
       const activeMatches = allMatches.filter(match => {

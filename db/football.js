@@ -749,9 +749,53 @@ async function updateMatchGuildBonusPot(matchId, guildId, bonusPotWei) {
   }
 }
 
+// Lightweight function for autocomplete - gets only basic match info in a single query
+// This is much faster than getMatchesByGuild which does N+1 queries
+async function getMatchesForAutocomplete(guildId) {
+  try {
+    // First get match IDs for this guild
+    const { data: guildRelations, error: guildError } = await supabase
+      .from('match_guilds')
+      .select('match_id')
+      .eq('guild_id', guildId);
+    
+    if (guildError) throw guildError;
+    if (!guildRelations || guildRelations.length === 0) return [];
+    
+    const matchIds = guildRelations.map(rel => rel.match_id);
+    
+    // Then get all match data in a single query
+    const { data: matchesData, error: matchesError } = await supabase
+      .from('football_matches')
+      .select('match_id, comp_code, comp_name, home_team, away_team, status, ft_score, kickoff_iso')
+      .in('match_id', matchIds);
+    
+    if (matchesError) throw matchesError;
+    if (!matchesData || matchesData.length === 0) return [];
+    
+    // Transform to simpler format
+    const matches = matchesData.map(match => ({
+      matchId: match.match_id,
+      compCode: match.comp_code,
+      compName: match.comp_name,
+      home: match.home_team,
+      away: match.away_team,
+      status: match.status,
+      ftScore: match.ft_score || { home: 0, away: 0 },
+      kickoffISO: match.kickoff_iso
+    }));
+    
+    return matches;
+  } catch (error) {
+    console.error('[DB] Error getting matches for autocomplete:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   getMatch,
   getMatchesByGuild,
+  getMatchesForAutocomplete,
   getScheduledMatches,
   getPausedMatches,
   getInPlayMatches,
