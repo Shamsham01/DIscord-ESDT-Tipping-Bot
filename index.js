@@ -13929,34 +13929,69 @@ client.on('interactionCreate', async (interaction) => {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
       
+      // Check if guildId is available (required for guild-specific matches)
+      if (!guildId) {
+        console.log('[AUTOCOMPLETE] No guildId available for update-football-match autocomplete');
+        await safeRespond(interaction, []);
+        return;
+      }
+      
       // Get matches for this guild
       const guildMatches = await dbFootball.getMatchesByGuild(guildId);
       
-      // Filter active matches (SCHEDULED, TIMED, IN_PLAY)
+      // Ensure guildMatches is an object
+      if (!guildMatches || typeof guildMatches !== 'object') {
+        console.log('[AUTOCOMPLETE] Invalid guildMatches returned:', typeof guildMatches);
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Filter active matches (SCHEDULED, TIMED, IN_PLAY) and validate required properties
       const activeMatches = Object.values(guildMatches).filter(match => {
+        if (!match || typeof match !== 'object') return false;
+        if (!match.status) return false;
+        if (!match.matchId || !match.home || !match.away || !match.compName) return false;
         return ['SCHEDULED', 'TIMED', 'IN_PLAY'].includes(match.status);
       });
       
-      const focusedLower = focusedValue.toLowerCase();
+      // If no active matches, return empty array
+      if (activeMatches.length === 0) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      const focusedLower = (focusedValue || '').toLowerCase();
       const filtered = activeMatches.filter(match => {
-        const matchIdLower = match.matchId.toLowerCase();
-        const homeLower = match.home.toLowerCase();
-        const awayLower = match.away.toLowerCase();
-        const compLower = match.compName.toLowerCase();
-        return matchIdLower.includes(focusedLower) || 
-               homeLower.includes(focusedLower) || 
-               awayLower.includes(focusedLower) ||
-               compLower.includes(focusedLower);
+        try {
+          const matchIdLower = (match.matchId || '').toLowerCase();
+          const homeLower = (match.home || '').toLowerCase();
+          const awayLower = (match.away || '').toLowerCase();
+          const compLower = (match.compName || '').toLowerCase();
+          return matchIdLower.includes(focusedLower) || 
+                 homeLower.includes(focusedLower) || 
+                 awayLower.includes(focusedLower) ||
+                 compLower.includes(focusedLower);
+        } catch (filterError) {
+          console.error('[AUTOCOMPLETE] Error filtering match:', filterError.message, match);
+          return false;
+        }
       });
       
-      await safeRespond(interaction,
-        filtered.slice(0, 25).map(match => ({
-          name: `${match.home} vs ${match.away} - ${match.compName} (${match.matchId})`,
-          value: match.matchId
-        }))
-      );
+      const choices = filtered.slice(0, 25).map(match => {
+        const home = match.home || 'Unknown';
+        const away = match.away || 'Unknown';
+        const compName = match.compName || 'Unknown';
+        const matchId = match.matchId || 'Unknown';
+        return {
+          name: `${home} vs ${away} - ${compName} (${matchId})`.slice(0, 100), // Discord limit is 100 chars
+          value: matchId
+        };
+      });
+      
+      await safeRespond(interaction, choices);
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in update-football-match game_id autocomplete:', error.message);
+      console.error('[AUTOCOMPLETE] Error stack:', error.stack);
       await safeRespond(interaction, []);
     }
     return;
