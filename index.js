@@ -6275,6 +6275,42 @@ client.on('interactionCreate', async (interaction) => {
       // Convert topup amount to wei
       const topupAmountWei = toBlockchainAmount(topupPotSize, token.decimals);
       
+      // Check house balance before deducting
+      const houseBalance = await getHouseBalance(guildId, token.identifier);
+      if (houseBalance) {
+        const bettingEarnings = new BigNumber(houseBalance.bettingEarnings?.[token.identifier] || '0');
+        const bettingSpending = new BigNumber(houseBalance.bettingSpending?.[token.identifier] || '0');
+        const bettingBalance = bettingEarnings.minus(bettingSpending);
+        const topupAmount = new BigNumber(topupAmountWei);
+        
+        if (bettingBalance.isLessThan(topupAmount)) {
+          const balanceHuman = bettingBalance.dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+          await interaction.editReply({ 
+            content: `❌ **Insufficient house balance!**\n\nBetting House balance: ${balanceHuman} ${token.ticker}\nRequired: ${topupPotSize} ${token.ticker}\n\nPlease top up the house balance first using \`/virtual-house-topup\`.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+      }
+      
+      // Track house spending (deduct from betting house balance)
+      const spendingResult = await trackHouseSpending(
+        guildId,
+        topupAmountWei,
+        token.identifier,
+        `Bonus pot topup for match ${matchId} (${match.home} vs ${match.away})`,
+        'betting'
+      );
+      
+      if (!spendingResult || !spendingResult.success) {
+        console.error(`[FOOTBALL] Failed to track house spending for match ${matchId}:`, spendingResult?.error);
+        await interaction.editReply({ 
+          content: `❌ Failed to deduct funds from house balance. Please check house balance and try again.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
       // Add topup to current bonus pot
       const newBonusPotWei = new BigNumber(currentBonusPotWei).plus(new BigNumber(topupAmountWei)).toString();
       const newBonusPotHuman = new BigNumber(newBonusPotWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
@@ -6283,6 +6319,7 @@ client.on('interactionCreate', async (interaction) => {
       await dbFootball.updateMatchGuildBonusPot(matchId, guildId, newBonusPotWei);
       
       console.log(`[FOOTBALL] Topped up bonus pot for match ${matchId} in guild ${guildId}: ${currentBonusPotHuman} + ${topupPotSize} = ${newBonusPotHuman} ${token.ticker}`);
+      console.log(`[HOUSE] Deducted ${topupPotSize} ${token.ticker} from betting house balance for match ${matchId}`);
       
       // Refresh embed (updateMatchEmbed will fetch fresh match data internally)
       await updateMatchEmbed(guildId, matchId);
