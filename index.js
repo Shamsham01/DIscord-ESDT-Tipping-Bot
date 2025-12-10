@@ -12352,12 +12352,57 @@ client.on('interactionCreate', async (interaction) => {
   // Helper function to safely respond to autocomplete
   const safeRespond = async (interaction, choices) => {
     try {
-      await interaction.respond(choices);
-    } catch (error) {
-      // Ignore interaction timeout errors (code 10062)
-      if (error.code !== 10062) {
-        console.error('Autocomplete response error:', error);
+      // Validate choices array format
+      if (!Array.isArray(choices)) {
+        console.error('[AUTOCOMPLETE] Invalid choices format - not an array:', typeof choices);
+        choices = [];
       }
+      
+      // Validate each choice has required fields and format
+      const validChoices = choices.filter((choice, index) => {
+        if (!choice || typeof choice !== 'object') {
+          console.error(`[AUTOCOMPLETE] Invalid choice at index ${index}:`, choice);
+          return false;
+        }
+        if (!choice.name || typeof choice.name !== 'string') {
+          console.error(`[AUTOCOMPLETE] Invalid choice name at index ${index}:`, choice);
+          return false;
+        }
+        if (!choice.value || (typeof choice.value !== 'string' && typeof choice.value !== 'number')) {
+          console.error(`[AUTOCOMPLETE] Invalid choice value at index ${index}:`, choice);
+          return false;
+        }
+        // Discord limits: name max 100 chars, value max 100 chars for string options
+        if (choice.name.length > 100) {
+          console.error(`[AUTOCOMPLETE] Choice name too long at index ${index}:`, choice.name.length);
+          return false;
+        }
+        if (typeof choice.value === 'string' && choice.value.length > 100) {
+          console.error(`[AUTOCOMPLETE] Choice value too long at index ${index}:`, choice.value.length);
+          return false;
+        }
+        return true;
+      });
+      
+      console.log(`[AUTOCOMPLETE] Validating choices: ${choices.length} total, ${validChoices.length} valid`);
+      
+      if (validChoices.length !== choices.length) {
+        console.warn(`[AUTOCOMPLETE] Filtered out ${choices.length - validChoices.length} invalid choices`);
+      }
+      
+      await interaction.respond(validChoices);
+      console.log('[AUTOCOMPLETE] Response sent successfully to Discord');
+      return true;
+    } catch (error) {
+      // Log all errors with full details
+      console.error('[AUTOCOMPLETE] Response error code:', error.code);
+      console.error('[AUTOCOMPLETE] Response error message:', error.message);
+      console.error('[AUTOCOMPLETE] Response error:', error);
+      // Don't ignore timeout errors - log them too for debugging
+      if (error.code === 10062) {
+        console.error('[AUTOCOMPLETE] Interaction timed out - response took too long');
+      }
+      return false;
     }
   };
 
@@ -14011,16 +14056,22 @@ client.on('interactionCreate', async (interaction) => {
         const home = match.home || 'Unknown';
         const away = match.away || 'Unknown';
         const compName = match.compName || 'Unknown';
-        const matchId = match.matchId || 'Unknown';
+        const matchId = String(match.matchId || 'Unknown'); // Ensure it's a string
+        const name = `${home} vs ${away} - ${compName} (${matchId})`.slice(0, 100); // Discord limit is 100 chars
         return {
-          name: `${home} vs ${away} - ${compName} (${matchId})`.slice(0, 100), // Discord limit is 100 chars
+          name: name,
           value: matchId
         };
       });
       
       console.log('[AUTOCOMPLETE] Sending', choices.length, 'choices to Discord');
-      await safeRespond(interaction, choices);
-      console.log('[AUTOCOMPLETE] Successfully sent autocomplete response');
+      console.log('[AUTOCOMPLETE] Sample choice (first):', choices.length > 0 ? JSON.stringify(choices[0]) : 'none');
+      const responseSent = await safeRespond(interaction, choices);
+      if (responseSent) {
+        console.log('[AUTOCOMPLETE] Successfully sent autocomplete response');
+      } else {
+        console.error('[AUTOCOMPLETE] Failed to send autocomplete response - check error logs above');
+      }
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in update-football-match game_id autocomplete:', error.message);
       console.error('[AUTOCOMPLETE] Error stack:', error.stack);
