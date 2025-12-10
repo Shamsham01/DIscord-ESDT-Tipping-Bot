@@ -13929,6 +13929,8 @@ client.on('interactionCreate', async (interaction) => {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
       
+      console.log('[AUTOCOMPLETE] update-football-match: Starting autocomplete, guildId:', guildId, 'focusedValue:', focusedValue);
+      
       // Check if guildId is available (required for guild-specific matches)
       if (!guildId) {
         console.log('[AUTOCOMPLETE] No guildId available for update-football-match autocomplete');
@@ -13937,25 +13939,51 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Get matches for this guild
+      console.log('[AUTOCOMPLETE] Fetching matches for guild:', guildId);
       const guildMatches = await dbFootball.getMatchesByGuild(guildId);
+      console.log('[AUTOCOMPLETE] getMatchesByGuild returned:', typeof guildMatches, 'keys:', guildMatches ? Object.keys(guildMatches).length : 0);
       
       // Ensure guildMatches is an object
       if (!guildMatches || typeof guildMatches !== 'object') {
-        console.log('[AUTOCOMPLETE] Invalid guildMatches returned:', typeof guildMatches);
+        console.log('[AUTOCOMPLETE] Invalid guildMatches returned:', typeof guildMatches, guildMatches);
         await safeRespond(interaction, []);
         return;
       }
       
       // Filter active matches (SCHEDULED, TIMED, IN_PLAY) and validate required properties
-      const activeMatches = Object.values(guildMatches).filter(match => {
-        if (!match || typeof match !== 'object') return false;
-        if (!match.status) return false;
-        if (!match.matchId || !match.home || !match.away || !match.compName) return false;
-        return ['SCHEDULED', 'TIMED', 'IN_PLAY'].includes(match.status);
+      const allMatches = Object.values(guildMatches);
+      console.log('[AUTOCOMPLETE] Total matches found:', allMatches.length);
+      
+      const activeMatches = allMatches.filter(match => {
+        if (!match || typeof match !== 'object') {
+          console.log('[AUTOCOMPLETE] Invalid match object:', match);
+          return false;
+        }
+        if (!match.status) {
+          console.log('[AUTOCOMPLETE] Match missing status:', match.matchId);
+          return false;
+        }
+        if (!match.matchId || !match.home || !match.away || !match.compName) {
+          console.log('[AUTOCOMPLETE] Match missing required fields:', {
+            matchId: match.matchId,
+            hasHome: !!match.home,
+            hasAway: !!match.away,
+            hasCompName: !!match.compName
+          });
+          return false;
+        }
+        const isActive = ['SCHEDULED', 'TIMED', 'IN_PLAY'].includes(match.status);
+        if (!isActive) {
+          console.log('[AUTOCOMPLETE] Match not active (status:', match.status, '):', match.matchId);
+        }
+        return isActive;
       });
+      
+      console.log('[AUTOCOMPLETE] Active matches after filtering:', activeMatches.length);
       
       // If no active matches, return empty array
       if (activeMatches.length === 0) {
+        console.log('[AUTOCOMPLETE] No active matches found, returning empty array');
         await safeRespond(interaction, []);
         return;
       }
@@ -13977,6 +14005,8 @@ client.on('interactionCreate', async (interaction) => {
         }
       });
       
+      console.log('[AUTOCOMPLETE] Filtered matches after search:', filtered.length);
+      
       const choices = filtered.slice(0, 25).map(match => {
         const home = match.home || 'Unknown';
         const away = match.away || 'Unknown';
@@ -13988,10 +14018,13 @@ client.on('interactionCreate', async (interaction) => {
         };
       });
       
+      console.log('[AUTOCOMPLETE] Sending', choices.length, 'choices to Discord');
       await safeRespond(interaction, choices);
+      console.log('[AUTOCOMPLETE] Successfully sent autocomplete response');
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in update-football-match game_id autocomplete:', error.message);
       console.error('[AUTOCOMPLETE] Error stack:', error.stack);
+      console.error('[AUTOCOMPLETE] Full error:', error);
       await safeRespond(interaction, []);
     }
     return;
