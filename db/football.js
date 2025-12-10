@@ -728,6 +728,26 @@ async function updateMatchGuildStake(matchId, guildId, stakeWei) {
   }
 }
 
+// Get current bonus pot for a match-guild combination
+async function getMatchGuildBonusPot(matchId, guildId) {
+  try {
+    const { data, error } = await supabase
+      .from('match_guilds')
+      .select('bonus_pot_wei')
+      .eq('match_id', matchId)
+      .eq('guild_id', guildId)
+      .single();
+    
+    if (error && error.code !== 'PGRST116') throw error;
+    if (!data) return '0';
+    
+    return data.bonus_pot_wei || '0';
+  } catch (error) {
+    console.error('[DB] Error getting match guild bonus pot:', error);
+    throw error;
+  }
+}
+
 // Update match guild bonus pot
 async function updateMatchGuildBonusPot(matchId, guildId, bonusPotWei) {
   try {
@@ -813,5 +833,6 @@ module.exports = {
   incrementMatchGuildBonusPot,
   updateMatchGuildHouseEarnings,
   updateMatchGuildStake,
+  getMatchGuildBonusPot,
   updateMatchGuildBonusPot
 };

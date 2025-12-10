@@ -6268,8 +6268,8 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Get current bonus pot amount
-      const currentBonusPotWei = match.bonusPotWeiByGuild?.[guildId] || '0';
+      // Get current bonus pot amount directly from database to ensure accuracy
+      const currentBonusPotWei = await dbFootball.getMatchGuildBonusPot(matchId, guildId);
       const currentBonusPotHuman = new BigNumber(currentBonusPotWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
       
       // Convert topup amount to wei
