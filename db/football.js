@@ -26,6 +26,7 @@ async function getMatch(matchId) {
     const tokenByGuild = {};
     const requiredAmountWeiByGuild = {};
     const bonusPotWeiByGuild = {};
+    const houseEarningsTrackedByGuild = {};
     
     if (guildRelations) {
       for (const rel of guildRelations) {
@@ -43,6 +44,7 @@ async function getMatch(matchId) {
           requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
         }
         bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
+        houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
       }
     }
     
@@ -65,7 +67,8 @@ async function getMatch(matchId) {
       bonusPotWeiByGuild: bonusPotWeiByGuild,
       status: matchData.status,
       ftScore: matchData.ft_score || { home: 0, away: 0 },
-      houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false,
+      houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
+      houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
       guildIds: guildIds,
       embeds: embeds,
       createdAt: matchData.created_at,
@@ -111,6 +114,7 @@ async function getMatchesByGuild(guildId) {
       const tokenByGuild = {};
       const requiredAmountWeiByGuild = {};
       const bonusPotWeiByGuild = {};
+      const houseEarningsTrackedByGuild = {};
       
       if (rels) {
         for (const rel of rels) {
@@ -127,6 +131,7 @@ async function getMatchesByGuild(guildId) {
             requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
           }
           bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
+          houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
         }
       }
       
@@ -149,7 +154,8 @@ async function getMatchesByGuild(guildId) {
         bonusPotWeiByGuild: bonusPotWeiByGuild,
         status: matchData.status,
         ftScore: matchData.ft_score || { home: 0, away: 0 },
-        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false,
+        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
+        houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
         guildIds: guildIds,
         embeds: embeds,
         createdAt: matchData.created_at,
@@ -188,6 +194,7 @@ async function getScheduledMatches() {
       const tokenByGuild = {};
       const requiredAmountWeiByGuild = {};
       const bonusPotWeiByGuild = {};
+      const houseEarningsTrackedByGuild = {};
       
       if (rels) {
         for (const rel of rels) {
@@ -204,6 +211,7 @@ async function getScheduledMatches() {
             requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
           }
           bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
+          houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
         }
       }
       
@@ -226,7 +234,8 @@ async function getScheduledMatches() {
         bonusPotWeiByGuild: bonusPotWeiByGuild,
         status: matchData.status,
         ftScore: matchData.ft_score || { home: 0, away: 0 },
-        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false,
+        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
+        houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
         guildIds: guildIds,
         embeds: embeds,
         createdAt: matchData.created_at,
@@ -265,6 +274,7 @@ async function getPausedMatches() {
       const tokenByGuild = {};
       const requiredAmountWeiByGuild = {};
       const bonusPotWeiByGuild = {};
+      const houseEarningsTrackedByGuild = {};
       
       if (rels) {
         for (const rel of rels) {
@@ -281,6 +291,7 @@ async function getPausedMatches() {
             requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
           }
           bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
+          houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
         }
       }
       
@@ -303,7 +314,8 @@ async function getPausedMatches() {
         bonusPotWeiByGuild: bonusPotWeiByGuild,
         status: matchData.status,
         ftScore: matchData.ft_score || { home: 0, away: 0 },
-        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false,
+        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
+        houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
         guildIds: guildIds,
         embeds: embeds,
         createdAt: matchData.created_at,
@@ -342,6 +354,7 @@ async function getInPlayMatches() {
       const tokenByGuild = {};
       const requiredAmountWeiByGuild = {};
       const bonusPotWeiByGuild = {};
+      const houseEarningsTrackedByGuild = {};
       
       if (rels) {
         for (const rel of rels) {
@@ -358,6 +371,7 @@ async function getInPlayMatches() {
             requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
           }
           bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
+          houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
         }
       }
       
@@ -380,7 +394,8 @@ async function getInPlayMatches() {
         bonusPotWeiByGuild: bonusPotWeiByGuild,
         status: matchData.status,
         ftScore: matchData.ft_score || { home: 0, away: 0 },
-        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false,
+        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
+        houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
         guildIds: guildIds,
         embeds: embeds,
         createdAt: matchData.created_at,
@@ -679,9 +694,10 @@ async function incrementMatchGuildBonusPot(matchId, guildId, incrementAmountWei)
 async function updateMatchGuildHouseEarnings(matchId, guildId, tracked) {
   try {
     const { error } = await supabase
-      .from('football_matches')
+      .from('match_guilds')
       .update({ house_earnings_tracked: tracked })
-      .eq('match_id', matchId);
+      .eq('match_id', matchId)
+      .eq('guild_id', guildId);
     
     if (error) throw error;
     return true;

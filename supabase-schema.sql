@@ -208,6 +208,7 @@ CREATE TABLE IF NOT EXISTS match_guilds (
     guild_id TEXT NOT NULL,
     message_id TEXT,
     thread_id TEXT,
+    house_earnings_tracked BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(match_id, guild_id)
 );
