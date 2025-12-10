@@ -6130,14 +6130,19 @@ client.on('interactionCreate', async (interaction) => {
             matchEmbed.setThumbnail(communityFundQR);
           }
 
-          // Create Bet button
+          // Create Bet and My Bets buttons
           const betButton = new ActionRowBuilder()
             .addComponents(
               new ButtonBuilder()
                 .setCustomId(`bet:${matchId}`)
                 .setLabel('Bet')
                 .setStyle(ButtonStyle.Primary)
-                .setEmoji('⚽')
+                .setEmoji('⚽'),
+              new ButtonBuilder()
+                .setCustomId(`my-bets:${competition || ''}`)
+                .setLabel('My Bets')
+                .setStyle(ButtonStyle.Secondary)
+                .setEmoji('📋')
             );
 
           // Post match embed
@@ -15295,6 +15300,272 @@ client.on('interactionCreate', async (interaction) => {
       console.error('[FOOTBALL] Error showing betting modal:', error.message);
       await interaction.reply({ content: '❌ An error occurred while opening the betting form. Please try again.', flags: [MessageFlags.Ephemeral] });
     }
+  } else if (customId.startsWith('my-bets:')) {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const compCodeRaw = customId.split(':')[1];
+      const compCode = compCodeRaw && compCodeRaw.trim() !== '' ? compCodeRaw : null; // Get competition code if provided
+      
+      // Get all bets for the user
+      const userBets = await dbFootball.getBetsByUser(guildId, interaction.user.id);
+      
+      if (!userBets || userBets.length === 0) {
+        await interaction.editReply({ content: '📋 **You have no active bets.**\n\nPlace a bet using the "Bet" button on any match!', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get all matches to filter by status and competition
+      const allMatches = await dbFootball.getMatchesByGuild(guildId);
+      
+      // Filter bets: only active matches (not FINISHED) and optionally by competition
+      const activeBets = [];
+      for (const bet of userBets) {
+        const match = allMatches[bet.matchId];
+        if (!match) continue; // Match not found, skip
+        
+        // Filter by competition if compCode provided
+        if (compCode && match.compCode !== compCode) continue;
+        
+        // Only show bets for matches that are not FINISHED
+        if (match.status !== 'FINISHED') {
+          activeBets.push({
+            ...bet,
+            match: match
+          });
+        }
+      }
+      
+      if (activeBets.length === 0) {
+        const compFilterText = compCode ? ` in ${compCode}` : '';
+        await interaction.editReply({ content: `📋 **You have no active bets${compFilterText}.**\n\nPlace a bet using the "Bet" button on any match!`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Sort by kickoff time (earliest first)
+      activeBets.sort((a, b) => {
+        const timeA = new Date(a.match.kickoffISO || 0).getTime();
+        const timeB = new Date(b.match.kickoffISO || 0).getTime();
+        return timeA - timeB;
+      });
+      
+      // Pagination: 5 bets per page (Discord embed limit is 25 fields, but we'll use description/fields)
+      const betsPerPage = 5;
+      const totalPages = Math.ceil(activeBets.length / betsPerPage);
+      let currentPage = 0;
+      
+      // Function to create embed for a page
+      const createBetsEmbed = (page) => {
+        const startIdx = page * betsPerPage;
+        const endIdx = Math.min(startIdx + betsPerPage, activeBets.length);
+        const pageBets = activeBets.slice(startIdx, endIdx);
+        
+        const compName = compCode && pageBets.length > 0 ? pageBets[0].match.compName : 'All Competitions';
+        const embed = new EmbedBuilder()
+          .setTitle(`📋 Your Active Bets${compCode ? ` - ${compName}` : ''}`)
+          .setDescription(`Showing **${startIdx + 1}-${endIdx}** of **${activeBets.length}** active bet${activeBets.length > 1 ? 's' : ''}`)
+          .setColor('#00FF00')
+          .setFooter({ text: `Page ${page + 1}/${totalPages}`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+          .setTimestamp();
+        
+        const fields = [];
+        for (const bet of pageBets) {
+          const match = bet.match;
+          const token = bet.token || {};
+          const tokenTicker = token.ticker || 'N/A';
+          const tokenDecimals = token.decimals || 8;
+          const betAmountHuman = new BigNumber(bet.amountWei || '0').dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+          
+          // Format outcome
+          let outcomeText = bet.outcome;
+          if (bet.outcome === 'H') outcomeText = '🏠 Home Win';
+          else if (bet.outcome === 'A') outcomeText = '✈️ Away Win';
+          else if (bet.outcome === 'D') outcomeText = '🤝 Draw';
+          
+          // Format match status
+          let statusEmoji = '📅';
+          if (match.status === 'IN_PLAY') statusEmoji = '🔴';
+          else if (match.status === 'PAUSED') statusEmoji = '⏸️';
+          else if (match.status === 'SCHEDULED' || match.status === 'TIMED') statusEmoji = '📅';
+          
+          const kickoffTime = match.kickoffISO ? new Date(match.kickoffISO) : null;
+          const kickoffText = kickoffTime ? `<t:${Math.floor(kickoffTime.getTime() / 1000)}:R>` : 'TBD';
+          
+          fields.push({
+            name: `${statusEmoji} ${match.home} vs ${match.away}`,
+            value: `**Outcome:** ${outcomeText}\n**Stake:** ${betAmountHuman} ${tokenTicker}\n**Competition:** ${match.compName}\n**Kickoff:** ${kickoffText}\n**Game ID:** \`${bet.matchId}\``,
+            inline: false
+          });
+        }
+        
+        embed.addFields(fields);
+        return embed;
+      };
+      
+      // Create navigation buttons
+      const createNavigationButtons = (page) => {
+        const row = new ActionRowBuilder();
+        
+        if (totalPages > 1) {
+          row.addComponents(
+            new ButtonBuilder()
+              .setCustomId(`my-bets-nav:${compCode || ''}:${page - 1}`)
+              .setLabel('◀️ Previous')
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(page === 0),
+            new ButtonBuilder()
+              .setCustomId(`my-bets-nav:${compCode || ''}:${page + 1}`)
+              .setLabel('Next ▶️')
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(page >= totalPages - 1)
+          );
+        }
+        
+        return row;
+      };
+      
+      // Send initial response
+      const components = totalPages > 1 ? [createNavigationButtons(currentPage)] : [];
+      await interaction.editReply({ 
+        embeds: [createBetsEmbed(currentPage)], 
+        components,
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+    } catch (error) {
+      console.error('[FOOTBALL] Error showing my bets:', error.message);
+      await interaction.editReply({ content: '❌ An error occurred while fetching your bets. Please try again.', flags: [MessageFlags.Ephemeral] });
+    }
+  } else if (customId.startsWith('my-bets-nav:')) {
+    try {
+      await interaction.deferUpdate();
+      
+      const parts = customId.split(':');
+      const compCodeRaw = parts[1];
+      const compCode = compCodeRaw && compCodeRaw.trim() !== '' ? compCodeRaw : null;
+      const page = parseInt(parts[2]) || 0;
+      
+      // Get all bets for the user
+      const userBets = await dbFootball.getBetsByUser(guildId, interaction.user.id);
+      
+      if (!userBets || userBets.length === 0) {
+        await interaction.editReply({ content: '📋 **You have no active bets.**', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get all matches to filter by status and competition
+      const allMatches = await dbFootball.getMatchesByGuild(guildId);
+      
+      // Filter bets: only active matches (not FINISHED) and optionally by competition
+      const activeBets = [];
+      for (const bet of userBets) {
+        const match = allMatches[bet.matchId];
+        if (!match) continue;
+        
+        if (compCode && match.compCode !== compCode) continue;
+        if (match.status !== 'FINISHED') {
+          activeBets.push({
+            ...bet,
+            match: match
+          });
+        }
+      }
+      
+      if (activeBets.length === 0) {
+        await interaction.editReply({ content: '📋 **You have no active bets.**', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Sort by kickoff time
+      activeBets.sort((a, b) => {
+        const timeA = new Date(a.match.kickoffISO || 0).getTime();
+        const timeB = new Date(b.match.kickoffISO || 0).getTime();
+        return timeA - timeB;
+      });
+      
+      const betsPerPage = 5;
+      const totalPages = Math.ceil(activeBets.length / betsPerPage);
+      const currentPage = Math.max(0, Math.min(page, totalPages - 1));
+      
+      // Function to create embed for a page
+      const createBetsEmbed = (page) => {
+        const startIdx = page * betsPerPage;
+        const endIdx = Math.min(startIdx + betsPerPage, activeBets.length);
+        const pageBets = activeBets.slice(startIdx, endIdx);
+        
+        const compName = compCode && pageBets.length > 0 ? pageBets[0].match.compName : 'All Competitions';
+        const embed = new EmbedBuilder()
+          .setTitle(`📋 Your Active Bets${compCode ? ` - ${compName}` : ''}`)
+          .setDescription(`Showing **${startIdx + 1}-${endIdx}** of **${activeBets.length}** active bet${activeBets.length > 1 ? 's' : ''}`)
+          .setColor('#00FF00')
+          .setFooter({ text: `Page ${page + 1}/${totalPages}`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+          .setTimestamp();
+        
+        const fields = [];
+        for (const bet of pageBets) {
+          const match = bet.match;
+          const token = bet.token || {};
+          const tokenTicker = token.ticker || 'N/A';
+          const tokenDecimals = token.decimals || 8;
+          const betAmountHuman = new BigNumber(bet.amountWei || '0').dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+          
+          let outcomeText = bet.outcome;
+          if (bet.outcome === 'H') outcomeText = '🏠 Home Win';
+          else if (bet.outcome === 'A') outcomeText = '✈️ Away Win';
+          else if (bet.outcome === 'D') outcomeText = '🤝 Draw';
+          
+          let statusEmoji = '📅';
+          if (match.status === 'IN_PLAY') statusEmoji = '🔴';
+          else if (match.status === 'PAUSED') statusEmoji = '⏸️';
+          else if (match.status === 'SCHEDULED' || match.status === 'TIMED') statusEmoji = '📅';
+          
+          const kickoffTime = match.kickoffISO ? new Date(match.kickoffISO) : null;
+          const kickoffText = kickoffTime ? `<t:${Math.floor(kickoffTime.getTime() / 1000)}:R>` : 'TBD';
+          
+          fields.push({
+            name: `${statusEmoji} ${match.home} vs ${match.away}`,
+            value: `**Outcome:** ${outcomeText}\n**Stake:** ${betAmountHuman} ${tokenTicker}\n**Competition:** ${match.compName}\n**Kickoff:** ${kickoffText}\n**Game ID:** \`${bet.matchId}\``,
+            inline: false
+          });
+        }
+        
+        embed.addFields(fields);
+        return embed;
+      };
+      
+      // Create navigation buttons
+      const createNavigationButtons = (page) => {
+        const row = new ActionRowBuilder();
+        
+        if (totalPages > 1) {
+          row.addComponents(
+            new ButtonBuilder()
+              .setCustomId(`my-bets-nav:${compCode || ''}:${page - 1}`)
+              .setLabel('◀️ Previous')
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(page === 0),
+            new ButtonBuilder()
+              .setCustomId(`my-bets-nav:${compCode || ''}:${page + 1}`)
+              .setLabel('Next ▶️')
+              .setStyle(ButtonStyle.Secondary)
+              .setDisabled(page >= totalPages - 1)
+          );
+        }
+        
+        return row;
+      };
+      
+      const components = totalPages > 1 ? [createNavigationButtons(currentPage)] : [];
+      await interaction.editReply({ 
+        embeds: [createBetsEmbed(currentPage)], 
+        components,
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+    } catch (error) {
+      console.error('[FOOTBALL] Error navigating my bets:', error.message);
+      await interaction.editReply({ content: '❌ An error occurred while navigating. Please try again.', flags: [MessageFlags.Ephemeral] });
+    }
   } else if (customId.startsWith('join-rps-modal:')) {
     try {
       const startTime = Date.now();
@@ -18642,9 +18913,16 @@ async function updateLotteryEmbed(guildId, lotteryId) {
     // Add winning numbers if lottery has ended
     if (lottery.winningNumbers && lottery.winningNumbers.length > 0) {
       const winningNumbersDisplay = lotteryHelpers.formatNumbersForDisplay(lottery.winningNumbers);
+      let winningNumbersValue = winningNumbersDisplay;
+      
+      // Add note if no winners found and lottery has ended
+      if (isExpired && lottery.hasWinners === false) {
+        winningNumbersValue += '\n\n⚠️ **No winners found** - Prize pool will rollover to next lottery';
+      }
+      
       lotteryEmbed.addFields({
         name: '🎯 Winning Numbers',
-        value: winningNumbersDisplay,
+        value: winningNumbersValue,
         inline: false
       });
     }
@@ -22903,14 +23181,19 @@ async function updateMatchEmbed(guildId, matchId) {
     if (match.status === 'FINISHED') {
       newComponents = []; // Remove all buttons for finished matches
     } else {
-      // Keep the Bet button for live/scheduled matches
+      // Keep the Bet and My Bets buttons for live/scheduled matches
       const betButton = new ActionRowBuilder()
         .addComponents(
           new ButtonBuilder()
             .setCustomId(`bet:${matchId}`)
             .setLabel('Bet')
             .setStyle(ButtonStyle.Primary)
-            .setEmoji('⚽')
+            .setEmoji('⚽'),
+          new ButtonBuilder()
+            .setCustomId(`my-bets:${match.compCode || ''}`)
+            .setLabel('My Bets')
+            .setStyle(ButtonStyle.Secondary)
+            .setEmoji('📋')
         );
       newComponents = [betButton];
     }
