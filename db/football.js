@@ -731,17 +731,22 @@ async function updateMatchGuildStake(matchId, guildId, stakeWei) {
 // Update match guild bonus pot
 async function updateMatchGuildBonusPot(matchId, guildId, bonusPotWei) {
   try {
-    const { error } = await supabase
+    // Use UPDATE instead of UPSERT to avoid null constraint violations
+    // This only updates existing rows and won't create new ones
+    const { data, error } = await supabase
       .from('match_guilds')
-      .upsert({
-        match_id: matchId,
-        guild_id: guildId,
-        bonus_pot_wei: bonusPotWei
-      }, {
-        onConflict: 'match_id,guild_id'
-      });
+      .update({ bonus_pot_wei: bonusPotWei })
+      .eq('match_id', matchId)
+      .eq('guild_id', guildId)
+      .select();
     
     if (error) throw error;
+    
+    // Check if any rows were updated
+    if (!data || data.length === 0) {
+      throw new Error(`Match-guild relationship not found for match ${matchId} in guild ${guildId}`);
+    }
+    
     return true;
   } catch (error) {
     console.error('[DB] Error updating match guild bonus pot:', error);
