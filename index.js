@@ -23256,13 +23256,14 @@ async function initializeMatchList() {
       return;
     }
     
-    // Get all unfinished matches from database (including PAUSED matches)
+    // Get all unfinished matches from database (including PAUSED and IN_PLAY matches)
     const scheduledMatches = await dbFootball.getScheduledMatches();
-  const pausedMatches = await dbFootball.getPausedMatches();
-  const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches];
-  const unfinishedMatches = allUnfinishedMatches.filter(match => 
-    match.status !== 'FINISHED' && match.status !== 'CANCELED' && match.status !== 'CANCELLED' && match.compCode
-  );
+    const pausedMatches = await dbFootball.getPausedMatches();
+    const inPlayMatches = await dbFootball.getInPlayMatches();
+    const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches, ...inPlayMatches];
+    const unfinishedMatches = allUnfinishedMatches.filter(match => 
+      match.status !== 'FINISHED' && match.status !== 'CANCELED' && match.status !== 'CANCELLED' && match.compCode
+    );
   
   // Sort matches by kickoff time (earliest first) to prioritize matches starting soon
   allMatches = unfinishedMatches.sort((a, b) => {
