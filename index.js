@@ -6020,6 +6020,17 @@ client.on('interactionCreate', async (interaction) => {
 
         // Initialize football data for this guild
 
+        // Fetch token price and QR code once before the loop (same for all matches)
+        let tokenPriceUsd = 0;
+        try {
+          tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
+        } catch (error) {
+          console.error(`[FOOTBALL] Error fetching token price:`, error.message);
+        }
+        
+        const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+        const communityFundQR = communityFundQRData?.[fundProject];
+
         let createdMatches = 0;
         let skippedMatches = 0;
         let newMatches = 0;
@@ -6033,11 +6044,10 @@ client.on('interactionCreate', async (interaction) => {
           const existingMatch = await dbFootball.getMatch(matchId);
           
           // Check if this match already has an embed for this guild
+          // Use existingMatch.embeds directly - no need to fetch all matches for the guild
           let hasEmbedForGuild = false;
           if (existingMatch) {
-            const guildMatches = await dbFootball.getMatchesByGuild(guildId);
-            const matchInGuild = guildMatches[matchId];
-            hasEmbedForGuild = matchInGuild && matchInGuild.embeds && matchInGuild.embeds[guildId] && matchInGuild.embeds[guildId].messageId;
+            hasEmbedForGuild = existingMatch.embeds && existingMatch.embeds[guildId] && existingMatch.embeds[guildId].messageId;
           }
           
           if (hasEmbedForGuild) {
@@ -6092,15 +6102,7 @@ client.on('interactionCreate', async (interaction) => {
             newMatches++;
           }
 
-          // Fetch token price for USD valuation
-          let tokenPriceUsd = 0;
-          try {
-            tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
-          } catch (error) {
-            console.error(`[FOOTBALL] Error fetching token price for match ${matchId}:`, error.message);
-          }
-          
-          // Calculate USD values
+          // Calculate USD values (using token price fetched before loop)
           const stakeUsd = tokenPriceUsd > 0 ? new BigNumber(amount).multipliedBy(tokenPriceUsd).toFixed(2) : null;
           const potSizeUsd = tokenPriceUsd > 0 ? new BigNumber(0).multipliedBy(tokenPriceUsd).toFixed(2) : null;
           
@@ -6123,9 +6125,7 @@ client.on('interactionCreate', async (interaction) => {
             .setFooter({ text: 'Click Bet below to place your bet!', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
             .setTimestamp();
           
-          // Add QR code as thumbnail if available
-          const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
-          const communityFundQR = communityFundQRData?.[fundProject];
+          // Add QR code as thumbnail if available (using QR code fetched before loop)
           if (communityFundQR) {
             matchEmbed.setThumbnail(communityFundQR);
           }
