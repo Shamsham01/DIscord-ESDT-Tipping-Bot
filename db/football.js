@@ -478,14 +478,56 @@ async function updateMatch(matchId, updates) {
     // Update guild relationships if embeds are provided
     if (updates.embeds) {
       for (const [guildId, embedData] of Object.entries(updates.embeds)) {
+        // First, check if the match_guilds relationship already exists
+        const { data: existingRel, error: fetchError } = await supabase
+          .from('match_guilds')
+          .select('required_amount_wei, token_data, bonus_pot_wei, house_earnings_tracked')
+          .eq('match_id', matchId)
+          .eq('guild_id', guildId)
+          .single();
+        
+        if (fetchError && fetchError.code !== 'PGRST116') throw fetchError;
+        
+        // Prepare upsert data - preserve existing values if they exist, otherwise use provided values
+        const upsertData = {
+          match_id: matchId,
+          guild_id: guildId,
+          message_id: embedData.messageId || null,
+          thread_id: embedData.threadId || null
+        };
+        
+        // Preserve existing required_amount_wei and token_data if they exist
+        // Otherwise use values from updates (for new guild relationships)
+        if (existingRel) {
+          // Guild relationship exists - preserve existing values
+          upsertData.required_amount_wei = existingRel.required_amount_wei;
+          upsertData.token_data = existingRel.token_data;
+          upsertData.bonus_pot_wei = existingRel.bonus_pot_wei || '0';
+          upsertData.house_earnings_tracked = existingRel.house_earnings_tracked || false;
+        } else {
+          // New guild relationship - use provided values or defaults
+          if (updates.requiredAmountWei !== undefined) {
+            upsertData.required_amount_wei = updates.requiredAmountWei;
+          } else if (updates.token && updates.requiredAmountWei !== undefined) {
+            // Fallback: try to get from updates
+            upsertData.required_amount_wei = updates.requiredAmountWei;
+          } else {
+            throw new Error(`Cannot create new match_guilds relationship for guild ${guildId}: required_amount_wei is required`);
+          }
+          
+          if (updates.token) {
+            upsertData.token_data = updates.token;
+          } else {
+            throw new Error(`Cannot create new match_guilds relationship for guild ${guildId}: token_data is required`);
+          }
+          
+          upsertData.bonus_pot_wei = '0';
+          upsertData.house_earnings_tracked = false;
+        }
+        
         const { error: relError } = await supabase
           .from('match_guilds')
-          .upsert({
-            match_id: matchId,
-            guild_id: guildId,
-            message_id: embedData.messageId || null,
-            thread_id: embedData.threadId || null
-          }, {
+          .upsert(upsertData, {
             onConflict: 'match_id,guild_id'
           });
         
@@ -496,14 +538,53 @@ async function updateMatch(matchId, updates) {
     // Add new guild relationships if guildIds are provided
     if (updates.guildIds) {
       for (const guildId of updates.guildIds) {
+        // First, check if the match_guilds relationship already exists
+        const { data: existingRel, error: fetchError } = await supabase
+          .from('match_guilds')
+          .select('required_amount_wei, token_data, bonus_pot_wei, house_earnings_tracked')
+          .eq('match_id', matchId)
+          .eq('guild_id', guildId)
+          .single();
+        
+        if (fetchError && fetchError.code !== 'PGRST116') throw fetchError;
+        
+        // Prepare upsert data - preserve existing values if they exist, otherwise use provided values
+        const upsertData = {
+          match_id: matchId,
+          guild_id: guildId,
+          message_id: updates.embeds && updates.embeds[guildId] ? updates.embeds[guildId].messageId : null,
+          thread_id: updates.embeds && updates.embeds[guildId] ? updates.embeds[guildId].threadId : null
+        };
+        
+        // Preserve existing required_amount_wei and token_data if they exist
+        // Otherwise use values from updates (for new guild relationships)
+        if (existingRel) {
+          // Guild relationship exists - preserve existing values
+          upsertData.required_amount_wei = existingRel.required_amount_wei;
+          upsertData.token_data = existingRel.token_data;
+          upsertData.bonus_pot_wei = existingRel.bonus_pot_wei || '0';
+          upsertData.house_earnings_tracked = existingRel.house_earnings_tracked || false;
+        } else {
+          // New guild relationship - use provided values or defaults
+          if (updates.requiredAmountWei !== undefined) {
+            upsertData.required_amount_wei = updates.requiredAmountWei;
+          } else {
+            throw new Error(`Cannot create new match_guilds relationship for guild ${guildId}: required_amount_wei is required`);
+          }
+          
+          if (updates.token) {
+            upsertData.token_data = updates.token;
+          } else {
+            throw new Error(`Cannot create new match_guilds relationship for guild ${guildId}: token_data is required`);
+          }
+          
+          upsertData.bonus_pot_wei = '0';
+          upsertData.house_earnings_tracked = false;
+        }
+        
         const { error: relError } = await supabase
           .from('match_guilds')
-          .upsert({
-            match_id: matchId,
-            guild_id: guildId,
-            message_id: updates.embeds && updates.embeds[guildId] ? updates.embeds[guildId].messageId : null,
-            thread_id: updates.embeds && updates.embeds[guildId] ? updates.embeds[guildId].threadId : null
-          }, {
+          .upsert(upsertData, {
             onConflict: 'match_id,guild_id'
           });
         
