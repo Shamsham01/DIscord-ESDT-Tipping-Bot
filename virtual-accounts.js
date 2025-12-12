@@ -44,12 +44,62 @@ async function getUserBalance(guildId, userId, tokenTicker) {
 }
 
 // Get all user balances
+// Returns available balances (total balance minus reserved funds for active bids)
 async function getAllUserBalances(guildId, userId) {
   try {
-    return await dbVirtualAccounts.getAllUserBalances(guildId, userId);
+    const totalBalances = await dbVirtualAccounts.getAllUserBalances(guildId, userId);
+    
+    // Get all active reservations for this user
+    const auctionReservations = require('./db/auction-reservations');
+    const supabase = require('./supabase-client');
+    
+    const { data: reservations, error: resError } = await supabase
+      .from('auction_bid_reservations')
+      .select('token_identifier, reserved_amount')
+      .eq('guild_id', guildId)
+      .eq('user_id', userId)
+      .eq('status', 'ACTIVE');
+    
+    if (resError && resError.code !== 'PGRST116') {
+      console.error('[VIRTUAL] Error getting reservations:', resError);
+      // If reservation check fails, return total balances (fail-safe)
+      return totalBalances;
+    }
+    
+    // Calculate reserved amounts per token
+    const reservedByToken = {};
+    if (reservations && reservations.length > 0) {
+      for (const reservation of reservations) {
+        const tokenId = reservation.token_identifier;
+        if (!reservedByToken[tokenId]) {
+          reservedByToken[tokenId] = '0';
+        }
+        const BigNumber = require('bignumber.js');
+        reservedByToken[tokenId] = new BigNumber(reservedByToken[tokenId])
+          .plus(new BigNumber(reservation.reserved_amount || '0'))
+          .toString();
+      }
+    }
+    
+    // Subtract reserved amounts from total balances
+    const availableBalances = {};
+    const BigNumber = require('bignumber.js');
+    
+    for (const [tokenIdentifier, totalBalance] of Object.entries(totalBalances)) {
+      const reserved = reservedByToken[tokenIdentifier] || '0';
+      const available = new BigNumber(totalBalance).minus(new BigNumber(reserved));
+      availableBalances[tokenIdentifier] = available.isLessThan(0) ? '0' : available.toString();
+    }
+    
+    return availableBalances;
   } catch (error) {
     console.error('[VIRTUAL] Error getting all user balances:', error);
-    return {};
+    // If error, return total balances (fail-safe)
+    try {
+      return await dbVirtualAccounts.getAllUserBalances(guildId, userId);
+    } catch (fallbackError) {
+      return {};
+    }
   }
 }
 
