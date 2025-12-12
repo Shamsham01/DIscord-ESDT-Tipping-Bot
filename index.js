@@ -21926,8 +21926,22 @@ async function processAuctionClosure(guildId, auctionId) {
   const auction = await dbAuctions.getAuction(guildId, auctionId);
   if (!auction) return;
 
-  // Mark as finished
-  await dbAuctions.updateAuction(guildId, auctionId, { status: 'FINISHED' });
+  // CRITICAL FIX: Prevent race condition by checking status first
+  // If auction is already FINISHED or PROCESSING, another process is handling it
+  if (auction.status === 'FINISHED' || auction.status === 'PROCESSING') {
+    console.log(`[AUCTIONS] Auction ${auctionId} is already ${auction.status}, skipping duplicate processing`);
+    return;
+  }
+
+  // Atomically try to set status to PROCESSING (only if currently ACTIVE)
+  // This ensures only one process can proceed with the closure
+  const gotLock = await dbAuctions.trySetProcessingStatus(guildId, auctionId);
+  if (!gotLock) {
+    console.log(`[AUCTIONS] Could not acquire lock for auction ${auctionId} (already being processed or finished)`);
+    return;
+  }
+
+  console.log(`[AUCTIONS] Processing closure for auction ${auctionId}`);
 
   // Update embed
   await updateAuctionEmbed(guildId, auctionId);
@@ -21943,6 +21957,7 @@ async function processAuctionClosure(guildId, auctionId) {
       if (thread) {
         await thread.send('⏰ **Auction ended with no bids.**');
       }
+      await dbAuctions.updateAuction(guildId, auctionId, { status: 'FINISHED' });
       return;
     }
 
@@ -21952,6 +21967,7 @@ async function processAuctionClosure(guildId, auctionId) {
       if (thread) {
         await thread.send(`❌ **Error:** Could not resolve token identifier for auction. Please contact an administrator.`);
       }
+      await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
       return;
     }
 
@@ -21972,6 +21988,7 @@ async function processAuctionClosure(guildId, auctionId) {
       if (thread) {
         await thread.send(`❌ **Failed to process payment.** Insufficient balance. Winner: <@${auction.highestBidderId}>`);
       }
+      await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
       return;
     }
 
@@ -21996,6 +22013,7 @@ async function processAuctionClosure(guildId, auctionId) {
           'auction_refund',
           null
         );
+        await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
         return;
       }
 
@@ -22056,6 +22074,7 @@ async function processAuctionClosure(guildId, auctionId) {
           'auction_refund',
           null
         );
+        await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
         return;
       }
 
@@ -22075,6 +22094,7 @@ async function processAuctionClosure(guildId, auctionId) {
           'auction_refund',
           null
         );
+        await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
         return;
       }
 
@@ -22114,6 +22134,7 @@ async function processAuctionClosure(guildId, auctionId) {
           'auction_refund',
           null
         );
+        await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
         return;
       }
 
@@ -22266,6 +22287,9 @@ async function processAuctionClosure(guildId, auctionId) {
         const tokenType = auctionAmount > 1 ? 'SFT' : 'NFT';
         await thread.send(`✅ **${tokenType} successfully transferred to winner!** Check the main channel for details.`);
       }
+      
+      // Successfully completed - mark as FINISHED
+      await dbAuctions.updateAuction(guildId, auctionId, { status: 'FINISHED' });
     } else {
       // Refund the deduction (using identifier)
       await virtualAccounts.addFundsToAccount(
@@ -22301,6 +22325,12 @@ async function processAuctionClosure(guildId, auctionId) {
     }
   } catch (error) {
     console.error(`[AUCTIONS] Error processing closure for auction ${auctionId}:`, error.message);
+    // On error, mark as FAILED to prevent retry loops
+    try {
+      await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
+    } catch (updateError) {
+      console.error(`[AUCTIONS] Failed to update auction status to FAILED:`, updateError.message);
+    }
   }
 }
 

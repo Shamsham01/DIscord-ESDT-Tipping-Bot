@@ -289,6 +289,33 @@ async function updateAuction(guildId, auctionId, auctionData) {
   }
 }
 
+// Atomically update auction status from ACTIVE to PROCESSING
+// Returns true if the update succeeded (meaning we got the lock), false otherwise
+async function trySetProcessingStatus(guildId, auctionId) {
+  try {
+    // Use a conditional update: only update if status is ACTIVE
+    const { data, error } = await supabase
+      .from('auctions')
+      .update({ 
+        status: 'PROCESSING',
+        updated_at: new Date().toISOString()
+      })
+      .eq('guild_id', guildId)
+      .eq('auction_id', auctionId)
+      .eq('status', 'ACTIVE')
+      .select();
+    
+    if (error) throw error;
+    
+    // If data is returned and has length > 0, the update succeeded
+    // This means the auction was ACTIVE and we successfully changed it to PROCESSING
+    return data && data.length > 0;
+  } catch (error) {
+    console.error('[DB] Error trying to set PROCESSING status:', error);
+    return false;
+  }
+}
+
 async function createBid(guildId, auctionId, bidData) {
   try {
     const { error } = await supabase
@@ -378,6 +405,7 @@ module.exports = {
   getUserActiveAuctions,
   createAuction,
   updateAuction,
+  trySetProcessingStatus,
   createBid,
   getBidsByAuction
 };
