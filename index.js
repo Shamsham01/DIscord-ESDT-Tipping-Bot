@@ -16285,7 +16285,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // Check user balance (using identifier)
+      // Check user balance (using identifier) - this now accounts for reserved funds
       const userBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, tokenIdentifier);
       const balanceBN = new BigNumber(userBalance);
       const bidAmountBN = new BigNumber(quickBidAmount);
@@ -16297,7 +16297,8 @@ client.on('interactionCreate', async (interaction) => {
         const qrCodeUrl = communityFundQRData?.[communityFundProject] || null;
         
         let errorMessage = `❌ **Insufficient balance!**\n\n`;
-        errorMessage += `You need **${quickBidAmount} ${auction.tokenTicker}** but you only have **${userBalance} ${auction.tokenTicker}**.\n\n`;
+        errorMessage += `You need **${quickBidAmount} ${auction.tokenTicker}** but you only have **${userBalance} ${auction.tokenTicker}** available.\n\n`;
+        errorMessage += `Note: Your balance may include funds reserved for other active bids.\n\n`;
         errorMessage += `Please top up your virtual account by sending tokens to the Community Fund wallet.`;
         
         if (qrCodeUrl) {
@@ -16313,6 +16314,37 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply({ content: errorMessage, flags: [MessageFlags.Ephemeral] });
         }
         return;
+      }
+
+      // Reserve funds for this bid
+      const auctionReservations = require('./db/auction-reservations');
+      try {
+        await auctionReservations.createOrUpdateReservation(
+          guildId,
+          auctionId,
+          interaction.user.id,
+          tokenIdentifier,
+          quickBidAmount
+        );
+        console.log(`[AUCTIONS] Reserved ${quickBidAmount} ${tokenIdentifier} for bid on auction ${auctionId}`);
+      } catch (reservationError) {
+        console.error('[AUCTIONS] Error reserving funds:', reservationError);
+        await interaction.editReply({ 
+          content: `❌ **Error reserving funds.** Please try again.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+
+      // Release previous highest bidder's reservation (if different user)
+      if (auction.highestBidderId && auction.highestBidderId !== interaction.user.id) {
+        try {
+          await auctionReservations.releaseReservation(guildId, auctionId, auction.highestBidderId);
+          console.log(`[AUCTIONS] Released reservation for previous bidder ${auction.highestBidderId}`);
+        } catch (releaseError) {
+          console.error('[AUCTIONS] Error releasing previous bidder reservation:', releaseError);
+          // Don't fail the bid if release fails - log and continue
+        }
       }
 
       // Record bid (no deduction yet)
@@ -18620,7 +18652,7 @@ client.on('interactionCreate', async (interaction) => {
             return;
           }
 
-          // Check user balance (using identifier)
+          // Check user balance (using identifier) - this now accounts for reserved funds
           const userBalance = await virtualAccounts.getUserBalance(guildId, interaction.user.id, tokenIdentifier);
           const balanceBN = new BigNumber(userBalance);
 
@@ -18631,7 +18663,8 @@ client.on('interactionCreate', async (interaction) => {
         const qrCodeUrl = communityFundQRData?.[communityFundProject] || null;
             
             let errorMessage = `❌ **Insufficient balance!**\n\n`;
-            errorMessage += `You need **${bidAmountBN.toString()} ${auction.tokenTicker}** but you only have **${userBalance} ${auction.tokenTicker}**.\n\n`;
+            errorMessage += `You need **${bidAmountBN.toString()} ${auction.tokenTicker}** but you only have **${userBalance} ${auction.tokenTicker}** available.\n\n`;
+            errorMessage += `Note: Your balance may include funds reserved for other active bids.\n\n`;
             errorMessage += `Please top up your virtual account by sending tokens to the Community Fund wallet.`;
             
             if (qrCodeUrl) {
@@ -18647,6 +18680,37 @@ client.on('interactionCreate', async (interaction) => {
               await interaction.editReply({ content: errorMessage, flags: [MessageFlags.Ephemeral] });
             }
             return;
+          }
+
+          // Reserve funds for this bid
+          const auctionReservations = require('./db/auction-reservations');
+          try {
+            await auctionReservations.createOrUpdateReservation(
+              guildId,
+              auctionId,
+              interaction.user.id,
+              tokenIdentifier,
+              bidAmountBN.toString()
+            );
+            console.log(`[AUCTIONS] Reserved ${bidAmountBN.toString()} ${tokenIdentifier} for bid on auction ${auctionId}`);
+          } catch (reservationError) {
+            console.error('[AUCTIONS] Error reserving funds:', reservationError);
+            await interaction.editReply({ 
+              content: `❌ **Error reserving funds.** Please try again.`, 
+              flags: [MessageFlags.Ephemeral] 
+            });
+            return;
+          }
+
+          // Release previous highest bidder's reservation (if different user)
+          if (auction.highestBidderId && auction.highestBidderId !== interaction.user.id) {
+            try {
+              await auctionReservations.releaseReservation(guildId, auctionId, auction.highestBidderId);
+              console.log(`[AUCTIONS] Released reservation for previous bidder ${auction.highestBidderId}`);
+            } catch (releaseError) {
+              console.error('[AUCTIONS] Error releasing previous bidder reservation:', releaseError);
+              // Don't fail the bid if release fails - log and continue
+            }
           }
 
           // Record bid (no deduction yet)
@@ -20854,6 +20918,20 @@ client.on('ready', async () => {
     }
   }, 60 * 1000); // Check every minute
   
+  // Set up periodic cleanup of old auction bid reservations
+  // Clean up reservations for auctions that ended more than 7 days ago
+  setInterval(async () => {
+    try {
+      const auctionReservations = require('./db/auction-reservations');
+      const result = await auctionReservations.cleanupOldReservations(7);
+      if (result.cleaned > 0) {
+        console.log(`[AUCTIONS] Cleaned up ${result.cleaned} old bid reservations`);
+      }
+    } catch (error) {
+      console.error('[AUCTIONS] Error cleaning up old reservations:', error.message);
+    }
+  }, 24 * 60 * 60 * 1000); // Run once per day
+  
   // Set up periodic update for lottery embeds (USD price)
   setInterval(async () => {
     try {
@@ -21974,22 +22052,66 @@ async function processAuctionClosure(guildId, auctionId) {
     // Get user's balance before transfer (using identifier)
     const balanceBefore = await virtualAccounts.getUserBalance(guildId, auction.highestBidderId, tokenIdentifier);
 
-    // Deduct bid amount from virtual account (using identifier)
-    const deductionResult = await virtualAccounts.deductFundsFromAccount(
-      guildId,
-      auction.highestBidderId,
-      tokenIdentifier,
-      auction.currentBid,
-      `Auction payment: ${auction.nftName}`,
-      'auction'
-    );
+    // Check if winner has an active reservation for this auction
+    const auctionReservations = require('./db/auction-reservations');
+    const reservation = await auctionReservations.getActiveReservation(guildId, auctionId, auction.highestBidderId);
+    
+    if (reservation) {
+      // Convert reservation to payment (mark as converted)
+      await auctionReservations.convertReservationToPayment(guildId, auctionId, auction.highestBidderId);
+      console.log(`[AUCTIONS] Converted reservation to payment for auction ${auctionId}`);
+      
+      // Now deduct the reserved amount (it's already reserved, so this should succeed)
+      const deductionResult = await virtualAccounts.deductFundsFromAccount(
+        guildId,
+        auction.highestBidderId,
+        tokenIdentifier,
+        auction.currentBid,
+        `Auction payment: ${auction.nftName}`,
+        'auction'
+      );
 
-    if (!deductionResult.success) {
-      if (thread) {
-        await thread.send(`❌ **Failed to process payment.** Insufficient balance. Winner: <@${auction.highestBidderId}>`);
+      if (!deductionResult.success) {
+        // This should rarely happen since funds are reserved, but handle it gracefully
+        console.error(`[AUCTIONS] Failed to deduct reserved funds for auction ${auctionId}`);
+        if (thread) {
+          await thread.send(`❌ **Failed to process payment.** Unexpected error. Winner: <@${auction.highestBidderId}>`);
+        }
+        await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
+        // Release the reservation since payment failed
+        await auctionReservations.releaseReservation(guildId, auctionId, auction.highestBidderId);
+        return;
       }
-      await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
-      return;
+    } else {
+      // No reservation found - this might be an old auction or edge case
+      // Try to deduct normally (backward compatibility)
+      console.warn(`[AUCTIONS] No reservation found for auction ${auctionId}, attempting normal deduction`);
+      const deductionResult = await virtualAccounts.deductFundsFromAccount(
+        guildId,
+        auction.highestBidderId,
+        tokenIdentifier,
+        auction.currentBid,
+        `Auction payment: ${auction.nftName}`,
+        'auction'
+      );
+
+      if (!deductionResult.success) {
+        if (thread) {
+          await thread.send(`❌ **Failed to process payment.** Insufficient balance. Winner: <@${auction.highestBidderId}>`);
+        }
+        await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
+        return;
+      }
+    }
+
+    // Release all other reservations for this auction (non-winners)
+    // This is safe to call even if no reservations exist (for backward compatibility)
+    try {
+      await auctionReservations.releaseAllReservationsForAuction(guildId, auctionId, auction.highestBidderId);
+      console.log(`[AUCTIONS] Released all non-winner reservations for auction ${auctionId}`);
+    } catch (releaseError) {
+      console.error('[AUCTIONS] Error releasing reservations:', releaseError);
+      // Don't fail the auction closure if release fails - this is safe for old auctions without reservations
     }
 
     // Handle different auction sources

@@ -12,12 +12,34 @@ async function getUserAccount(guildId, userId, username = null) {
 }
 
 // Get user balance for a specific token
+// Returns available balance (total balance minus reserved funds for active bids)
 async function getUserBalance(guildId, userId, tokenTicker) {
   try {
-    return await dbVirtualAccounts.getAccountBalance(guildId, userId, tokenTicker);
+    const totalBalance = await dbVirtualAccounts.getAccountBalance(guildId, userId, tokenTicker);
+    
+    // Get reserved amount for active auction bids
+    // tokenTicker might be a full identifier (e.g., "WEGLD-bd4d79") or just a ticker
+    // We need to check reservations using the identifier format
+    const auctionReservations = require('./db/auction-reservations');
+    
+    // Try with tokenTicker as-is (might already be identifier)
+    let reservedAmount = await auctionReservations.getTotalReservedAmount(guildId, userId, tokenTicker);
+    
+    // If no reservations found and tokenTicker doesn't look like an identifier, try to resolve it
+    // But for now, we'll just use what we have - the reservation system will use identifiers
+    const BigNumber = require('bignumber.js');
+    const availableBalance = new BigNumber(totalBalance).minus(new BigNumber(reservedAmount || '0'));
+    
+    // Return available balance (can't be negative)
+    return availableBalance.isLessThan(0) ? '0' : availableBalance.toString();
   } catch (error) {
     console.error('[VIRTUAL] Error getting user balance:', error);
-    return '0';
+    // If reservation check fails, return total balance (fail-safe)
+    try {
+      return await dbVirtualAccounts.getAccountBalance(guildId, userId, tokenTicker);
+    } catch (fallbackError) {
+      return '0';
+    }
   }
 }
 
