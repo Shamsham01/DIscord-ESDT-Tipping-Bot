@@ -2,51 +2,75 @@ const supabase = require('../supabase-client');
 const BigNumber = require('bignumber.js');
 
 // Create or update a bid reservation
-// If user already has a reservation for this auction, update it
+// If user already has an ACTIVE reservation for this auction, update it
+// Handles race conditions by trying insert first, then updating on conflict
 async function createOrUpdateReservation(guildId, auctionId, userId, tokenIdentifier, amount) {
   try {
-    // Check if reservation already exists
-    const { data: existing, error: checkError } = await supabase
+    // Try to insert a new reservation first
+    // If an ACTIVE reservation already exists, the partial unique index will prevent this
+    const reservationData = {
+      auction_id: auctionId,
+      guild_id: guildId,
+      user_id: userId,
+      token_identifier: tokenIdentifier,
+      reserved_amount: amount,
+      status: 'ACTIVE',
+      created_at: new Date().toISOString()
+    };
+    
+    const { data: newReservation, error: insertError } = await supabase
       .from('auction_bid_reservations')
-      .select('*')
-      .eq('guild_id', guildId)
-      .eq('auction_id', auctionId)
-      .eq('user_id', userId)
-      .eq('status', 'ACTIVE')
-      .maybeSingle();
+      .insert(reservationData)
+      .select()
+      .single();
     
-    if (checkError && checkError.code !== 'PGRST116') throw checkError;
-    
-    if (existing) {
-      // Update existing reservation
-      const { error: updateError } = await supabase
-        .from('auction_bid_reservations')
-        .update({
-          reserved_amount: amount,
-          created_at: new Date().toISOString()
-        })
-        .eq('id', existing.id);
-      
-      if (updateError) throw updateError;
-      return { success: true, reservationId: existing.id, isUpdate: true };
-    } else {
-      // Create new reservation
-      const { data: newReservation, error: insertError } = await supabase
-        .from('auction_bid_reservations')
-        .insert({
-          auction_id: auctionId,
-          guild_id: guildId,
-          user_id: userId,
-          token_identifier: tokenIdentifier,
-          reserved_amount: amount,
-          status: 'ACTIVE'
-        })
-        .select()
-        .single();
-      
-      if (insertError) throw insertError;
+    // If insert succeeded, we're done
+    if (newReservation && !insertError) {
       return { success: true, reservationId: newReservation.id, isUpdate: false };
     }
+    
+    // If insert failed due to unique constraint violation (ACTIVE reservation exists),
+    // update the existing ACTIVE reservation
+    if (insertError && insertError.code === '23505') {
+      // Find and update the existing ACTIVE reservation
+      const { data: existing, error: findError } = await supabase
+        .from('auction_bid_reservations')
+        .select('id')
+        .eq('guild_id', guildId)
+        .eq('auction_id', auctionId)
+        .eq('user_id', userId)
+        .eq('status', 'ACTIVE')
+        .maybeSingle();
+      
+      if (findError && findError.code !== 'PGRST116') throw findError;
+      
+      if (existing) {
+        // Update the existing ACTIVE reservation
+        const { data: updated, error: updateError } = await supabase
+          .from('auction_bid_reservations')
+          .update({
+            reserved_amount: amount,
+            token_identifier: tokenIdentifier,
+            created_at: new Date().toISOString()
+          })
+          .eq('id', existing.id)
+          .eq('status', 'ACTIVE')
+          .select()
+          .single();
+        
+        if (updateError) throw updateError;
+        return { success: true, reservationId: updated.id, isUpdate: true };
+      } else {
+        // This shouldn't happen, but if it does, throw the original error
+        throw insertError;
+      }
+    }
+    
+    // If it's a different error, throw it
+    if (insertError) throw insertError;
+    
+    // This shouldn't be reached, but just in case
+    throw new Error('Unexpected error in createOrUpdateReservation');
   } catch (error) {
     console.error('[DB] Error creating/updating reservation:', error);
     throw error;
