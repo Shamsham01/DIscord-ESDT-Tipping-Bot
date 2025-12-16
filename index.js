@@ -12091,6 +12091,61 @@ client.on('interactionCreate', async (interaction) => {
       
       await dbStakingPools.updateStakingPool(guildId, poolId, updates);
       
+      // Check if PAUSED pool should be unpaused after supply/reward updates
+      if (pool.status === 'PAUSED' && (updates.currentSupplyWei !== undefined || updates.rewardPerNftPerDayWei !== undefined)) {
+        // Get updated pool data
+        const updatedPool = await dbStakingPools.getStakingPool(guildId, poolId);
+        if (updatedPool) {
+          // Get all staked NFTs to calculate required supply
+          const stakedNFTs = await dbStakingPools.getAllStakedNFTs(guildId, poolId);
+          
+          if (stakedNFTs.length > 0) {
+            // Calculate total rewards needed
+            const rewardPerNftBN = new BigNumber(updatedPool.rewardPerNftPerDayWei);
+            const totalRewardsNeededBN = rewardPerNftBN.multipliedBy(stakedNFTs.length);
+            const currentSupplyBN = new BigNumber(updatedPool.currentSupplyWei);
+            
+            // Check if supply is now sufficient
+            const isLowSupply = currentSupplyBN.isLessThan(totalRewardsNeededBN);
+            
+            if (!isLowSupply) {
+              // Supply is sufficient, unpause the pool
+              await dbStakingPools.updateStakingPool(guildId, poolId, {
+                status: 'ACTIVE',
+                lowSupplyWarningAt: null,
+                autoCloseAt: null
+              });
+              
+              // Notify in thread if available
+              if (updatedPool.threadId) {
+                try {
+                  const channel = await client.channels.fetch(updatedPool.channelId);
+                  if (channel) {
+                    const thread = await channel.threads.cache.get(updatedPool.threadId) || await channel.threads.fetch(updatedPool.threadId);
+                    if (thread) {
+                      const creatorMention = updatedPool.creatorId ? `<@${updatedPool.creatorId}>` : updatedPool.creatorTag || 'Pool Creator';
+                      await thread.send(`✅ **Pool Unpaused**\n\n${creatorMention} - The staking pool has been automatically unpaused. Supply is now sufficient to cover the next day's rewards.\n\n**Current Supply:** ${currentSupplyBN.dividedBy(new BigNumber(10).pow(updatedPool.rewardTokenDecimals)).toString()} ${updatedPool.rewardTokenTicker}\n**Required for Next Day:** ${totalRewardsNeededBN.dividedBy(new BigNumber(10).pow(updatedPool.rewardTokenDecimals)).toString()} ${updatedPool.rewardTokenTicker}`);
+                    }
+                  }
+                } catch (threadError) {
+                  console.error('[STAKING] Error posting unpause notification to thread:', threadError.message);
+                }
+              }
+              
+              console.log(`[STAKING] Pool ${poolId} automatically unpaused after supply update`);
+            }
+          } else {
+            // No NFTs staked, can safely unpause
+            await dbStakingPools.updateStakingPool(guildId, poolId, {
+              status: 'ACTIVE',
+              lowSupplyWarningAt: null,
+              autoCloseAt: null
+            });
+            console.log(`[STAKING] Pool ${poolId} automatically unpaused (no NFTs staked)`);
+          }
+        }
+      }
+      
       // Update embed
       await updateStakingPoolEmbed(guildId, poolId);
       
