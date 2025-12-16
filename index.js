@@ -21115,16 +21115,19 @@ client.on('ready', async () => {
       console.log('[CLEANUP] Looking for items older than 1 day with statuses:');
       console.log('[CLEANUP]   Listings: CANCELLED, EXPIRED, SOLD');
       console.log('[CLEANUP]   Auctions: FINISHED, CANCELLED, EXPIRED');
+      console.log('[CLEANUP]   Staking Pools: CLOSED');
       
       const ONE_DAY_MS = 24 * 60 * 60 * 1000;
       const oneDayAgo = Date.now() - ONE_DAY_MS;
       const LISTING_STATUSES = ['CANCELLED', 'EXPIRED', 'SOLD'];
       const AUCTION_STATUSES = ['FINISHED', 'CANCELLED', 'EXPIRED'];
+      const STAKING_POOL_STATUSES = ['CLOSED'];
       
       console.log(`[CLEANUP] Cutoff time: ${new Date(oneDayAgo).toISOString()} (items created before this will be cleaned)`);
       
       let listingsDeleted = 0;
       let auctionsDeleted = 0;
+      let stakingPoolsDeleted = 0;
       let errors = 0;
       
       // Require supabase once for both listings and auctions cleanup
@@ -21394,12 +21397,135 @@ client.on('ready', async () => {
         console.error('[CLEANUP] Error cleaning up auctions:', error.message);
       }
       
-      if (listingsDeleted > 0 || auctionsDeleted > 0) {
-        console.log(`[CLEANUP] ✅ Cleanup complete: ${listingsDeleted} listing(s) and ${auctionsDeleted} auction(s) deleted`);
+      // Clean up old staking pools
+      try {
+        const { data: stakingPools, error: poolError } = await supabase
+          .from('staking_pools')
+          .select('pool_id, guild_id, message_id, channel_id, thread_id, status, pool_name, created_at')
+          .in('status', STAKING_POOL_STATUSES)
+          .lt('created_at', oneDayAgo)
+          .not('message_id', 'is', null)
+          .not('channel_id', 'is', null);
+        
+        if (poolError) {
+          console.error('[CLEANUP] Error querying staking pools:', poolError);
+        } else if (stakingPools && stakingPools.length > 0) {
+          console.log(`[CLEANUP] ✅ Found ${stakingPools.length} old staking pool(s) to clean up (older than 1 day)`);
+          console.log(`[CLEANUP] Staking pool details:`, stakingPools.map(p => ({
+            id: p.pool_id.substring(0, 30),
+            name: p.pool_name || 'Unnamed',
+            status: p.status,
+            created_days_ago: p.created_at ? Math.floor((Date.now() - p.created_at) / (24 * 60 * 60 * 1000)) : 'N/A'
+          })));
+          
+          for (const pool of stakingPools) {
+            try {
+              console.log(`[CLEANUP] Processing staking pool: ${pool.pool_name || pool.pool_id} (${pool.pool_id.substring(0, 20)}...)`);
+              console.log(`[CLEANUP]   Guild ID: ${pool.guild_id}, Channel ID: ${pool.channel_id}, Message ID: ${pool.message_id}, Thread ID: ${pool.thread_id || 'none'}`);
+              
+              const guild = await client.guilds.fetch(pool.guild_id).catch((err) => {
+                console.error(`[CLEANUP] Error fetching guild ${pool.guild_id}:`, err.message, err.code);
+                return null;
+              });
+              if (!guild) {
+                console.log(`[CLEANUP] ❌ Skipping staking pool ${pool.pool_id.substring(0, 20)}...: Guild ${pool.guild_id} not found or bot not in guild`);
+                continue;
+              }
+              console.log(`[CLEANUP] ✅ Found guild: ${guild.name} (${guild.id})`);
+              
+              const channel = await guild.channels.fetch(pool.channel_id).catch((err) => {
+                console.error(`[CLEANUP] Error fetching channel ${pool.channel_id}:`, err.message, err.code);
+                return null;
+              });
+              if (!channel) {
+                console.log(`[CLEANUP] ❌ Skipping staking pool ${pool.pool_id.substring(0, 20)}...: Channel ${pool.channel_id} not found in guild ${guild.name}`);
+                continue;
+              }
+              console.log(`[CLEANUP] ✅ Found channel: ${channel.name} (${channel.id}), Type: ${channel.type}`);
+              
+              // Check if it's a forum channel
+              const isForumChannel = channel.type === ChannelType.GuildForum;
+              
+              console.log(`[CLEANUP] Channel type: ${channel.type}, Is Forum: ${isForumChannel}`);
+              
+              if (isForumChannel && pool.thread_id) {
+                // For forum channels, the thread IS the post - delete the thread
+                try {
+                  console.log(`[CLEANUP] Attempting to fetch and delete forum thread: ${pool.thread_id}`);
+                  const thread = await channel.threads.fetch(pool.thread_id).catch((err) => {
+                    console.error(`[CLEANUP] Error fetching thread ${pool.thread_id}:`, err.message, err.code);
+                    return null;
+                  });
+                  if (thread) {
+                    await thread.delete();
+                    console.log(`[CLEANUP] ✅ Deleted forum post/thread: ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
+                    stakingPoolsDeleted++;
+                  } else {
+                    console.log(`[CLEANUP] ⚠️ Thread not found (may already be deleted): ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
+                  }
+                } catch (threadError) {
+                  if (threadError.code === 10003) {
+                    console.log(`[CLEANUP] ℹ️ Thread already deleted: ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
+                  } else {
+                    console.error(`[CLEANUP] ❌ Error deleting thread ${pool.pool_id}:`, threadError.message, threadError.code);
+                    errors++;
+                  }
+                }
+              } else {
+                // For regular channels, delete the message
+                try {
+                  console.log(`[CLEANUP] Attempting to fetch and delete message: ${pool.message_id}`);
+                  const message = await channel.messages.fetch(pool.message_id).catch((err) => {
+                    console.error(`[CLEANUP] Error fetching message ${pool.message_id}:`, err.message, err.code);
+                    return null;
+                  });
+                  if (message) {
+                    await message.delete();
+                    console.log(`[CLEANUP] ✅ Deleted staking pool message: ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
+                    stakingPoolsDeleted++;
+                  } else {
+                    console.log(`[CLEANUP] ⚠️ Message not found (may already be deleted): ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
+                  }
+                  
+                  // Also delete thread if it exists
+                  if (pool.thread_id) {
+                    console.log(`[CLEANUP] Attempting to delete thread: ${pool.thread_id}`);
+                    const thread = await channel.threads.fetch(pool.thread_id).catch(() => null);
+                    if (thread) {
+                      await thread.delete().catch((err) => {
+                        console.error(`[CLEANUP] Error deleting thread ${pool.thread_id}:`, err.message);
+                      });
+                    }
+                  }
+                } catch (msgError) {
+                  if (msgError.code === 10008) {
+                    console.log(`[CLEANUP] ℹ️ Message already deleted: ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
+                  } else {
+                    console.error(`[CLEANUP] ❌ Error deleting message ${pool.pool_id}:`, msgError.message, msgError.code);
+                    errors++;
+                  }
+                }
+              }
+              
+              await new Promise(resolve => setTimeout(resolve, 500));
+            } catch (error) {
+              console.error(`[CLEANUP] Error processing staking pool ${pool.pool_id}:`, error.message);
+              errors++;
+            }
+          }
+        } else {
+          console.log('[CLEANUP] ℹ️ No closed staking pools found older than 1 day');
+        }
+      } catch (error) {
+        console.error('[CLEANUP] Error cleaning up staking pools:', error.message);
+      }
+      
+      if (listingsDeleted > 0 || auctionsDeleted > 0 || stakingPoolsDeleted > 0) {
+        console.log(`[CLEANUP] ✅ Cleanup complete: ${listingsDeleted} listing(s), ${auctionsDeleted} auction(s), and ${stakingPoolsDeleted} staking pool(s) deleted`);
       } else if (errors > 0) {
         console.log(`[CLEANUP] ⚠️ Cleanup completed with ${errors} error(s)`);
       } else {
-        console.log(`[CLEANUP] ℹ️ No old embeds found to clean up (all listings/auctions are either active or less than 1 day old)`);
+        console.log(`[CLEANUP] ℹ️ No old embeds found to clean up (all listings/auctions/pools are either active or less than 1 day old)`);
       }
     } catch (error) {
       console.error('[CLEANUP] Error in cleanup task:', error.message);
