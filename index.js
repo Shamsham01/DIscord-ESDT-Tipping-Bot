@@ -21398,30 +21398,44 @@ client.on('ready', async () => {
       }
       
       // Clean up old staking pools
+      // Note: We use updated_at (when pool was closed) instead of created_at
+      // because a pool could be created long ago but closed recently
       try {
+        const oneDayAgoISO = new Date(oneDayAgo).toISOString();
         const { data: stakingPools, error: poolError } = await supabase
           .from('staking_pools')
-          .select('pool_id, guild_id, message_id, channel_id, thread_id, status, pool_name, created_at')
+          .select('pool_id, guild_id, message_id, channel_id, thread_id, status, pool_name, created_at, updated_at')
           .in('status', STAKING_POOL_STATUSES)
-          .lt('created_at', oneDayAgo)
+          .lt('updated_at', oneDayAgoISO)
           .not('message_id', 'is', null)
           .not('channel_id', 'is', null);
         
         if (poolError) {
           console.error('[CLEANUP] Error querying staking pools:', poolError);
         } else if (stakingPools && stakingPools.length > 0) {
-          console.log(`[CLEANUP] ✅ Found ${stakingPools.length} old staking pool(s) to clean up (older than 1 day)`);
-          console.log(`[CLEANUP] Staking pool details:`, stakingPools.map(p => ({
-            id: p.pool_id.substring(0, 30),
-            name: p.pool_name || 'Unnamed',
-            status: p.status,
-            created_days_ago: p.created_at ? Math.floor((Date.now() - p.created_at) / (24 * 60 * 60 * 1000)) : 'N/A'
-          })));
+          console.log(`[CLEANUP] ✅ Found ${stakingPools.length} old staking pool(s) to clean up (closed more than 1 day ago)`);
+          console.log(`[CLEANUP] Staking pool details:`, stakingPools.map(p => {
+            const updatedAt = p.updated_at ? new Date(p.updated_at).getTime() : null;
+            const closedDaysAgo = updatedAt ? Math.floor((Date.now() - updatedAt) / (24 * 60 * 60 * 1000)) : 'N/A';
+            return {
+              id: p.pool_id.substring(0, 30),
+              name: p.pool_name || 'Unnamed',
+              status: p.status,
+              closed_days_ago: closedDaysAgo,
+              updated_at: p.updated_at || 'N/A'
+            };
+          }));
           
           for (const pool of stakingPools) {
             try {
+              // Safety check: Only delete CLOSED pools
+              if (pool.status !== 'CLOSED') {
+                console.log(`[CLEANUP] ⚠️ SKIPPING staking pool ${pool.pool_id.substring(0, 20)}...: Status is '${pool.status}', expected 'CLOSED'`);
+                continue;
+              }
+              
               console.log(`[CLEANUP] Processing staking pool: ${pool.pool_name || pool.pool_id} (${pool.pool_id.substring(0, 20)}...)`);
-              console.log(`[CLEANUP]   Guild ID: ${pool.guild_id}, Channel ID: ${pool.channel_id}, Message ID: ${pool.message_id}, Thread ID: ${pool.thread_id || 'none'}`);
+              console.log(`[CLEANUP]   Status: ${pool.status}, Guild ID: ${pool.guild_id}, Channel ID: ${pool.channel_id}, Message ID: ${pool.message_id}, Thread ID: ${pool.thread_id || 'none'}`);
               
               const guild = await client.guilds.fetch(pool.guild_id).catch((err) => {
                 console.error(`[CLEANUP] Error fetching guild ${pool.guild_id}:`, err.message, err.code);
