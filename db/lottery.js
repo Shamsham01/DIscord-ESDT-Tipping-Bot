@@ -140,15 +140,31 @@ async function getActiveLotteries(guildId) {
 
 async function getAllLotteriesForDrawCheck() {
   try {
+    // Check for both LIVE lotteries that have expired AND PROCESSING lotteries that might be stuck
+    // PROCESSING lotteries older than 5 minutes are considered stuck and need to be retried
+    const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+    
     const { data, error } = await supabase
       .from('lotteries')
       .select('*')
-      .eq('status', 'LIVE')
+      .or(`status.eq.LIVE,status.eq.PROCESSING`)
       .lte('next_draw_time', Date.now());
     
     if (error) throw error;
     
-    return (data || []).map(row => ({
+    // Filter: LIVE lotteries that expired OR PROCESSING lotteries that are stuck (older than 5 min)
+    const lotteriesToProcess = (data || []).filter(row => {
+      if (row.status === 'LIVE') {
+        return true; // Process all expired LIVE lotteries
+      } else if (row.status === 'PROCESSING') {
+        // Process stuck PROCESSING lotteries (updated more than 5 minutes ago)
+        const updatedAt = new Date(row.updated_at).getTime();
+        return updatedAt < fiveMinutesAgo;
+      }
+      return false;
+    });
+    
+    return lotteriesToProcess.map(row => ({
       lotteryId: row.lottery_id,
       guildId: row.guild_id,
       winningNumbersCount: row.winning_numbers_count,
@@ -281,6 +297,7 @@ async function getTicketsByLottery(guildId, lotteryId) {
     let from = 0;
     const pageSize = 1000;
     let hasMore = true;
+    let totalFetched = 0;
     
     while (hasMore) {
       const { data, error } = await supabase
@@ -315,15 +332,23 @@ async function getTicketsByLottery(guildId, lotteryId) {
           };
         });
         
+        totalFetched += data.length;
+        
         // If we got less than pageSize, we've reached the end
         if (data.length < pageSize) {
           hasMore = false;
         } else {
           from += pageSize;
         }
+        
+        // Log pagination progress for large datasets
+        if (totalFetched % 2000 === 0 || data.length < pageSize) {
+          console.log(`[DB] Fetched ${totalFetched} tickets so far for lottery ${lotteryId}`);
+        }
       }
     }
     
+    console.log(`[DB] Total tickets fetched for lottery ${lotteryId}: ${totalFetched}`);
     return tickets;
   } catch (error) {
     console.error('[DB] Error getting tickets by lottery:', error);
@@ -439,6 +464,41 @@ async function getTicketsCountByUser(guildId, userId, tokenTicker = null, status
   }
 }
 
+async function getUniqueParticipantsCountByLottery(guildId, lotteryId, status = null) {
+  try {
+    // Efficiently count distinct users by only selecting user_id column
+    // This is much faster than fetching all ticket data (numbers, prices, etc.)
+    // The index on (lottery_id, guild_id) makes this query fast
+    let query = supabase
+      .from('lottery_tickets')
+      .select('user_id') // Only select user_id to minimize data transfer
+      .eq('guild_id', guildId)
+      .eq('lottery_id', lotteryId);
+    
+    if (status) {
+      query = query.eq('status', status);
+    }
+    
+    const { data, error } = await query;
+    
+    if (error) throw error;
+    
+    // Count distinct user_ids in JavaScript
+    // Supabase PostgREST doesn't support COUNT(DISTINCT) in the query builder,
+    // but selecting only user_id and counting distinct in JS is still much faster
+    // than fetching all ticket data (which was the previous approach)
+    // For lotteries with thousands of tickets, this is still efficient because:
+    // 1. We only transfer user_id (small string) instead of full ticket objects
+    // 2. The database index makes the query fast
+    // 3. JavaScript Set operations are very fast
+    const uniqueUsers = new Set((data || []).map(ticket => ticket.user_id));
+    return uniqueUsers.size;
+  } catch (error) {
+    console.error('[DB] Error getting unique participants count by lottery:', error);
+    throw error;
+  }
+}
+
 async function getWinningTickets(guildId, lotteryId, winningNumbers) {
   try {
     // Get all tickets for this lottery
@@ -526,6 +586,64 @@ async function updateTicketsForLottery(guildId, lotteryId, status, expiredAt = n
     return true;
   } catch (error) {
     console.error('[DB] Error updating tickets for lottery:', error);
+    throw error;
+  }
+}
+
+// Batch update tickets with matched numbers and winner status
+// This is much more efficient than updating tickets one by one
+async function batchUpdateTicketsStatus(guildId, lotteryId, ticketUpdates) {
+  try {
+    // ticketUpdates is an array of { ticketId, status, isWinner, matchedNumbers }
+    // We'll update in batches to avoid overwhelming the database
+    const batchSize = 100;
+    const batches = [];
+    
+    for (let i = 0; i < ticketUpdates.length; i += batchSize) {
+      batches.push(ticketUpdates.slice(i, i + batchSize));
+    }
+    
+    console.log(`[DB] Batch updating ${ticketUpdates.length} tickets in ${batches.length} batch(es)`);
+    
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      
+      // Update each ticket in the batch
+      // Note: Supabase doesn't support bulk updates with different values per row,
+      // so we still need to update individually, but we can do it in parallel batches
+      const updatePromises = batch.map(ticket => {
+        const updateData = {
+          status: ticket.status,
+          is_winner: ticket.isWinner,
+          matched_numbers: ticket.matchedNumbers,
+          expired_at: ticket.status === 'EXPIRED' ? Date.now() : null
+        };
+        
+        return supabase
+          .from('lottery_tickets')
+          .update(updateData)
+          .eq('guild_id', guildId)
+          .eq('lottery_id', lotteryId)
+          .eq('ticket_id', ticket.ticketId);
+      });
+      
+      const results = await Promise.all(updatePromises);
+      
+      // Check for errors
+      for (const result of results) {
+        if (result.error) {
+          throw result.error;
+        }
+      }
+      
+      if (batchIndex % 10 === 0 || batchIndex === batches.length - 1) {
+        console.log(`[DB] Processed batch ${batchIndex + 1}/${batches.length} (${(batchIndex + 1) * batchSize} tickets)`);
+      }
+    }
+    
+    return true;
+  } catch (error) {
+    console.error('[DB] Error batch updating tickets:', error);
     throw error;
   }
 }
@@ -654,9 +772,11 @@ module.exports = {
   getTicketsByUser,
   getTicketsCountByLottery,
   getTicketsCountByUser,
+  getUniqueParticipantsCountByLottery,
   getWinningTickets,
   updateTicketStatus,
   updateTicketsForLottery,
+  batchUpdateTicketsStatus,
   createWinner,
   getWinnersByLottery,
   getUserLotteryStats

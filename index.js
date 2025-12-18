@@ -18844,6 +18844,34 @@ client.on('interactionCreate', async (interaction) => {
 
 // LOTTERY HELPER FUNCTIONS
 
+// Debounce map for lottery embed updates to avoid updating on every ticket during bulk purchases
+const lotteryEmbedUpdateTimers = new Map();
+
+// Schedule a debounced lottery embed update
+// This prevents updating the embed on every single ticket when buying hundreds of tickets
+function scheduleLotteryEmbedUpdate(guildId, lotteryId) {
+  const key = `${guildId}:${lotteryId}`;
+  
+  // Clear existing timer if any
+  if (lotteryEmbedUpdateTimers.has(key)) {
+    clearTimeout(lotteryEmbedUpdateTimers.get(key));
+  }
+  
+  // Schedule update after 2 seconds of inactivity
+  // This means during rapid purchases, the embed will only update once after purchases stop
+  const timer = setTimeout(async () => {
+    try {
+      await updateLotteryEmbed(guildId, lotteryId);
+    } catch (error) {
+      console.error(`[LOTTERY] Error updating embed for ${lotteryId}:`, error.message);
+    } finally {
+      lotteryEmbedUpdateTimers.delete(key);
+    }
+  }, 2000); // 2 second debounce
+  
+  lotteryEmbedUpdateTimers.set(key, timer);
+}
+
 // Process ticket purchase
 async function processTicketPurchase(guildId, lotteryId, userId, userTag, numbers, lottery) {
   try {
@@ -18906,17 +18934,16 @@ async function processTicketPurchase(guildId, lotteryId, userId, userTag, number
       createdAt: Date.now()
     });
     
-    // Update lottery stats
-    // Use count query for ticket count (more efficient than fetching all tickets)
-    const ticketCount = await dbLottery.getTicketsCountByLottery(guildId, lotteryId);
+    // Update lottery stats efficiently
+    // CRITICAL: Only count LIVE tickets for active lotteries to match what will be processed in the draw
+    // This ensures the embed count matches the actual tickets that will be checked
+    const ticketCount = await dbLottery.getTicketsCountByLottery(guildId, lotteryId, 'LIVE');
     
-    // For unique participants, we still need to fetch tickets to get distinct user IDs
-    // But now getTicketsByLottery uses pagination so it will work correctly even with >1000 tickets
-    const tickets = await dbLottery.getTicketsByLottery(guildId, lotteryId);
-    const uniqueUsers = new Set(Object.values(tickets).map(t => t.userId));
-    const uniqueParticipants = uniqueUsers.size;
+    // Use efficient function to count unique participants (only fetches user_id, not all ticket data)
+    // Also filter to LIVE tickets only for consistency
+    const uniqueParticipants = await dbLottery.getUniqueParticipantsCountByLottery(guildId, lotteryId, 'LIVE');
     
-    // Calculate new prize pool
+    // Calculate new prize pool incrementally
     const newPrizePoolWei = new BigNumber(lottery.prizePoolWei).plus(new BigNumber(lottery.ticketPriceWei)).toString();
     
     await dbLottery.updateLottery(guildId, lotteryId, {
@@ -18925,8 +18952,8 @@ async function processTicketPurchase(guildId, lotteryId, userId, userTag, number
       prizePoolWei: newPrizePoolWei
     });
     
-    // Update embed
-    await updateLotteryEmbed(guildId, lotteryId);
+    // Update embed with debouncing to avoid updating on every ticket during bulk purchases
+    scheduleLotteryEmbedUpdate(guildId, lotteryId);
     
     // Post notification in thread
     try {
@@ -19102,45 +19129,96 @@ async function updateLotteryEmbed(guildId, lotteryId) {
 
 // Process lottery draw
 async function processLotteryDraw(guildId, lotteryId) {
+  const startTime = Date.now();
+  let lottery = null;
+  let winningNumbers = null;
+  
   try {
     console.log(`[LOTTERY] Processing draw for lottery ${lotteryId}`);
     
-    // CRITICAL: Atomically update status from LIVE to PROCESSING to prevent race conditions
-    // Only one process can successfully claim the lottery for processing
-    const lottery = await dbLottery.getLottery(guildId, lotteryId);
-    if (!lottery || lottery.status !== 'LIVE') {
-      console.log(`[LOTTERY] Lottery ${lotteryId} is not LIVE (status: ${lottery?.status || 'not found'}), skipping`);
+    // Get lottery - handle both LIVE and stuck PROCESSING lotteries
+    lottery = await dbLottery.getLottery(guildId, lotteryId);
+    if (!lottery) {
+      console.log(`[LOTTERY] Lottery ${lotteryId} not found, skipping`);
       return;
     }
     
-    // Atomically update status to PROCESSING - this prevents concurrent processing
-    // If another process already claimed it, this update will fail and we'll exit
-    const updateResult = await dbLottery.updateLotteryStatusAtomically(guildId, lotteryId, 'LIVE', 'PROCESSING');
-    if (!updateResult) {
-      console.log(`[LOTTERY] Lottery ${lotteryId} was already claimed by another process, skipping`);
+    // If already PROCESSING, check if it's stuck (should be handled by getAllLotteriesForDrawCheck filter)
+    if (lottery.status === 'PROCESSING') {
+      console.log(`[LOTTERY] Retrying stuck PROCESSING lottery ${lotteryId}`);
+      // If winning numbers already exist, use them; otherwise generate new ones
+      if (lottery.winningNumbers && Array.isArray(lottery.winningNumbers) && lottery.winningNumbers.length > 0) {
+        winningNumbers = lottery.winningNumbers;
+        console.log(`[LOTTERY] Using existing winning numbers: ${lotteryHelpers.formatNumbersForDisplay(winningNumbers)}`);
+      }
+      // Continue processing - the lottery is already in PROCESSING state
+    } else if (lottery.status !== 'LIVE') {
+      console.log(`[LOTTERY] Lottery ${lotteryId} is not LIVE or PROCESSING (status: ${lottery.status}), skipping`);
       return;
+    } else {
+      // Atomically update status from LIVE to PROCESSING to prevent race conditions
+      // Only one process can successfully claim the lottery for processing
+      const updateResult = await dbLottery.updateLotteryStatusAtomically(guildId, lotteryId, 'LIVE', 'PROCESSING');
+      if (!updateResult) {
+        console.log(`[LOTTERY] Lottery ${lotteryId} was already claimed by another process, skipping`);
+        return;
+      }
+      console.log(`[LOTTERY] Successfully claimed lottery ${lotteryId} for processing`);
     }
     
-    // Generate winning numbers
-    const winningNumbers = lotteryHelpers.generateRandomNumbers(lottery.winningNumbersCount, lottery.totalPoolNumbers);
+    // Generate winning numbers if not already set
+    if (!winningNumbers) {
+      winningNumbers = lotteryHelpers.generateRandomNumbers(lottery.winningNumbersCount, lottery.totalPoolNumbers);
+      console.log(`[LOTTERY] Generated winning numbers: ${lotteryHelpers.formatNumbersForDisplay(winningNumbers)}`);
+    }
     
     // Get all tickets for this lottery to calculate matched numbers
+    console.log(`[LOTTERY] Fetching tickets for lottery ${lotteryId}...`);
     const allTickets = await dbLottery.getTicketsByLottery(guildId, lotteryId);
+    const totalTicketsInDb = Object.keys(allTickets).length;
+    
+    // Count tickets by status for debugging
+    const ticketsByStatus = {};
+    Object.values(allTickets).forEach(t => {
+      ticketsByStatus[t.status] = (ticketsByStatus[t.status] || 0) + 1;
+    });
+    console.log(`[LOTTERY] Total tickets in DB: ${totalTicketsInDb}, Breakdown by status:`, ticketsByStatus);
+    console.log(`[LOTTERY] Lottery record shows totalTickets: ${lottery.totalTickets}`);
+    
     const ticketArray = Object.values(allTickets).filter(t => t.status === 'LIVE');
+    console.log(`[LOTTERY] Found ${ticketArray.length} LIVE tickets to process`);
+    
+    // Warn if there's a discrepancy
+    if (lottery.totalTickets && lottery.totalTickets !== ticketArray.length) {
+      console.warn(`[LOTTERY] ⚠️ DISCREPANCY: Lottery record shows ${lottery.totalTickets} tickets, but only ${ticketArray.length} are LIVE. Non-LIVE tickets: ${totalTicketsInDb - ticketArray.length}`);
+    }
+    
+    if (ticketArray.length === 0) {
+      console.log(`[LOTTERY] No LIVE tickets found for lottery ${lotteryId}, marking as EXPIRED`);
+      await dbLottery.updateLottery(guildId, lotteryId, {
+        winningNumbers: winningNumbers,
+        hasWinners: false,
+        status: 'EXPIRED'
+      });
+      return;
+    }
     
     // Calculate matched numbers for all tickets and find winners
+    // Use batch processing for better performance
+    console.log(`[LOTTERY] Calculating matches for ${ticketArray.length} tickets...`);
     const winningTickets = [];
-    for (const ticket of ticketArray) {
+    const ticketUpdates = [];
+    
+    for (let i = 0; i < ticketArray.length; i++) {
+      const ticket = ticketArray[i];
       const match = lotteryHelpers.checkTicketMatch(ticket.numbers, winningNumbers);
       
-      // Update ticket with matched numbers
-      await dbLottery.updateTicketStatus(
-        guildId, 
-        ticket.ticketId, 
-        match.isWinner ? 'WINNER' : 'EXPIRED', 
-        match.isWinner, 
-        match.matchedCount
-      );
+      ticketUpdates.push({
+        ticketId: ticket.ticketId,
+        status: match.isWinner ? 'WINNER' : 'EXPIRED',
+        isWinner: match.isWinner,
+        matchedNumbers: match.matchedCount
+      });
       
       if (match.isWinner) {
         winningTickets.push({
@@ -19148,7 +19226,17 @@ async function processLotteryDraw(guildId, lotteryId) {
           matchedNumbers: match.matchedCount
         });
       }
+      
+      // Log progress every 100 tickets
+      if ((i + 1) % 100 === 0 || i === ticketArray.length - 1) {
+        console.log(`[LOTTERY] Processed ${i + 1}/${ticketArray.length} tickets (${winningTickets.length} winners so far)`);
+      }
     }
+    
+    // Batch update all tickets at once (much faster than individual updates)
+    console.log(`[LOTTERY] Batch updating ${ticketUpdates.length} tickets...`);
+    await dbLottery.batchUpdateTicketsStatus(guildId, lotteryId, ticketUpdates);
+    console.log(`[LOTTERY] Successfully updated all tickets (${winningTickets.length} winners found)`);
     
     // Update lottery with winning numbers
     await dbLottery.updateLottery(guildId, lotteryId, {
@@ -19156,6 +19244,9 @@ async function processLotteryDraw(guildId, lotteryId) {
       hasWinners: winningTickets.length > 0,
       status: 'EXPIRED'
     });
+    
+    const processingTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`[LOTTERY] Completed processing lottery ${lotteryId} in ${processingTime}s (${ticketArray.length} tickets, ${winningTickets.length} winners)`);
     
     // CRITICAL: Re-check lottery status after update to ensure we have the latest state
     // This prevents creating rollovers if another process already found winners
@@ -19520,17 +19611,37 @@ async function processLotteryDraw(guildId, lotteryId) {
     }
     
   } catch (error) {
-    console.error(`[LOTTERY] Error processing draw for lottery ${lotteryId}:`, error.message);
+    const processingTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.error(`[LOTTERY] Error processing draw for lottery ${lotteryId} after ${processingTime}s:`, error.message);
+    console.error(`[LOTTERY] Error stack:`, error.stack);
+    
     // Ensure lottery status is updated even if there's an error
-    // If we successfully claimed it (status is PROCESSING), update to EXPIRED
+    // If we successfully claimed it (status is PROCESSING), try to recover
     try {
       const errorLottery = await dbLottery.getLottery(guildId, lotteryId);
       if (errorLottery && errorLottery.status === 'PROCESSING') {
-        await dbLottery.updateLottery(guildId, lotteryId, { status: 'EXPIRED' });
+        console.log(`[LOTTERY] Attempting to recover stuck PROCESSING lottery ${lotteryId}...`);
+        // If we have winning numbers generated, try to save them
+        if (winningNumbers && Array.isArray(winningNumbers) && winningNumbers.length > 0) {
+          await dbLottery.updateLottery(guildId, lotteryId, {
+            status: 'EXPIRED',
+            winningNumbers: winningNumbers,
+            hasWinners: false
+          });
+          console.log(`[LOTTERY] Recovered lottery ${lotteryId} - marked as EXPIRED with winning numbers`);
+        } else {
+          // No winning numbers yet, just mark as EXPIRED
+          await dbLottery.updateLottery(guildId, lotteryId, { status: 'EXPIRED' });
+          console.log(`[LOTTERY] Recovered lottery ${lotteryId} - marked as EXPIRED (no winning numbers)`);
+        }
       }
     } catch (cleanupError) {
       console.error(`[LOTTERY] Error cleaning up lottery status after error:`, cleanupError.message);
+      console.error(`[LOTTERY] Cleanup error stack:`, cleanupError.stack);
     }
+    
+    // Re-throw error so caller knows it failed
+    throw error;
   }
 }
 
@@ -20355,6 +20466,49 @@ async function updateStakingPoolEmbed(guildId, poolId) {
       // Normal case: fetch by message_id
       try {
         message = await channel.messages.fetch(pool.messageId);
+        
+        // CRITICAL SAFETY CHECK: Verify the message actually belongs to this pool
+        // This prevents updating the wrong embed if multiple pools share the same message_id
+        if (message && message.embeds && message.embeds.length > 0) {
+          const embedFooter = message.embeds[0].footer?.text || '';
+          const poolIdSubstring = poolId.substring(0, 8);
+          const messageBelongsToPool = embedFooter.includes(poolId) || embedFooter.includes(poolIdSubstring);
+          
+          if (!messageBelongsToPool) {
+            console.warn(`[STAKING] ⚠️ Message ${pool.messageId} does not belong to pool ${poolId}. Footer: ${embedFooter}`);
+            console.warn(`[STAKING] ⚠️ This may indicate multiple pools share the same message_id. Skipping update to prevent wrong embed modification.`);
+            
+            // Try to find the correct message for this pool
+            const poolIdSubstring2 = poolId.substring(0, 8);
+            const messages = await channel.messages.fetch({ limit: 50 });
+            const correctMessage = messages.find(msg => {
+              if (!msg.embeds || msg.embeds.length === 0) return false;
+              const embed = msg.embeds[0];
+              if (!embed.footer || !embed.footer.text) return false;
+              return embed.footer.text.includes(poolId) || embed.footer.text.includes(poolIdSubstring2);
+            });
+            
+            if (correctMessage) {
+              // CRITICAL: Verify this message doesn't belong to another pool
+              const correctMessageFooter = correctMessage.embeds[0].footer?.text || '';
+              const correctMessagePoolId = correctMessageFooter.match(/Pool ID: `?([^`\s]+)`?/)?.[1];
+              
+              if (correctMessagePoolId && correctMessagePoolId !== poolId) {
+                console.error(`[STAKING] ❌ CRITICAL: Found message ${correctMessage.id} but it belongs to different pool ${correctMessagePoolId}, not ${poolId}. Aborting to prevent wrong pool update.`);
+                return;
+              }
+              
+              console.log(`[STAKING] Found correct message ${correctMessage.id} for pool ${poolId}, updating database...`);
+              await dbStakingPools.updateStakingPool(guildId, poolId, {
+                messageId: correctMessage.id
+              });
+              message = correctMessage;
+            } else {
+              console.error(`[STAKING] Could not find correct message for pool ${poolId}. Aborting update.`);
+              return;
+            }
+          }
+        }
       } catch (fetchError) {
         // Message might have been deleted, try to find it
         console.warn(`[STAKING] Failed to fetch message ${pool.messageId} for pool ${poolId}, searching...`);
@@ -20370,6 +20524,15 @@ async function updateStakingPoolEmbed(guildId, poolId) {
         });
         
         if (message) {
+          // CRITICAL: Verify this message actually belongs to this pool
+          const messageFooter = message.embeds[0].footer?.text || '';
+          const messagePoolId = messageFooter.match(/Pool ID: `?([^`\s]+)`?/)?.[1];
+          
+          if (messagePoolId && messagePoolId !== poolId) {
+            console.error(`[STAKING] ❌ CRITICAL: Found message ${message.id} but it belongs to different pool ${messagePoolId}, not ${poolId}. Aborting to prevent wrong pool update.`);
+            return;
+          }
+          
           await dbStakingPools.updateStakingPool(guildId, poolId, {
             messageId: message.id
           });
@@ -21061,14 +21224,23 @@ client.on('ready', async () => {
       for (const [guildId, guild] of allGuilds) {
         try {
           // Update active pools (for USD price updates)
-          const activePools = await dbStakingPools.getStakingPoolsByGuild(guildId, 'ACTIVE');
-          for (const pool of activePools) {
+          const activePoolsList = await dbStakingPools.getStakingPoolsByGuild(guildId, 'ACTIVE');
+          for (const pool of activePoolsList) {
             await updateStakingPoolEmbed(guildId, pool.poolId);
           }
           
           // Update closed pools (to remove reward claimability message after 24h)
+          // CRITICAL: Skip pools that share message_id with ACTIVE pools to prevent conflicts
           const closedPools = await dbStakingPools.getStakingPoolsByGuild(guildId, 'CLOSED');
+          const activeMessageIds = new Set(activePoolsList.map(p => p.messageId).filter(Boolean));
+          
           for (const pool of closedPools) {
+            // Skip if this CLOSED pool shares message_id with an ACTIVE pool
+            if (pool.messageId && activeMessageIds.has(pool.messageId)) {
+              console.warn(`[STAKING] ⚠️ Skipping embed update for CLOSED pool ${pool.poolId.substring(0, 20)}... - shares message_id ${pool.messageId} with ACTIVE pool(s)`);
+              continue;
+            }
+            
             // Only update if pool had a distribution (to check if 24h passed)
             if (pool.lastRewardDistributionAt) {
               await updateStakingPoolEmbed(guildId, pool.poolId);
@@ -21432,6 +21604,25 @@ client.on('ready', async () => {
               if (pool.status !== 'CLOSED') {
                 console.log(`[CLEANUP] ⚠️ SKIPPING staking pool ${pool.pool_id.substring(0, 20)}...: Status is '${pool.status}', expected 'CLOSED'`);
                 continue;
+              }
+              
+              // CRITICAL SAFETY CHECK: Verify no ACTIVE pool uses this message_id
+              // This prevents deleting messages that belong to active pools
+              const { data: activePoolsWithSameMessage, error: checkError } = await supabase
+                .from('staking_pools')
+                .select('pool_id, status, pool_name')
+                .eq('guild_id', pool.guild_id)
+                .eq('message_id', pool.message_id)
+                .in('status', ['ACTIVE', 'PAUSED']);
+              
+              if (checkError) {
+                console.error(`[CLEANUP] Error checking for active pools with same message_id:`, checkError);
+                continue; // Skip this pool if we can't verify
+              }
+              
+              if (activePoolsWithSameMessage && activePoolsWithSameMessage.length > 0) {
+                console.log(`[CLEANUP] ⚠️ SKIPPING staking pool ${pool.pool_id.substring(0, 20)}...: Message ID ${pool.message_id} is also used by ACTIVE/PAUSED pool(s):`, activePoolsWithSameMessage.map(p => `${p.pool_name || p.pool_id} (${p.status})`));
+                continue; // Don't delete if an active pool uses this message
               }
               
               console.log(`[CLEANUP] Processing staking pool: ${pool.pool_name || pool.pool_id} (${pool.pool_id.substring(0, 20)}...)`);
@@ -23839,8 +24030,7 @@ async function sendNoWinnersNotification(guildId, matchId, losers, winningOutcom
     const noWinnersEmbed = new EmbedBuilder()
       .setTitle(`😱 ${match.home} vs ${match.away} - NO WINNERS!`)
       .setDescription(`**${match.compName}** • Game ID: \`${matchId}\``)
-      .addFields([
-        { name: '📊 Final Score', value: `${match.ftScore.home} - ${match.ftScore.away}`, inline: true },
+      .addFields([{ name: '📊 Final Score', value: `${match.ftScore.home} - ${match.ftScore.away}`, inline: true },
         { name: '🎯 Winning Outcome', value: winningOutcome, inline: true },
         { name: '💰 Total Pot', value: `${totalPotHuman} ${token.ticker}`, inline: true },
         { name: '❌ All Bets Lost', value: `${losers.length} player(s)`, inline: true },
