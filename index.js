@@ -2546,20 +2546,29 @@ async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, to
       // 1. HTTP response is OK AND
       // 2. We have a txHash (transaction was submitted) AND
       // 3. Either status is 'success' OR no explicit error message
-      // If we have a txHash and HTTP is OK, the transaction was submitted successfully
+      // CRITICAL: If status is provided and it's not 'success', consider it failed even if there's a txHash
       // The actual blockchain status can be checked via explorer
       const hasTxHash = !!txHash;
       const isHttpOk = response.ok || parsedResponse.success === true;
       const isStatusSuccess = txStatusString === 'success' || txStatusString === 'Success' || txStatusString === 'SUCCESS';
       const hasNoError = !errorMessage;
       
-      // Consider successful if: HTTP OK + has txHash + (status success OR no error)
-      const isApiSuccess = isHttpOk && hasTxHash && (isStatusSuccess || hasNoError);
+      // CRITICAL: Be more strict about success - require explicit success status if status is provided
+      // If status is provided and it's not 'success', consider it failed even if there's a txHash
+      // This prevents logging failed transactions as successful
+      let isApiSuccess = false;
+      if (txStatusString) {
+        // If status is explicitly provided, it must be 'success'
+        isApiSuccess = isHttpOk && hasTxHash && isStatusSuccess;
+      } else {
+        // If no status provided, use original logic (HTTP OK + has txHash + no error)
+        isApiSuccess = isHttpOk && hasTxHash && hasNoError;
+      }
       
       const result = {
         success: isApiSuccess,
         txHash: txHash,
-        errorMessage: errorMessage || (txStatusString && !isStatusSuccess && hasNoError ? `Transaction status: ${txStatusString}` : null),
+        errorMessage: errorMessage || (txStatusString && !isStatusSuccess ? `Transaction status: ${txStatusString}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status
       };
@@ -2569,7 +2578,7 @@ async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, to
       } else {
         console.error(`[WITHDRAW-NFT] API reported failure for NFT transfer: ${errorMessage || 'Unknown error'}`);
         if (txHash) {
-          console.log(`[WITHDRAW-NFT] Transaction hash was returned (${txHash}), but transaction failed (status: ${txStatus}).`);
+          console.log(`[WITHDRAW-NFT] Transaction hash was returned (${txHash}), but transaction failed (status: ${txStatusString || txStatus}).`);
         }
       }
       
@@ -9891,6 +9900,30 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         
+        // CRITICAL: Cancel all active listings for this NFT when it's withdrawn
+        try {
+          const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
+          const listingsForThisNFT = activeListings.filter(listing => 
+            listing.collection === collection && listing.nonce === nft.nonce
+          );
+          
+          if (listingsForThisNFT.length > 0) {
+            console.log(`[WITHDRAW-NFT] Cancelling ${listingsForThisNFT.length} active listing(s) for withdrawn NFT ${collection}#${nft.nonce}`);
+            for (const listing of listingsForThisNFT) {
+              await virtualAccountsNFT.updateListing(guildId, listing.listingId, { status: 'CANCELLED' });
+              // Update listing embed to show it's cancelled
+              try {
+                await updateNFTListingEmbed(guildId, listing.listingId);
+              } catch (embedError) {
+                console.error(`[WITHDRAW-NFT] Error updating listing embed for ${listing.listingId}:`, embedError.message);
+              }
+            }
+          }
+        } catch (listingError) {
+          console.error(`[WITHDRAW-NFT] Error cancelling listings for withdrawn NFT:`, listingError.message);
+          // Don't fail the withdrawal if listing cancellation fails, but log it
+        }
+        
         // Create transaction record (only if removal succeeded)
         const amountTextDesc = amount > 1 ? ` (${amount}x)` : '';
         // Get token_type from balance (most reliable source)
@@ -16770,19 +16803,87 @@ client.on('interactionCreate', async (interaction) => {
         null
       );
       
+      // CRITICAL: Verify seller still owns the NFT before transferring
+      // Double-check ownership right before transfer to prevent race conditions
+      const finalSellerNFT = await virtualAccountsNFT.getUserNFTBalance(guildId, listing.sellerId, listing.collection, listing.nonce);
+      if (!finalSellerNFT || (finalSellerNFT.amount || 1) < listingAmount) {
+        // Seller no longer owns the NFT - refund buyer and cancel listing
+        console.error(`[NFT-MARKETPLACE] CRITICAL: Seller no longer owns NFT ${listing.collection}#${listing.nonce} during purchase! Refunding buyer.`);
+        
+        // Refund buyer
+        await virtualAccounts.addFundsToAccount(
+          guildId,
+          interaction.user.id,
+          listing.priceTokenIdentifier,
+          listing.priceAmount,
+          null,
+          'marketplace_refund',
+          `Refund for failed purchase: ${listing.nftName || `${listing.collection}#${listing.nonce}`}`
+        );
+        
+        // Cancel listing
+        await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'CANCELLED' });
+        await updateNFTListingEmbed(guildId, listingId);
+        
+        await interaction.editReply({ 
+          content: `❌ **Purchase failed!**\n\nThe seller no longer owns this NFT. Your payment has been refunded and the listing has been cancelled.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
       // Transfer NFT/SFT with amount
-      await virtualAccountsNFT.transferNFTBetweenUsers(
-        guildId,
-        listing.sellerId,
-        interaction.user.id,
-        listing.collection,
-        listing.nonce,
-        {
-          tokenIdentifier: listing.priceTokenIdentifier,
-          amount: listing.priceAmount
-        },
-        listingAmount
-      );
+      try {
+        await virtualAccountsNFT.transferNFTBetweenUsers(
+          guildId,
+          listing.sellerId,
+          interaction.user.id,
+          listing.collection,
+          listing.nonce,
+          {
+            tokenIdentifier: listing.priceTokenIdentifier,
+            amount: listing.priceAmount
+          },
+          listingAmount
+        );
+      } catch (transferError) {
+        // NFT transfer failed - refund buyer and restore seller's payment
+        console.error(`[NFT-MARKETPLACE] CRITICAL: NFT transfer failed during purchase!`, {
+          listingId,
+          sellerId: listing.sellerId,
+          buyerId: interaction.user.id,
+          collection: listing.collection,
+          nonce: listing.nonce,
+          error: transferError.message
+        });
+        
+        // Refund buyer
+        await virtualAccounts.addFundsToAccount(
+          guildId,
+          interaction.user.id,
+          listing.priceTokenIdentifier,
+          listing.priceAmount,
+          null,
+          'marketplace_refund',
+          `Refund for failed purchase: ${listing.nftName || `${listing.collection}#${listing.nonce}`}`
+        );
+        
+        // Remove payment from seller (reverse the earlier addFundsToAccount)
+        await virtualAccounts.deductFundsFromAccount(
+          guildId,
+          listing.sellerId,
+          listing.priceTokenIdentifier,
+          listing.priceAmount,
+          `Refund: Purchase failed for ${listing.nftName || `${listing.collection}#${listing.nonce}`}`,
+          'marketplace_refund'
+        );
+        
+        await interaction.editReply({ 
+          content: `❌ **Purchase failed!**\n\n**Error:** ${transferError.message}\n\nYour payment has been refunded. Please try again or contact an administrator.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
       
       // Update listing status
       await virtualAccountsNFT.updateListing(guildId, listingId, { 
