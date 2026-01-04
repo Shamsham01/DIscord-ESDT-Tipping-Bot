@@ -51,6 +51,25 @@ async function getUserNFTBalance(guildId, userId, collection, nonce) {
   }
 }
 
+// Check if NFT with same identifier already exists for user (prevents duplicate identifiers)
+async function getUserNFTBalanceByIdentifier(guildId, userId, identifier) {
+  try {
+    const { data, error } = await supabase
+      .from('virtual_account_nft_balances')
+      .select('*')
+      .eq('guild_id', guildId)
+      .eq('user_id', userId)
+      .eq('identifier', identifier)
+      .maybeSingle(); // Use maybeSingle() to avoid error if no record found
+    
+    if (error && error.code !== 'PGRST116') throw error;
+    return data || null;
+  } catch (error) {
+    console.error('[DB] Error getting user NFT balance by identifier:', error);
+    throw error;
+  }
+}
+
 async function getUserCollections(guildId, userId) {
   try {
     const { data, error } = await supabase
@@ -83,37 +102,100 @@ async function addNFTToAccount(guildId, userId, collection, identifier, nonce, m
     const validTokenType = (tokenType === 'SFT' || tokenType === 'NFT') ? tokenType : 'NFT';
     const finalTokenType = validTokenType; // Use explicit type, no inference
 
-    // Check if record already exists
+    // CRITICAL: For NFTs, amount must always be 1
+    // If someone tries to add an NFT with amount > 1, that's an error
+    if (finalTokenType === 'NFT' && amountNum !== 1) {
+      console.warn(`[DB] ⚠️ Attempted to add NFT with amount ${amountNum} (should be 1). Correcting to 1.`);
+      // Don't throw error, just correct it
+    }
+    const finalAmount = finalTokenType === 'NFT' ? 1 : amountNum;
+
+    // CRITICAL: Check for duplicate identifier first (prevents same NFT being added twice with different collection/nonce)
+    // This is especially important for NFTs where identifier should be unique per user
+    const existingByIdentifier = await getUserNFTBalanceByIdentifier(guildId, userId, identifier);
+    if (existingByIdentifier && finalTokenType === 'NFT') {
+      // NFT with this identifier already exists - this is a duplicate
+      console.log(`[DB] ⚠️ Duplicate NFT identifier detected and skipped: ${identifier} for user ${userId}`);
+      // Return existing record without updating
+      return existingByIdentifier;
+    }
+
+    // Check if record already exists (by collection + nonce)
     const existing = await getUserNFTBalance(guildId, userId, collection, nonce);
     
     if (existing) {
-      // Update existing record: increment amount, preserve token_type (don't downgrade SFT to NFT)
-      const newAmount = (existing.amount || 1) + amountNum;
-      const existingTokenType = existing.token_type || 'NFT';
-      // If existing is SFT, keep it as SFT; if new is SFT, upgrade to SFT
-      const updatedTokenType = existingTokenType === 'SFT' || finalTokenType === 'SFT' ? 'SFT' : 'NFT';
+      // CRITICAL: Check if this is a duplicate NFT (same identifier)
+      // For NFTs, same collection + nonce should always have the same identifier
+      if (existing.identifier && existing.identifier !== identifier) {
+        // This is an error - same collection + nonce but different identifier
+        // This shouldn't happen, but if it does, log it and use the existing identifier
+        console.error(`[DB] ⚠️ Duplicate NFT detected: collection=${collection}, nonce=${nonce}, existing_identifier=${existing.identifier}, new_identifier=${identifier}. Using existing identifier.`);
+        // Use existing identifier to maintain consistency
+        identifier = existing.identifier;
+      }
       
-      const { data, error } = await supabase
-        .from('virtual_account_nft_balances')
-        .update({
-          amount: newAmount,
-          token_type: updatedTokenType,
-          nft_name: metadata.nft_name || existing.nft_name || null,
-          nft_image_url: metadata.nft_image_url || existing.nft_image_url || null,
-          metadata: metadata.metadata || existing.metadata || {},
-          updated_at: new Date().toISOString()
-        })
-        .eq('guild_id', guildId)
-        .eq('user_id', userId)
-        .eq('collection', collection)
-        .eq('nonce', nonce)
-        .select()
-        .single();
-      
-      if (error) throw error;
-      return data;
+      // For NFTs: If record exists with same identifier, it's a duplicate - skip it
+      // For SFTs: Increment the amount
+      if (finalTokenType === 'NFT') {
+        // NFT already exists - this is a duplicate deposit
+        // Check if identifier matches (it should, but verify)
+        if (existing.identifier === identifier) {
+          console.log(`[DB] ⚠️ Duplicate NFT deposit detected and skipped: ${identifier} (collection=${collection}, nonce=${nonce}) for user ${userId}`);
+          // Return existing record without updating
+          return existing;
+        } else {
+          // Identifier mismatch - this is an error state
+          // Update the identifier to match the new one (shouldn't happen, but handle it)
+          console.warn(`[DB] ⚠️ NFT identifier mismatch: existing=${existing.identifier}, new=${identifier}. Updating identifier.`);
+          const { data, error } = await supabase
+            .from('virtual_account_nft_balances')
+            .update({
+              identifier: identifier, // Update to new identifier
+              nft_name: metadata.nft_name || existing.nft_name || null,
+              nft_image_url: metadata.nft_image_url || existing.nft_image_url || null,
+              metadata: metadata.metadata || existing.metadata || {},
+              updated_at: new Date().toISOString()
+            })
+            .eq('guild_id', guildId)
+            .eq('user_id', userId)
+            .eq('collection', collection)
+            .eq('nonce', nonce)
+            .select()
+            .single();
+          
+          if (error) throw error;
+          return data;
+        }
+      } else {
+        // SFT: Increment amount
+        const existingTokenType = existing.token_type || 'NFT';
+        // If existing is SFT, keep it as SFT; if new is SFT, upgrade to SFT
+        const updatedTokenType = existingTokenType === 'SFT' || finalTokenType === 'SFT' ? 'SFT' : 'NFT';
+        const newAmount = (existing.amount || 1) + finalAmount;
+        
+        const { data, error } = await supabase
+          .from('virtual_account_nft_balances')
+          .update({
+            amount: newAmount,
+            token_type: updatedTokenType,
+            nft_name: metadata.nft_name || existing.nft_name || null,
+            nft_image_url: metadata.nft_image_url || existing.nft_image_url || null,
+            metadata: metadata.metadata || existing.metadata || {},
+            updated_at: new Date().toISOString()
+          })
+          .eq('guild_id', guildId)
+          .eq('user_id', userId)
+          .eq('collection', collection)
+          .eq('nonce', nonce)
+          .select()
+          .single();
+        
+        if (error) throw error;
+        return data;
+      }
     } else {
       // Insert new record
+      // CRITICAL: For NFTs, ensure amount is always 1
       const { data, error } = await supabase
         .from('virtual_account_nft_balances')
         .insert({
@@ -122,7 +204,7 @@ async function addNFTToAccount(guildId, userId, collection, identifier, nonce, m
           collection: collection,
           identifier: identifier,
           nonce: nonce,
-          amount: amountNum,
+          amount: finalAmount, // Use finalAmount (1 for NFTs, amountNum for SFTs)
           token_type: finalTokenType,
           nft_name: metadata.nft_name || null,
           nft_image_url: metadata.nft_image_url || null,
@@ -131,7 +213,26 @@ async function addNFTToAccount(guildId, userId, collection, identifier, nonce, m
         .select()
         .single();
       
-      if (error) throw error;
+      if (error) {
+        // Check if error is due to unique constraint violation
+        // This can happen if two transactions are processed simultaneously
+        if (error.code === '23505') { // PostgreSQL unique constraint violation
+          console.log(`[DB] ⚠️ Unique constraint violation for ${collection}#${nonce} - record was inserted by another process. Fetching existing record.`);
+          // Fetch the existing record
+          const existing = await getUserNFTBalance(guildId, userId, collection, nonce);
+          if (existing) {
+            // If it's an NFT, return existing (duplicate)
+            // If it's an SFT, increment amount
+            if (finalTokenType === 'NFT') {
+              return existing;
+            } else {
+              // SFT: Retry with increment
+              return await addNFTToAccount(guildId, userId, collection, identifier, nonce, metadata, amountNum, tokenType);
+            }
+          }
+        }
+        throw error;
+      }
       return data;
     }
   } catch (error) {
