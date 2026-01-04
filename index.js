@@ -2476,7 +2476,7 @@ async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, to
     console.log(`[WITHDRAW-NFT] API endpoint: ${fullEndpoint}`);
     
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
+    const timeoutId = setTimeout(() => controller.abort(), 90000);
     
     try {
       const response = await fetch(fullEndpoint, {
@@ -2578,8 +2578,8 @@ async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, to
       clearTimeout(timeoutId);
       
       if (fetchError.name === 'AbortError') {
-        console.error('[WITHDRAW-NFT] NFT transfer API request timed out after 60 seconds');
-        throw new Error('API request timed out after 60 seconds');
+        console.error('[WITHDRAW-NFT] NFT transfer API request timed out after 90 seconds');
+        throw new Error('API request timed out after 90 seconds');
       }
       throw fetchError;
     }
