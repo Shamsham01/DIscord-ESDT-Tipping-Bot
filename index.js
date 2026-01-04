@@ -9871,17 +9871,37 @@ client.on('interactionCreate', async (interaction) => {
       
       if (transferResult.success) {
         // Remove NFT/SFT from virtual account (handles partial removal)
-        await virtualAccountsNFT.removeNFTFromAccount(guildId, userId, collection, nft.nonce, amount);
+        // IMPORTANT: This must succeed before logging the transaction
+        try {
+          await virtualAccountsNFT.removeNFTFromAccount(guildId, userId, collection, nft.nonce, amount);
+        } catch (removeError) {
+          console.error(`[WITHDRAW-NFT] CRITICAL: Failed to remove NFT from account after successful transfer!`, {
+            userId,
+            collection,
+            nonce: nft.nonce,
+            amount,
+            txHash: transferResult.txHash,
+            error: removeError.message
+          });
+          // The NFT was transferred but balance wasn't updated - this is a critical error
+          await interaction.editReply({ 
+            content: `⚠️ **Withdrawal completed but balance update failed!**\n\n**Transaction Hash:** ${transferResult.txHash ? `\`${transferResult.txHash}\`` : 'N/A'}\n\n**Error:** ${removeError.message}\n\nPlease contact an administrator immediately. The NFT was transferred but your balance may not reflect the withdrawal.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
         
-        // Create transaction record
+        // Create transaction record (only if removal succeeded)
         const amountTextDesc = amount > 1 ? ` (${amount}x)` : '';
         // Get token_type from balance (most reliable source)
         const balanceTokenType = nft.token_type || tokenType;
+        // Use the full identifier from the NFT object, not just the collection
+        const nftIdentifier = nft.identifier || `${collection}-${String(nft.nonce).padStart(4, '0')}`;
         await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
           id: `withdraw_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
           type: 'withdraw',
           collection: collection,
-          identifier: collection,
+          identifier: nftIdentifier,
           nonce: nft.nonce,
           nft_name: nftDisplayName,
           amount: amount, // Store amount for SFTs
