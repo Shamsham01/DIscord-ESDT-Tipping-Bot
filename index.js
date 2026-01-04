@@ -13943,40 +13943,44 @@ client.on('interactionCreate', async (interaction) => {
         value: tag
       }));
       
-      // Filter cached choices by input if there's input
-      let filteredCached = cachedChoices;
-      if (focusedValue && focusedValue.length > 0) {
-        const lowerInput = focusedValue.toLowerCase();
-        filteredCached = cachedChoices.filter(choice =>
-          choice.name.toLowerCase().includes(lowerInput)
-        );
+      // If no input or minimal input, show cached members (up to 25)
+      if (!focusedValue || focusedValue.length === 0) {
+        console.log(`[AUTOCOMPLETE] No input - showing ${Math.min(cachedChoices.length, 25)} cached members`);
+        await safeRespond(interaction, cachedChoices.slice(0, 25));
+        return;
       }
       
-      // If we have enough cached results, use them and skip API calls
+      // If there's input, we need to search ALL users (cached + uncached)
+      const lowerInput = focusedValue.toLowerCase();
+      let filteredCached = cachedChoices.filter(choice =>
+        choice.name.toLowerCase().includes(lowerInput)
+      );
+      
+      // If we already have 25+ matches from cache, use them
       if (filteredCached.length >= 25) {
-        console.log(`[AUTOCOMPLETE] Using ${filteredCached.length} cached members (sufficient results)`);
+        console.log(`[AUTOCOMPLETE] Found ${filteredCached.length} matches in cache (sufficient)`);
         await safeRespond(interaction, filteredCached.slice(0, 25));
         return;
       }
       
-      // If we need more results, fetch uncached members (but limit API calls)
-      const remainingSlots = 25 - filteredCached.length;
-      const maxApiCalls = Math.min(uncachedUserIds.length, remainingSlots + 10); // Fetch a few extra for filtering
-      const usersToFetch = uncachedUserIds.slice(0, maxApiCalls);
+      // We need to fetch from API to search all users
+      // Fetch members in batches with timeout protection
+      const MAX_FETCHES = Math.min(uncachedUserIds.length, 50); // Fetch up to 50 members
+      const usersToFetch = uncachedUserIds.slice(0, MAX_FETCHES);
       
-      if (usersToFetch.length > 0 && (Date.now() - startTime) < TIMEOUT_MS - 500) {
-        console.log(`[AUTOCOMPLETE] Fetching ${usersToFetch.length} members from API`);
+      if (usersToFetch.length > 0 && (Date.now() - startTime) < TIMEOUT_MS - 800) {
+        console.log(`[AUTOCOMPLETE] Fetching ${usersToFetch.length} members from API to search for "${focusedValue}"`);
         
-        // Fetch members with timeout protection
+        // Fetch members with individual timeout protection
         const fetchPromises = usersToFetch.map(async (userId) => {
           try {
             const member = await Promise.race([
               guild.members.fetch(userId),
               new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Fetch timeout')), 1000)
+                setTimeout(() => reject(new Error('Fetch timeout')), 800)
               )
             ]).catch((error) => {
-              console.log(`[AUTOCOMPLETE] Failed to fetch member ${userId}: ${error.message}`);
+              // Silently fail - don't log every failure to reduce noise
               return null;
             });
             
@@ -13988,38 +13992,40 @@ client.on('interactionCreate', async (interaction) => {
             }
             return null;
           } catch (error) {
-            console.log(`[AUTOCOMPLETE] Error processing user ${userId}:`, error.message);
             return null;
           }
         });
         
-        // Wait for fetches but respect timeout
-        const fetchTimeout = new Promise((resolve) => 
-          setTimeout(() => resolve([]), TIMEOUT_MS - (Date.now() - startTime) - 200)
-        );
-        
-        const fetchedChoices = await Promise.race([
-          Promise.all(fetchPromises).then(results => results.filter(Boolean)),
-          fetchTimeout
-        ]);
-        
-        // Combine cached and fetched choices
-        const allChoices = [...filteredCached, ...fetchedChoices];
-        
-        // Filter by user input if there's input
-        let filtered = allChoices;
-        if (focusedValue && focusedValue.length > 0) {
-          const lowerInput = focusedValue.toLowerCase();
-          filtered = allChoices.filter(choice =>
+        // Wait for fetches but respect overall timeout
+        const remainingTime = TIMEOUT_MS - (Date.now() - startTime) - 300;
+        if (remainingTime > 0) {
+          const fetchTimeout = new Promise((resolve) => 
+            setTimeout(() => resolve([]), remainingTime)
+          );
+          
+          const fetchedChoices = await Promise.race([
+            Promise.all(fetchPromises).then(results => results.filter(Boolean)),
+            fetchTimeout
+          ]);
+          
+          // Combine cached and fetched choices
+          const allChoices = [...filteredCached, ...fetchedChoices];
+          
+          // Filter by user input
+          const filtered = allChoices.filter(choice =>
             choice.name.toLowerCase().includes(lowerInput)
           );
+          
+          console.log(`[AUTOCOMPLETE] Found ${filtered.length} matches (${filteredCached.length} cached, ${fetchedChoices.length} fetched)`);
+          await safeRespond(interaction, filtered.slice(0, 25));
+        } else {
+          // Timeout approaching, use cached results
+          console.log(`[AUTOCOMPLETE] Timeout approaching - using ${filteredCached.length} cached matches`);
+          await safeRespond(interaction, filteredCached.slice(0, 25));
         }
-        
-        console.log(`[AUTOCOMPLETE] Successfully processed ${filtered.length} users (${filteredCached.length} cached, ${fetchedChoices.length} fetched)`);
-        await safeRespond(interaction, filtered.slice(0, 25));
       } else {
-        // No API calls needed or timeout approaching, use cached results
-        console.log(`[AUTOCOMPLETE] Using ${filteredCached.length} cached members only`);
+        // No time for API calls or no uncached users, use cached results
+        console.log(`[AUTOCOMPLETE] Using ${filteredCached.length} cached matches only`);
         await safeRespond(interaction, filteredCached.slice(0, 25));
       }
     } catch (error) {
