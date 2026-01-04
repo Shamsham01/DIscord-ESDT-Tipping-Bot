@@ -13902,27 +13902,84 @@ client.on('interactionCreate', async (interaction) => {
 
   // USER AUTOCOMPLETE FOR DEBUG-USER
   if (interaction.commandName === 'debug-user' && interaction.options.getFocused(true).name === 'user-tag') {
+    const startTime = Date.now();
+    const TIMEOUT_MS = 2500; // Respond within 2.5 seconds to avoid timeout
+    
     try {
       const focusedValue = interaction.options.getFocused();
       const guild = interaction.guild;
       const guildId = interaction.guildId;
       
-      let choices = [];
       const userWallets = await getUserWallets(guildId);
-      // Increase limit to 100 users to ensure more users are available for autocomplete
-      const userWalletEntries = Object.entries(userWallets).slice(0, 100);
-      if (userWalletEntries.length > 0) {
-        console.log(`[AUTOCOMPLETE] Processing ${userWalletEntries.length} users for debug-user user-tag autocomplete`);
-        const walletUserPromises = userWalletEntries.map(async ([userId, wallet]) => {
+      const userWalletEntries = Object.entries(userWallets || {});
+      
+      if (userWalletEntries.length === 0) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      console.log(`[AUTOCOMPLETE] Processing ${userWalletEntries.length} users for debug-user user-tag autocomplete`);
+      
+      // Separate cached and uncached members
+      const cachedMembers = [];
+      const uncachedUserIds = [];
+      
+      for (const [userId] of userWalletEntries) {
+        const member = guild.members.cache.get(userId);
+        if (member) {
+          cachedMembers.push({
+            userId,
+            member,
+            tag: member.user.tag
+          });
+        } else {
+          uncachedUserIds.push(userId);
+        }
+      }
+      
+      // Process cached members first (fast)
+      const cachedChoices = cachedMembers.map(({ tag }) => ({
+        name: tag,
+        value: tag
+      }));
+      
+      // Filter cached choices by input if there's input
+      let filteredCached = cachedChoices;
+      if (focusedValue && focusedValue.length > 0) {
+        const lowerInput = focusedValue.toLowerCase();
+        filteredCached = cachedChoices.filter(choice =>
+          choice.name.toLowerCase().includes(lowerInput)
+        );
+      }
+      
+      // If we have enough cached results, use them and skip API calls
+      if (filteredCached.length >= 25) {
+        console.log(`[AUTOCOMPLETE] Using ${filteredCached.length} cached members (sufficient results)`);
+        await safeRespond(interaction, filteredCached.slice(0, 25));
+        return;
+      }
+      
+      // If we need more results, fetch uncached members (but limit API calls)
+      const remainingSlots = 25 - filteredCached.length;
+      const maxApiCalls = Math.min(uncachedUserIds.length, remainingSlots + 10); // Fetch a few extra for filtering
+      const usersToFetch = uncachedUserIds.slice(0, maxApiCalls);
+      
+      if (usersToFetch.length > 0 && (Date.now() - startTime) < TIMEOUT_MS - 500) {
+        console.log(`[AUTOCOMPLETE] Fetching ${usersToFetch.length} members from API`);
+        
+        // Fetch members with timeout protection
+        const fetchPromises = usersToFetch.map(async (userId) => {
           try {
-            let member = guild.members.cache.get(userId);
-            if (!member) {
-              console.log(`[AUTOCOMPLETE] Fetching member ${userId} from Discord API`);
-              member = await guild.members.fetch(userId).catch((error) => {
-                console.log(`[AUTOCOMPLETE] Failed to fetch member ${userId}:`, error.message);
-                return null;
-              });
-            }
+            const member = await Promise.race([
+              guild.members.fetch(userId),
+              new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Fetch timeout')), 1000)
+              )
+            ]).catch((error) => {
+              console.log(`[AUTOCOMPLETE] Failed to fetch member ${userId}: ${error.message}`);
+              return null;
+            });
+            
             if (member) {
               return {
                 name: member.user.tag,
@@ -13935,16 +13992,38 @@ client.on('interactionCreate', async (interaction) => {
             return null;
           }
         });
-        const walletUsers = (await Promise.all(walletUserPromises)).filter(Boolean);
-        console.log(`[AUTOCOMPLETE] Successfully processed ${walletUsers.length} users out of ${userWalletEntries.length}`);
-        choices = walletUsers;
+        
+        // Wait for fetches but respect timeout
+        const fetchTimeout = new Promise((resolve) => 
+          setTimeout(() => resolve([]), TIMEOUT_MS - (Date.now() - startTime) - 200)
+        );
+        
+        const fetchedChoices = await Promise.race([
+          Promise.all(fetchPromises).then(results => results.filter(Boolean)),
+          fetchTimeout
+        ]);
+        
+        // Combine cached and fetched choices
+        const allChoices = [...filteredCached, ...fetchedChoices];
+        
+        // Filter by user input if there's input
+        let filtered = allChoices;
+        if (focusedValue && focusedValue.length > 0) {
+          const lowerInput = focusedValue.toLowerCase();
+          filtered = allChoices.filter(choice =>
+            choice.name.toLowerCase().includes(lowerInput)
+          );
+        }
+        
+        console.log(`[AUTOCOMPLETE] Successfully processed ${filtered.length} users (${filteredCached.length} cached, ${fetchedChoices.length} fetched)`);
+        await safeRespond(interaction, filtered.slice(0, 25));
+      } else {
+        // No API calls needed or timeout approaching, use cached results
+        console.log(`[AUTOCOMPLETE] Using ${filteredCached.length} cached members only`);
+        await safeRespond(interaction, filteredCached.slice(0, 25));
       }
-      // Filter by user input
-      const filtered = choices.filter(choice =>
-        choice.name.toLowerCase().includes(focusedValue.toLowerCase())
-      );
-      await safeRespond(interaction, filtered.slice(0, 25));
     } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in debug-user autocomplete:', error);
       await safeRespond(interaction, []);
     }
     return;
