@@ -8179,10 +8179,49 @@ client.on('interactionCreate', async (interaction) => {
       const isPublic = interaction.options.getBoolean('public') || false;
       await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
       
-      const guildId = interaction.guildId;
+      let guildId = interaction.guildId;
       const userId = interaction.user.id;
       
       console.log(`[CHECK-BALANCE DEBUG] Guild ID: ${guildId}, User ID: ${userId}`);
+      
+      // If guildId is null (DM context), try to find user's guilds from database
+      if (!guildId) {
+        console.log(`[CHECK-BALANCE] Guild ID is null, searching for user's guilds...`);
+        const userGuilds = await virtualAccounts.getUserGuilds(userId);
+        if (userGuilds && userGuilds.length > 0) {
+          // Use the first guild found (or we could aggregate balances from all guilds)
+          guildId = userGuilds[0];
+          console.log(`[CHECK-BALANCE] Found ${userGuilds.length} guild(s) for user, using first: ${guildId}`);
+          if (userGuilds.length > 1) {
+            console.log(`[CHECK-BALANCE] User has balances in multiple guilds: ${userGuilds.join(', ')}`);
+          }
+        } else {
+          console.log(`[CHECK-BALANCE] No guilds found for user ${userId}`);
+        }
+      }
+      
+      // If still no guildId, we can't proceed
+      if (!guildId) {
+        const embed = new EmbedBuilder()
+          .setTitle('💰 Virtual Account Balance')
+          .setDescription('You have no tokens in your virtual account yet.')
+          .addFields([
+            { name: '💡 How to get started', value: 'Make a transfer to the Community Fund wallet address in a server where the bot is configured to top up your virtual account!', inline: false },
+            { name: '⚠️ Note', value: 'This command must be run in a server (not in DMs) or you must have a registered wallet with balances.', inline: false }
+          ])
+          .setColor('#FF9900')
+          .setThumbnail('https://i.ibb.co/bTmZbDK/Crypto-Wallet-Logo.png')
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        // Add debug info
+        embed.addFields([
+          { name: '🔍 Debug Info', value: `Guild ID: ${guildId || 'null'}\nUser ID: ${userId}`, inline: false }
+        ]);
+        
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
       
       // Update username for this user
       await virtualAccounts.updateUserUsername(guildId, userId, interaction.user.tag);
@@ -8434,8 +8473,45 @@ client.on('interactionCreate', async (interaction) => {
       const isPublic = interaction.options.getBoolean('public') || false;
       await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
       
-      const guildId = interaction.guildId;
+      let guildId = interaction.guildId;
       const userId = interaction.user.id;
+      
+      console.log(`[CHECK-BALANCE-NFT DEBUG] Guild ID: ${guildId}, User ID: ${userId}`);
+      
+      // If guildId is null (DM context), try to find user's guilds from database
+      if (!guildId) {
+        console.log(`[CHECK-BALANCE-NFT] Guild ID is null, searching for user's guilds...`);
+        const userGuilds = await virtualAccounts.getUserGuilds(userId);
+        if (userGuilds && userGuilds.length > 0) {
+          // Use the first guild found (or we could aggregate balances from all guilds)
+          guildId = userGuilds[0];
+          console.log(`[CHECK-BALANCE-NFT] Found ${userGuilds.length} guild(s) for user, using first: ${guildId}`);
+          if (userGuilds.length > 1) {
+            console.log(`[CHECK-BALANCE-NFT] User has balances in multiple guilds: ${userGuilds.join(', ')}`);
+          }
+        } else {
+          console.log(`[CHECK-BALANCE-NFT] No guilds found for user ${userId}`);
+        }
+      }
+      
+      // If still no guildId, we can't proceed
+      if (!guildId) {
+        const embed = new EmbedBuilder()
+          .setTitle('🖼️ NFT Virtual Account Balance')
+          .setDescription(collection 
+            ? `You have no NFTs in collection "${collection}" yet.`
+            : 'You have no NFTs in your virtual account yet.')
+          .addFields([
+            { name: '💡 How to get started', value: 'Send NFTs to the Community Fund wallet address in a server where the bot is configured to add them to your virtual account!', inline: false },
+            { name: '⚠️ Note', value: 'This command must be run in a server (not in DMs) or you must have a registered wallet with NFT balances.', inline: false }
+          ])
+          .setColor('#FF9900')
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
       
       // Get user's NFT balances
       const nftBalances = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collection || null);
@@ -9661,12 +9737,29 @@ client.on('interactionCreate', async (interaction) => {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       
-      const guildId = interaction.guildId;
+      let guildId = interaction.guildId;
       const userId = interaction.user.id;
       const collection = interaction.options.getString('collection');
       const nftName = interaction.options.getString('nft-name');
       const amountOption = interaction.options.getNumber('amount');
       const amount = amountOption && amountOption > 0 ? amountOption : 1;
+      
+      // If guildId is null (DM context), try to find user's guilds from database
+      if (!guildId) {
+        console.log(`[WITHDRAW-NFT] Guild ID is null, searching for user's guilds...`);
+        const userGuilds = await virtualAccounts.getUserGuilds(userId);
+        if (userGuilds && userGuilds.length > 0) {
+          // Use the first guild found
+          guildId = userGuilds[0];
+          console.log(`[WITHDRAW-NFT] Found ${userGuilds.length} guild(s) for user, using first: ${guildId}`);
+        } else {
+          await interaction.editReply({ 
+            content: `❌ **No guild context found!**\n\nThis command must be run in a server where you have registered your wallet, or you must have a registered wallet with NFT balances.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+      }
       
       // Validate amount
       if (amount <= 0 || !Number.isInteger(amount)) {
@@ -14475,10 +14568,26 @@ client.on('interactionCreate', async (interaction) => {
     try {
       console.log('[AUTOCOMPLETE] Collection autocomplete for command:', interaction.commandName);
       const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
+      let guildId = interaction.guildId;
       const userId = interaction.user.id;
       
       console.log('[AUTOCOMPLETE] Getting collections for user:', userId, 'guild:', guildId);
+      
+      // If guildId is null (DM context), try to find user's guilds from database
+      if (!guildId) {
+        console.log('[AUTOCOMPLETE] Guild ID is null, searching for user\'s guilds...');
+        const userGuilds = await virtualAccounts.getUserGuilds(userId);
+        if (userGuilds && userGuilds.length > 0) {
+          // Use the first guild found
+          guildId = userGuilds[0];
+          console.log(`[AUTOCOMPLETE] Found ${userGuilds.length} guild(s) for user, using first: ${guildId}`);
+        } else {
+          console.log(`[AUTOCOMPLETE] No guilds found for user ${userId}`);
+          await safeRespond(interaction, []);
+          return;
+        }
+      }
+      
       // Get user's collections
       const collections = await virtualAccountsNFT.getUserCollections(guildId, userId);
       console.log('[AUTOCOMPLETE] Found collections:', collections);
@@ -14503,13 +14612,28 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'sell-nft' && interaction.options.getFocused(true).name === 'nft-name') {
     try {
       const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
+      let guildId = interaction.guildId;
       const userId = interaction.user.id;
       const selectedCollection = interaction.options.getString('collection');
       
       if (!selectedCollection) {
         await safeRespond(interaction, []);
         return;
+      }
+      
+      // If guildId is null (DM context), try to find user's guilds from database
+      if (!guildId) {
+        console.log('[AUTOCOMPLETE] Guild ID is null for sell-nft nft-name, searching for user\'s guilds...');
+        const userGuilds = await virtualAccounts.getUserGuilds(userId);
+        if (userGuilds && userGuilds.length > 0) {
+          // Use the first guild found
+          guildId = userGuilds[0];
+          console.log(`[AUTOCOMPLETE] Found ${userGuilds.length} guild(s) for user, using first: ${guildId}`);
+        } else {
+          console.log(`[AUTOCOMPLETE] No guilds found for user ${userId}`);
+          await safeRespond(interaction, []);
+          return;
+        }
       }
       
       // Get user's NFTs in selected collection
@@ -14562,8 +14686,23 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'tip-virtual-nft' && interaction.options.getFocused(true).name === 'collection') {
     try {
       const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
+      let guildId = interaction.guildId;
       const userId = interaction.user.id;
+      
+      // If guildId is null (DM context), try to find user's guilds from database
+      if (!guildId) {
+        console.log('[AUTOCOMPLETE] Guild ID is null for tip-virtual-nft collection, searching for user\'s guilds...');
+        const userGuilds = await virtualAccounts.getUserGuilds(userId);
+        if (userGuilds && userGuilds.length > 0) {
+          // Use the first guild found
+          guildId = userGuilds[0];
+          console.log(`[AUTOCOMPLETE] Found ${userGuilds.length} guild(s) for user, using first: ${guildId}`);
+        } else {
+          console.log(`[AUTOCOMPLETE] No guilds found for user ${userId}`);
+          await safeRespond(interaction, []);
+          return;
+        }
+      }
       
       // Get user's collections
       const collections = await virtualAccountsNFT.getUserCollections(guildId, userId);
@@ -14587,13 +14726,28 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'show-my-nft' && interaction.options.getFocused(true).name === 'nft-name') {
     try {
       const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
+      let guildId = interaction.guildId;
       const userId = interaction.user.id;
       const selectedCollection = interaction.options.getString('collection');
       
       if (!selectedCollection) {
         await safeRespond(interaction, []);
         return;
+      }
+      
+      // If guildId is null (DM context), try to find user's guilds from database
+      if (!guildId) {
+        console.log('[AUTOCOMPLETE] Guild ID is null for show-my-nft nft-name, searching for user\'s guilds...');
+        const userGuilds = await virtualAccounts.getUserGuilds(userId);
+        if (userGuilds && userGuilds.length > 0) {
+          // Use the first guild found
+          guildId = userGuilds[0];
+          console.log(`[AUTOCOMPLETE] Found ${userGuilds.length} guild(s) for user, using first: ${guildId}`);
+        } else {
+          console.log(`[AUTOCOMPLETE] No guilds found for user ${userId}`);
+          await safeRespond(interaction, []);
+          return;
+        }
       }
       
       // Get user's NFTs in selected collection (include staked NFTs for viewing)
@@ -14639,13 +14793,28 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'tip-virtual-nft' && interaction.options.getFocused(true).name === 'nft-name') {
     try {
       const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
+      let guildId = interaction.guildId;
       const userId = interaction.user.id;
       const selectedCollection = interaction.options.getString('collection');
       
       if (!selectedCollection) {
         await safeRespond(interaction, []);
         return;
+      }
+      
+      // If guildId is null (DM context), try to find user's guilds from database
+      if (!guildId) {
+        console.log('[AUTOCOMPLETE] Guild ID is null for tip-virtual-nft nft-name, searching for user\'s guilds...');
+        const userGuilds = await virtualAccounts.getUserGuilds(userId);
+        if (userGuilds && userGuilds.length > 0) {
+          // Use the first guild found
+          guildId = userGuilds[0];
+          console.log(`[AUTOCOMPLETE] Found ${userGuilds.length} guild(s) for user, using first: ${guildId}`);
+        } else {
+          console.log(`[AUTOCOMPLETE] No guilds found for user ${userId}`);
+          await safeRespond(interaction, []);
+          return;
+        }
       }
       
       // Get user's NFTs in selected collection
@@ -14676,13 +14845,28 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.commandName === 'withdraw-nft' && interaction.options.getFocused(true).name === 'nft-name') {
     try {
       const focusedValue = interaction.options.getFocused();
-      const guildId = interaction.guildId;
+      let guildId = interaction.guildId;
       const userId = interaction.user.id;
       const selectedCollection = interaction.options.getString('collection');
       
       if (!selectedCollection) {
         await safeRespond(interaction, []);
         return;
+      }
+      
+      // If guildId is null (DM context), try to find user's guilds from database
+      if (!guildId) {
+        console.log('[AUTOCOMPLETE] Guild ID is null for nft-name, searching for user\'s guilds...');
+        const userGuilds = await virtualAccounts.getUserGuilds(userId);
+        if (userGuilds && userGuilds.length > 0) {
+          // Use the first guild found
+          guildId = userGuilds[0];
+          console.log(`[AUTOCOMPLETE] Found ${userGuilds.length} guild(s) for user, using first: ${guildId}`);
+        } else {
+          console.log(`[AUTOCOMPLETE] No guilds found for user ${userId}`);
+          await safeRespond(interaction, []);
+          return;
+        }
       }
       
       // Get user's NFTs in selected collection

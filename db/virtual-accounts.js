@@ -377,6 +377,41 @@ async function getAllVirtualAccountsWithBalances(guildId) {
   }
 }
 
+// Find all guilds where a user has a virtual account or balances
+async function getUserGuilds(userId) {
+  try {
+    // Query virtual_accounts table to find all guilds where user has an account
+    const { data, error } = await supabase
+      .from('virtual_accounts')
+      .select('guild_id')
+      .eq('user_id', userId);
+    
+    if (error) throw error;
+    
+    // Extract unique guild IDs
+    const guildIds = [...new Set((data || []).map(row => row.guild_id))];
+    
+    // Also check virtual_account_nft_balances for additional guilds
+    const { data: nftData, error: nftError } = await supabase
+      .from('virtual_account_nft_balances')
+      .select('guild_id')
+      .eq('user_id', userId);
+    
+    if (!nftError && nftData) {
+      nftData.forEach(row => {
+        if (!guildIds.includes(row.guild_id)) {
+          guildIds.push(row.guild_id);
+        }
+      });
+    }
+    
+    return guildIds;
+  } catch (error) {
+    console.error('[DB] Error finding user guilds:', error);
+    return [];
+  }
+}
+
 module.exports = {
   getUserAccount,
   getAccountBalance,
@@ -385,6 +420,7 @@ module.exports = {
   updateAccountBalance,
   addTransaction,
   getTransactionHistory,
-  getServerVirtualAccountsSummary
+  getServerVirtualAccountsSummary,
+  getUserGuilds
 };
 

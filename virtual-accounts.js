@@ -478,10 +478,21 @@ async function getAllVirtualAccountsWithBalances(guildId) {
 }
 
 // Export functions
+// Get all guilds where a user has a virtual account or balances
+async function getUserGuilds(userId) {
+  try {
+    return await dbVirtualAccounts.getUserGuilds(userId);
+  } catch (error) {
+    console.error('[VIRTUAL] Error getting user guilds:', error);
+    return [];
+  }
+}
+
 module.exports = {
   getUserAccount,
   getUserBalance,
   getAllUserBalances,
+  getUserGuilds,
   addFundsToAccount,
   deductFundsFromAccount,
   transferFundsBetweenUsers,
