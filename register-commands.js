@@ -922,11 +922,11 @@ const commands = [
     },
     {
         name: 'check-community-fund-balance',
-        description: 'Check Community Fund balances for withdrawals (Admin only)',
+        description: 'Check Community Fund balances for withdrawals. Automatically calculates mass withdraw costs (Admin only)',
         options: [
             {
                 name: 'transfers',
-                description: 'Number of transfers to check (default: 1)',
+                description: 'Number of transfers to check (default: 1). Also shows analysis for all mass withdraw transactions.',
                 type: ApplicationCommandOptionType.Integer,
                 required: false,
                 min_value: 1

@@ -10455,12 +10455,43 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guildId;
       const numberOfTransfers = interaction.options.getInteger('transfers') || 1;
       
-      // Check Community Fund balances
+      // Calculate total transactions needed for mass withdraws (ESDT + NFT/SFT)
+      const accountsWithBalances = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
+      let totalMassWithdrawTransactions = 0;
+      let esdtTransactionCount = 0;
+      let nftTransactionCount = 0;
+      
+      for (const account of accountsWithBalances) {
+        // Count ESDT token transactions
+        for (const [token, balance] of Object.entries(account.balances || {})) {
+          const balanceBN = new BigNumber(balance || '0');
+          if (balanceBN.isGreaterThan(0)) {
+            totalMassWithdrawTransactions++;
+            esdtTransactionCount++;
+          }
+        }
+        
+        // Count NFT/SFT transactions
+        if (account.nftBalances && account.nftBalances.length > 0) {
+          for (const nft of account.nftBalances) {
+            totalMassWithdrawTransactions++;
+            nftTransactionCount++;
+          }
+        }
+      }
+      
+      // Check Community Fund balances for specified number of transfers
       const balanceCheck = await checkCommunityFundBalances(guildId, numberOfTransfers);
+      
+      // Also check balances for ALL mass withdraw transactions
+      let massWithdrawBalanceCheck = null;
+      if (totalMassWithdrawTransactions > 0) {
+        massWithdrawBalanceCheck = await checkCommunityFundBalances(guildId, totalMassWithdrawTransactions);
+      }
       
       const embed = new EmbedBuilder()
         .setTitle(balanceCheck.sufficient ? '✅ Community Fund Balances Sufficient' : '❌ Community Fund Balances Insufficient')
-        .setDescription(`Balance check for **${numberOfTransfers}** transfer(s)`)
+        .setDescription(`Balance check for **${numberOfTransfers}** transfer(s)${totalMassWithdrawTransactions > 0 ? `\n\n📊 **Mass Withdraw Analysis:**\n• Total transactions needed: **${totalMassWithdrawTransactions}** (${esdtTransactionCount} ESDT + ${nftTransactionCount} NFT/SFT)\n• Accounts with balances: **${accountsWithBalances.length}**` : ''}`)
         .setColor(balanceCheck.sufficient ? 0x00FF00 : 0xFF0000)
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
@@ -10486,20 +10517,72 @@ client.on('interactionCreate', async (interaction) => {
       const requiredReward = parseFloat(balanceCheck.requiredReward || '0');
       const rewardStatus = new BigNumber(availableReward).isGreaterThanOrEqualTo(new BigNumber(requiredReward)) ? '✅ Sufficient' : '❌ Insufficient';
       
+      // Calculate how many transactions can be performed with current balances
+      const EGLD_PER_TX = 0.00025;
+      const USAGE_FEE_USD = 0.03;
+      const rewardPriceUsd = balanceCheck.rewardPriceUsd || 0;
+      const availableEgld = parseFloat(balanceCheck.egldBalance || '0');
+      
+      let maxTransactionsByEGLD = 0;
+      let maxTransactionsByREWARD = 0;
+      
+      if (EGLD_PER_TX > 0) {
+        maxTransactionsByEGLD = Math.floor(availableEgld / EGLD_PER_TX);
+      }
+      
+      if (rewardPriceUsd > 0 && availableReward > 0) {
+        const rewardPerTx = USAGE_FEE_USD / rewardPriceUsd;
+        if (rewardPerTx > 0) {
+          maxTransactionsByREWARD = Math.floor(availableReward / rewardPerTx);
+        }
+      }
+      
+      // The limiting factor is the smaller of the two
+      const maxTransactionsPossible = Math.min(maxTransactionsByEGLD, maxTransactionsByREWARD);
+      
       // Add simplified balance information
-      embed.addFields([
+      const fields = [
         { name: '💰 EGLD Balance', value: `${balanceCheck.egldBalance} EGLD`, inline: true },
         { name: '📊 Required EGLD', value: `${balanceCheck.requiredEgld} EGLD`, inline: true },
         { name: '✅ EGLD Status', value: egldStatus, inline: true },
         { name: '💼 REWARD Available', value: `${formatReward(balanceCheck.rewardBalanceAvailable)} REWARD`, inline: true },
         { name: '💵 Required REWARD', value: `${formatReward(Math.ceil(requiredReward * 100) / 100)} REWARD`, inline: true },
-        { name: '✅ REWARD Status', value: rewardStatus, inline: true },
+        { name: '✅ REWARD Status', value: rewardStatus, inline: true }
+      ];
+      
+      // Add mass withdraw analysis if there are balances
+      if (totalMassWithdrawTransactions > 0 && massWithdrawBalanceCheck) {
+        const massRequiredEgld = parseFloat(massWithdrawBalanceCheck.requiredEgld || '0');
+        const massRequiredReward = parseFloat(massWithdrawBalanceCheck.requiredReward || '0');
+        const massEgldStatus = new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(massRequiredEgld)) ? '✅ Sufficient' : '❌ Insufficient';
+        const massRewardStatus = new BigNumber(availableReward).isGreaterThanOrEqualTo(new BigNumber(massRequiredReward)) ? '✅ Sufficient' : '❌ Insufficient';
+        
+        fields.push(
+          { name: '━━━━━━━━━━━━━━━━━━━━', value: '**Mass Withdraw Analysis**', inline: false },
+          { name: '📊 Total Transactions Needed', value: `**${totalMassWithdrawTransactions}**\n• ${esdtTransactionCount} ESDT tokens\n• ${nftTransactionCount} NFT/SFT tokens`, inline: true },
+          { name: '💰 Required EGLD (All)', value: `${massRequiredEgld} EGLD`, inline: true },
+          { name: '✅ EGLD Status (All)', value: massEgldStatus, inline: true },
+          { name: '💵 Required REWARD (All)', value: `${formatReward(Math.ceil(massRequiredReward * 100) / 100)} REWARD`, inline: true },
+          { name: '✅ REWARD Status (All)', value: massRewardStatus, inline: true },
+          { name: '📈 Max Transactions Possible', value: `**${maxTransactionsPossible}** transactions\n• Limited by: ${maxTransactionsByEGLD < maxTransactionsByREWARD ? 'EGLD' : 'REWARD'}`, inline: true }
+        );
+      } else if (totalMassWithdrawTransactions === 0) {
+        fields.push(
+          { name: '📊 Mass Withdraw Status', value: '✅ No virtual account balances found\nNo mass withdraws needed.', inline: false }
+        );
+      }
+      
+      // Add detailed breakdown
+      fields.push(
+        { name: '━━━━━━━━━━━━━━━━━━━━', value: '**Balance Breakdown**', inline: false },
         { name: '💼 Total in Wallet (On-Chain)', value: `${formatReward(balanceCheck.rewardBalanceOnChain)} REWARD`, inline: false },
         { name: '📦 Total in Virtual Accounts', value: `${formatReward(totalInVirtualAccounts)} REWARD\n• Virtual Accounts: ${formatReward(virtualAccountReward)}\n• House Balance: ${formatReward(houseBalanceReward)}`, inline: false },
         { name: '📊 Difference', value: `${formatReward(difference)} REWARD`, inline: true },
         { name: '💵 1 Transfer Usage Fee', value: `${formatReward(Math.ceil(usageFeeReward * 100) / 100)} REWARD`, inline: true },
         { name: '⚠️ Needed to Perform Withdraw', value: `${formatReward(neededToWithdraw)} REWARD`, inline: true }
-      ]);
+      );
+      
+      embed.addFields(fields);
       
       // Add informational note about transferring REWARD if insufficient
       if (!balanceCheck.sufficient && balanceCheck.walletAddress && neededToWithdraw > 0) {
