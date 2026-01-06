@@ -10053,13 +10053,16 @@ client.on('interactionCreate', async (interaction) => {
       // Get server-wide virtual accounts summary
       const summary = await virtualAccounts.getServerVirtualAccountsSummary(guildId);
       
+      // Get NFT/SFT summary
+      const nftSummary = await virtualAccountsNFT.getServerNFTSummary(guildId);
+      
       const embed = new EmbedBuilder()
         .setTitle('🏦 Server Virtual Accounts Summary')
         .setDescription(`Virtual accounts overview for ${interaction.guild.name}`)
         .addFields([
           { name: '👥 Total Users', value: summary.totalUsers.toString(), inline: true },
           { name: '💰 Active Users', value: summary.activeUsers.toString(), inline: true },
-          { name: '📊 Total Balances', value: Object.keys(summary.totalBalances).length.toString(), inline: true }
+          { name: '📊 Total Token Types', value: Object.keys(summary.totalBalances).length.toString(), inline: true }
         ])
         .setColor('#00FF00')
         .setTimestamp()
@@ -10072,6 +10075,61 @@ client.on('interactionCreate', async (interaction) => {
           value: `**${total}** tokens`,
           inline: true
         });
+      }
+      
+      // Add NFT/SFT totals
+      if (nftSummary.totalNFTs > 0 || nftSummary.totalSFTs > 0) {
+        embed.addFields({ name: '\u200b', value: '**NFT/SFT Totals**', inline: false });
+        
+        if (nftSummary.totalNFTs > 0) {
+          embed.addFields({
+            name: '🖼️ Total NFTs',
+            value: `**${nftSummary.totalNFTs.toLocaleString()}** NFTs\n${nftSummary.nftCollectionCount} collection${nftSummary.nftCollectionCount !== 1 ? 's' : ''}`,
+            inline: true
+          });
+        }
+        
+        if (nftSummary.totalSFTs > 0) {
+          embed.addFields({
+            name: '🎫 Total SFTs',
+            value: `**${nftSummary.totalSFTs.toLocaleString()}** SFTs\n${nftSummary.sftCollectionCount} collection${nftSummary.sftCollectionCount !== 1 ? 's' : ''}`,
+            inline: true
+          });
+        }
+        
+        // Add collection breakdown if there are collections
+        const collectionEntries = Object.entries(nftSummary.collectionTotals);
+        if (collectionEntries.length > 0) {
+          embed.addFields({ name: '\u200b', value: '**Collection Breakdown**', inline: false });
+          
+          // Limit to first 10 collections to avoid embed field limit
+          const collectionsToShow = collectionEntries.slice(0, 10);
+          for (const [collection, totals] of collectionsToShow) {
+            const parts = [];
+            if (totals.nftCount > 0) {
+              parts.push(`${totals.nftCount} NFT${totals.nftCount !== 1 ? 's' : ''}`);
+            }
+            if (parseInt(totals.sftAmount, 10) > 0) {
+              parts.push(`${parseInt(totals.sftAmount, 10).toLocaleString()} SFT${parseInt(totals.sftAmount, 10) !== 1 ? 's' : ''}`);
+            }
+            
+            if (parts.length > 0) {
+              embed.addFields({
+                name: collection,
+                value: parts.join(' • '),
+                inline: true
+              });
+            }
+          }
+          
+          if (collectionEntries.length > 10) {
+            embed.addFields({
+              name: '\u200b',
+              value: `*...and ${collectionEntries.length - 10} more collection${collectionEntries.length - 10 !== 1 ? 's' : ''}*`,
+              inline: false
+            });
+          }
+        }
       }
       
       await interaction.editReply({ embeds: [embed] });

@@ -928,6 +928,74 @@ async function cleanupExpiredListings() {
   }
 }
 
+// Get server-wide NFT/SFT summary
+async function getServerNFTSummary(guildId) {
+  try {
+    const { data, error } = await supabase
+      .from('virtual_account_nft_balances')
+      .select('token_type, amount, collection')
+      .eq('guild_id', guildId);
+    
+    if (error) throw error;
+    
+    let totalNFTs = 0;
+    let totalSFTs = 0;
+    const nftCollections = new Set();
+    const sftCollections = new Set();
+    const collectionTotals = {}; // collection -> { nftCount: number, sftAmount: BigNumber }
+    
+    (data || []).forEach(row => {
+      const tokenType = row.token_type || 'NFT';
+      const amount = parseInt(row.amount || 1, 10);
+      const collection = row.collection;
+      
+      if (tokenType === 'SFT') {
+        totalSFTs += amount;
+        sftCollections.add(collection);
+        
+        if (!collectionTotals[collection]) {
+          collectionTotals[collection] = {
+            nftCount: 0,
+            sftAmount: new BigNumber(0)
+          };
+        }
+        collectionTotals[collection].sftAmount = collectionTotals[collection].sftAmount.plus(amount);
+      } else {
+        totalNFTs += 1; // Each NFT row counts as 1, regardless of amount field
+        nftCollections.add(collection);
+        
+        if (!collectionTotals[collection]) {
+          collectionTotals[collection] = {
+            nftCount: 0,
+            sftAmount: new BigNumber(0)
+          };
+        }
+        collectionTotals[collection].nftCount += 1;
+      }
+    });
+    
+    // Convert BigNumber values to strings for collection totals
+    const collectionTotalsStr = {};
+    for (const [collection, totals] of Object.entries(collectionTotals)) {
+      collectionTotalsStr[collection] = {
+        nftCount: totals.nftCount,
+        sftAmount: totals.sftAmount.toString()
+      };
+    }
+    
+    return {
+      totalNFTs,
+      totalSFTs,
+      nftCollectionCount: nftCollections.size,
+      sftCollectionCount: sftCollections.size,
+      collectionTotals: collectionTotalsStr
+    };
+  } catch (error) {
+    console.error('[DB] Error getting server NFT summary:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   // Balance Management
   getUserNFTBalances,
@@ -956,6 +1024,9 @@ module.exports = {
   getUserOffers,
   updateOffer,
   cleanupExpiredOffers,
-  cleanupExpiredListings
+  cleanupExpiredListings,
+  
+  // Server Summary
+  getServerNFTSummary
 };
 
