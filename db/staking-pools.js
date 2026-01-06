@@ -565,6 +565,97 @@ async function expireOldRewards() {
   }
 }
 
+// Expire rewards for distributions that are 24+ hours old, based on distribution time
+// This is more accurate than using reward creation time
+async function expireRewardsForOldDistributions() {
+  try {
+    const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
+    
+    // Get distributions that are 24+ hours old
+    const { data: oldDistributions, error: distError } = await supabase
+      .from('staking_pool_reward_distributions')
+      .select('distribution_id, guild_id, pool_id, distributed_at')
+      .lt('distributed_at', twentyFourHoursAgo);
+    
+    if (distError) throw distError;
+    
+    if (!oldDistributions || oldDistributions.length === 0) {
+      return { expiredCount: 0, poolsUpdated: [] };
+    }
+    
+    // Get all unclaimed, unexpired rewards for these distributions
+    const distributionIds = oldDistributions.map(d => d.distribution_id);
+    const { data: rewardsToExpire, error: rewardsError } = await supabase
+      .from('staking_pool_user_rewards')
+      .select('*')
+      .in('distribution_id', distributionIds)
+      .eq('claimed', false)
+      .eq('expired', false);
+    
+    if (rewardsError) throw rewardsError;
+    
+    if (!rewardsToExpire || rewardsToExpire.length === 0) {
+      return { expiredCount: 0, poolsUpdated: [] };
+    }
+    
+    // Group rewards by pool_id and guild_id to calculate totals
+    const poolRewards = {};
+    for (const reward of rewardsToExpire) {
+      const key = `${reward.guild_id}:${reward.pool_id}`;
+      if (!poolRewards[key]) {
+        poolRewards[key] = {
+          guildId: reward.guild_id,
+          poolId: reward.pool_id,
+          totalWei: new BigNumber('0')
+        };
+      }
+      poolRewards[key].totalWei = poolRewards[key].totalWei.plus(new BigNumber(reward.reward_amount_wei));
+    }
+    
+    // Mark rewards as expired
+    const rewardIds = rewardsToExpire.map(r => r.id);
+    const { error: updateError } = await supabase
+      .from('staking_pool_user_rewards')
+      .update({
+        expired: true
+      })
+      .in('id', rewardIds);
+    
+    if (updateError) throw updateError;
+    
+    // Return expired rewards to pool supply
+    const poolsUpdated = [];
+    for (const [key, poolData] of Object.entries(poolRewards)) {
+      try {
+        const pool = await getStakingPool(poolData.guildId, poolData.poolId);
+        if (pool) {
+          const currentSupplyBN = new BigNumber(pool.currentSupplyWei);
+          const newSupplyBN = currentSupplyBN.plus(poolData.totalWei);
+          
+          await updateStakingPool(poolData.guildId, poolData.poolId, {
+            currentSupplyWei: newSupplyBN.toString()
+          });
+          
+          poolsUpdated.push({
+            poolId: poolData.poolId,
+            guildId: poolData.guildId,
+            returnedWei: poolData.totalWei.toString()
+          });
+          
+          console.log(`[STAKING] Returned ${poolData.totalWei.dividedBy(new BigNumber(10).pow(pool.rewardTokenDecimals || 18)).toString()} ${pool.rewardTokenTicker} to pool ${poolData.poolId} from expired rewards (distribution-based expiration)`);
+        }
+      } catch (poolError) {
+        console.error(`[DB] Error returning expired rewards to pool ${poolData.poolId}:`, poolError);
+      }
+    }
+    
+    return { expiredCount: rewardsToExpire.length, poolsUpdated };
+  } catch (error) {
+    console.error('[DB] Error expiring rewards for old distributions:', error);
+    throw error;
+  }
+}
+
 async function getDistributionStats(guildId, poolId, distributionId) {
   try {
     // Get all rewards for this distribution
@@ -718,6 +809,7 @@ module.exports = {
   getUserUnclaimedRewards,
   claimUserReward,
   expireOldRewards,
+  expireRewardsForOldDistributions,
   getDistributionStats,
   getDistributionsForSummary,
   markDistributionSummaryPosted

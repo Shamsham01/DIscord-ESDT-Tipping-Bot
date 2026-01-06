@@ -20994,6 +20994,11 @@ async function processStakingPoolRewards(guildId, poolId) {
   try {
     console.log(`[STAKING] Processing rewards for pool ${poolId}`);
     
+    // IMPORTANT: Expire old rewards BEFORE processing new distribution
+    // This ensures unclaimed rewards from previous cycle are returned to pool supply
+    // before the new distribution deducts from it
+    await dbStakingPools.expireRewardsForOldDistributions();
+    
     const pool = await dbStakingPools.getStakingPool(guildId, poolId);
     if (!pool || pool.status !== 'ACTIVE') {
       return;
@@ -21153,6 +21158,11 @@ async function generateDistributionSummaries() {
       return;
     }
     
+    // First, expire any rewards that should be expired for these distributions
+    // This ensures the summary shows accurate expired counts
+    // Use distribution-based expiration for accuracy (based on distributed_at, not created_at)
+    await dbStakingPools.expireRewardsForOldDistributions();
+    
     for (const distribution of distributions) {
       try {
         const pool = await dbStakingPools.getStakingPool(distribution.guild_id, distribution.pool_id);
@@ -21161,7 +21171,7 @@ async function generateDistributionSummaries() {
           continue;
         }
         
-        // Get distribution statistics
+        // Get distribution statistics (after expiring old rewards)
         const stats = await dbStakingPools.getDistributionStats(
           distribution.guild_id,
           distribution.pool_id,
