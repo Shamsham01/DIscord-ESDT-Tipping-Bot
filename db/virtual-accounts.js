@@ -337,6 +337,7 @@ async function getServerVirtualAccountsSummary(guildId) {
 }
 
 // Get all virtual accounts with balances for a guild (for mass refund)
+// Includes both ESDT tokens and NFT/SFT tokens
 async function getAllVirtualAccountsWithBalances(guildId) {
   try {
     const { data, error } = await supabase
@@ -347,7 +348,9 @@ async function getAllVirtualAccountsWithBalances(guildId) {
     if (error) throw error;
     
     const accountsWithBalances = [];
+    const userIds = new Set();
     
+    // Process ESDT token balances
     (data || []).forEach(account => {
       const balances = account.balances || {};
       const userBalances = {};
@@ -362,15 +365,79 @@ async function getAllVirtualAccountsWithBalances(guildId) {
       }
       
       if (hasBalance) {
+        userIds.add(account.user_id);
         accountsWithBalances.push({
           userId: account.user_id,
           username: account.username,
-          balances: userBalances
+          balances: userBalances,
+          nftBalances: [] // Will be populated below
+        });
+      } else {
+        // Even if no ESDT balance, user might have NFT/SFT balances
+        userIds.add(account.user_id);
+        accountsWithBalances.push({
+          userId: account.user_id,
+          username: account.username,
+          balances: {},
+          nftBalances: []
         });
       }
     });
     
-    return accountsWithBalances;
+    // Get all NFT/SFT balances for this guild
+    const { data: nftBalances, error: nftError } = await supabase
+      .from('virtual_account_nft_balances')
+      .select('user_id, collection, identifier, nonce, amount, token_type, nft_name')
+      .eq('guild_id', guildId)
+      .eq('staked', false); // Only include non-staked NFTs/SFTs
+    
+    if (nftError) {
+      console.error('[DB] Error getting NFT balances for mass refund:', nftError);
+      // Continue without NFT balances rather than failing completely
+    } else {
+      // Group NFT balances by user_id
+      const nftBalancesByUser = {};
+      (nftBalances || []).forEach(nft => {
+        if (!nftBalancesByUser[nft.user_id]) {
+          nftBalancesByUser[nft.user_id] = [];
+        }
+        nftBalancesByUser[nft.user_id].push({
+          collection: nft.collection,
+          identifier: nft.identifier,
+          nonce: nft.nonce,
+          amount: nft.amount || 1,
+          tokenType: nft.token_type || 'NFT',
+          nftName: nft.nft_name
+        });
+      });
+      
+      // Add NFT balances to accounts
+      for (const account of accountsWithBalances) {
+        if (nftBalancesByUser[account.userId]) {
+          account.nftBalances = nftBalancesByUser[account.userId];
+        }
+      }
+      
+      // Add accounts that only have NFT balances (no ESDT balances)
+      for (const [userId, nfts] of Object.entries(nftBalancesByUser)) {
+        if (!userIds.has(userId)) {
+          // Get username from virtual_accounts or use placeholder
+          const accountData = data?.find(a => a.user_id === userId);
+          accountsWithBalances.push({
+            userId: userId,
+            username: accountData?.username || `User ${userId}`,
+            balances: {},
+            nftBalances: nfts
+          });
+        }
+      }
+    }
+    
+    // Filter out accounts with no balances at all
+    return accountsWithBalances.filter(account => 
+      Object.keys(account.balances || {}).length > 0 || 
+      (account.nftBalances && account.nftBalances.length > 0)
+    );
   } catch (error) {
     console.error('[DB] Error getting all virtual accounts with balances:', error);
     throw error;
