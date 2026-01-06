@@ -19583,50 +19583,49 @@ async function processLotteryDraw(guildId, lotteryId) {
       console.warn(`[LOTTERY] ⚠️ DISCREPANCY: Lottery record shows ${lottery.totalTickets} tickets, but only ${ticketArray.length} are LIVE. Non-LIVE tickets: ${totalTicketsInDb - ticketArray.length}`);
     }
     
-    if (ticketArray.length === 0) {
-      console.log(`[LOTTERY] No LIVE tickets found for lottery ${lotteryId}, marking as EXPIRED`);
-      await dbLottery.updateLottery(guildId, lotteryId, {
-        winningNumbers: winningNumbers,
-        hasWinners: false,
-        status: 'EXPIRED'
-      });
-      return;
-    }
-    
     // Calculate matched numbers for all tickets and find winners
     // Use batch processing for better performance
-    console.log(`[LOTTERY] Calculating matches for ${ticketArray.length} tickets...`);
     const winningTickets = [];
     const ticketUpdates = [];
     
-    for (let i = 0; i < ticketArray.length; i++) {
-      const ticket = ticketArray[i];
-      const match = lotteryHelpers.checkTicketMatch(ticket.numbers, winningNumbers);
+    if (ticketArray.length === 0) {
+      console.log(`[LOTTERY] No LIVE tickets found for lottery ${lotteryId}, will create rollover`);
+      // No tickets to process, but we still need to create a rollover
+      // winningTickets is already empty, so we'll proceed to rollover creation
+    } else {
+      console.log(`[LOTTERY] Calculating matches for ${ticketArray.length} tickets...`);
       
-      ticketUpdates.push({
-        ticketId: ticket.ticketId,
-        status: match.isWinner ? 'WINNER' : 'EXPIRED',
-        isWinner: match.isWinner,
-        matchedNumbers: match.matchedCount
-      });
-      
-      if (match.isWinner) {
-        winningTickets.push({
-          ...ticket,
+      for (let i = 0; i < ticketArray.length; i++) {
+        const ticket = ticketArray[i];
+        const match = lotteryHelpers.checkTicketMatch(ticket.numbers, winningNumbers);
+        
+        ticketUpdates.push({
+          ticketId: ticket.ticketId,
+          status: match.isWinner ? 'WINNER' : 'EXPIRED',
+          isWinner: match.isWinner,
           matchedNumbers: match.matchedCount
         });
+        
+        if (match.isWinner) {
+          winningTickets.push({
+            ...ticket,
+            matchedNumbers: match.matchedCount
+          });
+        }
+        
+        // Log progress every 100 tickets
+        if ((i + 1) % 100 === 0 || i === ticketArray.length - 1) {
+          console.log(`[LOTTERY] Processed ${i + 1}/${ticketArray.length} tickets (${winningTickets.length} winners so far)`);
+        }
       }
       
-      // Log progress every 100 tickets
-      if ((i + 1) % 100 === 0 || i === ticketArray.length - 1) {
-        console.log(`[LOTTERY] Processed ${i + 1}/${ticketArray.length} tickets (${winningTickets.length} winners so far)`);
+      // Batch update all tickets at once (much faster than individual updates)
+      if (ticketUpdates.length > 0) {
+        console.log(`[LOTTERY] Batch updating ${ticketUpdates.length} tickets...`);
+        await dbLottery.batchUpdateTicketsStatus(guildId, lotteryId, ticketUpdates);
+        console.log(`[LOTTERY] Successfully updated all tickets (${winningTickets.length} winners found)`);
       }
     }
-    
-    // Batch update all tickets at once (much faster than individual updates)
-    console.log(`[LOTTERY] Batch updating ${ticketUpdates.length} tickets...`);
-    await dbLottery.batchUpdateTicketsStatus(guildId, lotteryId, ticketUpdates);
-    console.log(`[LOTTERY] Successfully updated all tickets (${winningTickets.length} winners found)`);
     
     // Update lottery with winning numbers
     await dbLottery.updateLottery(guildId, lotteryId, {
