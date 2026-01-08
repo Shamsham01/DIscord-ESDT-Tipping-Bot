@@ -21602,7 +21602,9 @@ async function generateDistributionSummaries() {
     // First, expire any rewards that should be expired for these distributions
     // This ensures the summary shows accurate expired counts
     // Use distribution-based expiration for accuracy (based on distributed_at, not created_at)
-    await dbStakingPools.expireRewardsForOldDistributions();
+    // Pass the specific distribution IDs to expire rewards for distributions ready for summary (23+ hours old)
+    const distributionIds = distributions.map(d => d.distribution_id);
+    await dbStakingPools.expireRewardsForOldDistributions(distributionIds);
     
     for (const distribution of distributions) {
       try {

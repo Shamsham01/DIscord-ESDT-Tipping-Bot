@@ -567,15 +567,35 @@ async function expireOldRewards() {
 
 // Expire rewards for distributions that are 24+ hours old, based on distribution time
 // This is more accurate than using reward creation time
-async function expireRewardsForOldDistributions() {
+// Can optionally expire rewards for specific distribution IDs (for summary generation)
+async function expireRewardsForOldDistributions(specificDistributionIds = null) {
   try {
     const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
+    const twentyThreeHoursAgo = Date.now() - (23 * 60 * 60 * 1000); // For summary generation timing
     
-    // Get distributions that are 24+ hours old
-    const { data: oldDistributions, error: distError } = await supabase
-      .from('staking_pool_reward_distributions')
-      .select('distribution_id, guild_id, pool_id, distributed_at')
-      .lt('distributed_at', twentyFourHoursAgo);
+    let oldDistributions;
+    
+    if (specificDistributionIds && specificDistributionIds.length > 0) {
+      // If specific distribution IDs are provided (e.g., from summary generation),
+      // expire rewards for those distributions if they're at least 23 hours old
+      const { data, error: distError } = await supabase
+        .from('staking_pool_reward_distributions')
+        .select('distribution_id, guild_id, pool_id, distributed_at')
+        .in('distribution_id', specificDistributionIds)
+        .lt('distributed_at', twentyThreeHoursAgo);
+      
+      if (distError) throw distError;
+      oldDistributions = data || [];
+    } else {
+      // Default behavior: Get distributions that are 24+ hours old
+      const { data, error: distError } = await supabase
+        .from('staking_pool_reward_distributions')
+        .select('distribution_id, guild_id, pool_id, distributed_at')
+        .lt('distributed_at', twentyFourHoursAgo);
+      
+      if (distError) throw distError;
+      oldDistributions = data || [];
+    }
     
     if (distError) throw distError;
     
