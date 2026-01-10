@@ -630,8 +630,6 @@ async function expireRewardsForOldDistributions(specificDistributionIds = null) 
       oldDistributions = data || [];
     }
     
-    if (distError) throw distError;
-    
     if (!oldDistributions || oldDistributions.length === 0) {
       return { expiredCount: 0, poolsUpdated: [] };
     }
