@@ -3590,6 +3590,18 @@ client.on('interactionCreate', async (interaction) => {
       const transferResult = await transferESDT(recipientWallet, tokenIdentifier, amount, projectName, guildId);
       
       if (transferResult.success) {
+        // Fetch token USD price
+        let tokenPriceUsd = 0;
+        let usdValue = null;
+        try {
+          tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
+          if (tokenPriceUsd > 0) {
+            usdValue = new BigNumber(amount).multipliedBy(tokenPriceUsd).toFixed(2);
+          }
+        } catch (error) {
+          console.error(`[SEND-ESDT] Error fetching token price for ${tokenIdentifier}:`, error.message);
+        }
+        
         const explorerUrl = transferResult.txHash
           ? `https://explorer.multiversx.com/transactions/${transferResult.txHash}`
           : null;
@@ -3597,17 +3609,25 @@ client.on('interactionCreate', async (interaction) => {
           ? `[${transferResult.txHash}](${explorerUrl})`
           : 'Not available';
 
+        // Build embed fields
+        const embedFields = [
+          { name: 'Project Used', value: projectName, inline: true },
+          { name: 'Recipient Wallet', value: `\`${recipientWallet}\``, inline: false },
+          { name: 'Transaction Hash', value: txHashFieldValue, inline: false },
+          { name: 'Memo', value: memo, inline: false },
+          { name: 'Initiated By', value: `<@${interaction.user.id}>`, inline: true },
+          { name: 'Status', value: '✅ Success', inline: true }
+        ];
+        
+        // Add USD value field if available
+        if (usdValue) {
+          embedFields.push({ name: '💵 USD Value', value: `$${usdValue}`, inline: true });
+        }
+
         const successEmbed = new EmbedBuilder()
           .setTitle('ESDT Transfer Successful')
-          .setDescription(`Successfully sent **${amount} ${tokenTicker}** to ${targetUser ? `<@${targetUserId}>` : userTag}`)
-          .addFields([
-            { name: 'Project Used', value: projectName, inline: true },
-            { name: 'Recipient Wallet', value: `\`${recipientWallet}\``, inline: false },
-            { name: 'Transaction Hash', value: txHashFieldValue, inline: false },
-            { name: 'Memo', value: memo, inline: false },
-            { name: 'Initiated By', value: `<@${interaction.user.id}>`, inline: true },
-            { name: 'Status', value: '✅ Success', inline: true }
-          ])
+          .setDescription(`Successfully sent **${amount} ${tokenTicker}${usdValue ? ` (≈ $${usdValue})` : ''}** to ${targetUser ? `<@${targetUserId}>` : userTag}`)
+          .addFields(embedFields)
           .setColor(0x4d55dc)
           .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
           .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
@@ -3669,16 +3689,25 @@ client.on('interactionCreate', async (interaction) => {
         try {
           if (targetUser) {
             const projectLogoUrl = await getProjectLogoUrl(guildId, projectName);
+            
+            // Build DM embed fields
+            const dmEmbedFields = [
+              { name: 'Project Used', value: projectName, inline: true },
+              { name: 'Transaction Hash', value: txHashFieldValue, inline: false },
+              { name: 'Memo', value: memo, inline: false },
+              { name: 'Sender', value: `<@${interaction.user.id}>`, inline: true },
+              { name: 'Status', value: '✅ Success', inline: true }
+            ];
+            
+            // Add USD value field if available
+            if (usdValue) {
+              dmEmbedFields.push({ name: '💵 USD Value', value: `$${usdValue}`, inline: true });
+            }
+            
             const dmEmbed = new EmbedBuilder()
               .setTitle('You Received ESDT Tokens!')
-              .setDescription(`You have received **${amount} ${tokenTicker}** from an administrator.`)
-              .addFields([
-                { name: 'Project Used', value: projectName, inline: true },
-                { name: 'Transaction Hash', value: txHashFieldValue, inline: false },
-                { name: 'Memo', value: memo, inline: false },
-                { name: 'Sender', value: `<@${interaction.user.id}>`, inline: true },
-                { name: 'Status', value: '✅ Success', inline: true }
-              ])
+              .setDescription(`You have received **${amount} ${tokenTicker}${usdValue ? ` (≈ $${usdValue})` : ''}** from an administrator.`)
+              .addFields(dmEmbedFields)
               .setColor(0x4d55dc)
               .setThumbnail(projectLogoUrl)
               .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
@@ -11227,15 +11256,30 @@ client.on('interactionCreate', async (interaction) => {
       );
       
       if (transferResult.success) {
+        // Fetch token USD price
+        let tokenPriceUsd = 0;
+        let usdValue = null;
+        try {
+          tokenPriceUsd = await getTokenPriceUsd(tokenIdentifier);
+          if (tokenPriceUsd > 0) {
+            usdValue = new BigNumber(amountNum).multipliedBy(tokenPriceUsd).toFixed(2);
+          }
+        } catch (error) {
+          console.error(`[TIP-VIRTUAL-ESDT] Error fetching token price for ${tokenIdentifier}:`, error.message);
+        }
+        
+        // Build embed fields
+        const embedFields = [
+          { name: '💰 Amount', value: `${amountNum} ${tokenTicker}${usdValue ? ` (≈ $${usdValue})` : ''}`, inline: true },
+          { name: '📝 Memo', value: memo, inline: true },
+          { name: '💳 Your New Balance', value: `${transferResult.fromUserNewBalance} ${tokenTicker}`, inline: true },
+          { name: '🎯 Recipient New Balance', value: `${transferResult.toUserNewBalance} ${tokenTicker}`, inline: true }
+        ];
+        
         const embed = new EmbedBuilder()
           .setTitle('💸 Virtual Tip Sent!')
           .setDescription(`Successfully tipped **${amountNum} ${tokenTicker}** to ${targetUser ? `<@${targetUserId}>` : userTag}`)
-          .addFields([
-            { name: '💰 Amount', value: `${amountNum} ${tokenTicker}`, inline: true },
-            { name: '📝 Memo', value: memo, inline: true },
-            { name: '💳 Your New Balance', value: `${transferResult.fromUserNewBalance} ${tokenTicker}`, inline: true },
-            { name: '🎯 Recipient New Balance', value: `${transferResult.toUserNewBalance} ${tokenTicker}`, inline: true }
-          ])
+          .addFields(embedFields)
           .setColor('#00FF00')
           .setThumbnail('https://i.ibb.co/ZpXx9Wgt/ESDT-Tipping-Bot-Thumbnail.gif')
           .setTimestamp()
@@ -11250,14 +11294,17 @@ client.on('interactionCreate', async (interaction) => {
             const communityFundProjectName = getCommunityFundProjectName();
             const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
             
+            // Build recipient embed fields
+            const recipientEmbedFields = [
+              { name: '💰 Amount', value: `${amountNum} ${tokenTicker}${usdValue ? ` (≈ $${usdValue})` : ''}`, inline: true },
+              { name: '📝 Memo', value: memo, inline: true },
+              { name: '💳 Your New Balance', value: `${transferResult.toUserNewBalance} ${tokenTicker}`, inline: true }
+            ];
+            
             const recipientEmbed = new EmbedBuilder()
               .setTitle('💸 You Received a Virtual Tip!')
               .setDescription(`You received **${amountNum} ${tokenTicker}** from ${interaction.user.tag}`)
-              .addFields([
-                { name: '💰 Amount', value: `${amountNum} ${tokenTicker}`, inline: true },
-                { name: '📝 Memo', value: memo, inline: true },
-                { name: '💳 Your New Balance', value: `${transferResult.toUserNewBalance} ${tokenTicker}`, inline: true }
-              ])
+              .addFields(recipientEmbedFields)
               .setColor('#00FF00')
               .setThumbnail(projectLogoUrl)
               .setTimestamp()
