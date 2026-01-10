@@ -12697,10 +12697,18 @@ client.on('interactionCreate', async (interaction) => {
             
             if (!isLowSupply) {
               // Supply is sufficient, unpause the pool
+              // If nextRewardDistributionAt is in the past, set it to 24 hours from now
+              const now = Date.now();
+              let nextRewardDistributionAt = updatedPool.nextRewardDistributionAt;
+              if (!nextRewardDistributionAt || nextRewardDistributionAt <= now) {
+                nextRewardDistributionAt = now + (24 * 60 * 60 * 1000);
+              }
+              
               await dbStakingPools.updateStakingPool(guildId, poolId, {
                 status: 'ACTIVE',
                 lowSupplyWarningAt: null,
-                autoCloseAt: null
+                autoCloseAt: null,
+                nextRewardDistributionAt: nextRewardDistributionAt
               });
               
               // Notify in thread if available
@@ -12723,10 +12731,18 @@ client.on('interactionCreate', async (interaction) => {
             }
           } else {
             // No NFTs staked, can safely unpause
+            // If nextRewardDistributionAt is in the past, set it to 24 hours from now
+            const now = Date.now();
+            let nextRewardDistributionAt = updatedPool.nextRewardDistributionAt;
+            if (!nextRewardDistributionAt || nextRewardDistributionAt <= now) {
+              nextRewardDistributionAt = now + (24 * 60 * 60 * 1000);
+            }
+            
             await dbStakingPools.updateStakingPool(guildId, poolId, {
               status: 'ACTIVE',
               lowSupplyWarningAt: null,
-              autoCloseAt: null
+              autoCloseAt: null,
+              nextRewardDistributionAt: nextRewardDistributionAt
             });
             console.log(`[STAKING] Pool ${poolId} automatically unpaused (no NFTs staked)`);
           }
@@ -21548,10 +21564,18 @@ async function processStakingPoolRewards(guildId, poolId) {
       const warningAt = updatedPool.lowSupplyWarningAt || now;
       const autoCloseAt = updatedPool.autoCloseAt || (warningAt + (48 * 60 * 60 * 1000));
       
+      // If nextRewardDistributionAt is in the past, set it to 24 hours from now
+      // This ensures the countdown shows correctly when the pool is unpaused
+      let nextRewardDistributionAt = updatedPool.nextRewardDistributionAt;
+      if (!nextRewardDistributionAt || nextRewardDistributionAt <= now) {
+        nextRewardDistributionAt = now + (24 * 60 * 60 * 1000);
+      }
+      
       await dbStakingPools.updateStakingPool(guildId, poolId, {
         status: 'PAUSED',
         lowSupplyWarningAt: warningAt,
-        autoCloseAt: autoCloseAt
+        autoCloseAt: autoCloseAt,
+        nextRewardDistributionAt: nextRewardDistributionAt
       });
       
       // Post warning in thread
