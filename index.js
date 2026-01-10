@@ -17993,7 +17993,39 @@ client.on('interactionCreate', async (interaction) => {
       // Get balance before adding rewards
       const balanceBefore = await virtualAccounts.getUserBalance(guildId, userId, pool.rewardTokenIdentifier);
       
-      // Add rewards to user's virtual account
+      // Mark rewards as claimed FIRST (before adding funds)
+      // This prevents double-claiming if the process fails partway through
+      const claimedRewards = [];
+      for (const reward of unclaimedRewards) {
+        try {
+          const claimedReward = await dbStakingPools.claimUserReward(guildId, poolId, userId, reward.distribution_id);
+          claimedRewards.push(claimedReward);
+        } catch (claimError) {
+          // If claiming fails (e.g., already claimed), log and continue with others
+          console.error(`[STAKING] Error claiming reward ${reward.distribution_id}:`, claimError.message);
+          // Don't add funds for rewards that couldn't be claimed
+          const index = unclaimedRewards.indexOf(reward);
+          if (index > -1) {
+            unclaimedRewards.splice(index, 1);
+            // Recalculate total reward
+            totalRewardWei = new BigNumber('0');
+            for (const r of unclaimedRewards) {
+              totalRewardWei = totalRewardWei.plus(new BigNumber(r.reward_amount_wei));
+            }
+            totalRewardHuman = totalRewardWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+          }
+        }
+      }
+      
+      if (claimedRewards.length === 0) {
+        await interaction.editReply({ 
+          content: `❌ No rewards could be claimed. They may have already been claimed or expired.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Now add funds to user's virtual account (only for successfully claimed rewards)
       const addResult = await virtualAccounts.addFundsToAccount(
         guildId,
         userId,
@@ -18005,16 +18037,30 @@ client.on('interactionCreate', async (interaction) => {
       );
       
       if (!addResult.success) {
+        // CRITICAL: Funds weren't added, but rewards are marked as claimed
+        // We need to rollback the claim status
+        console.error(`[STAKING] CRITICAL: Failed to add funds after claiming rewards. Attempting rollback...`);
+        for (const reward of claimedRewards) {
+          try {
+            // Rollback: mark as unclaimed again
+            const supabase = require('./supabase-client');
+            await supabase
+              .from('staking_pool_user_rewards')
+              .update({
+                claimed: false,
+                claimed_at: null
+              })
+              .eq('id', reward.id);
+          } catch (rollbackError) {
+            console.error(`[STAKING] CRITICAL: Failed to rollback claim for reward ${reward.id}:`, rollbackError);
+          }
+        }
+        
         await interaction.editReply({ 
-          content: `❌ Failed to add rewards to your account: ${addResult.error}`, 
+          content: `❌ Failed to add rewards to your account: ${addResult.error}. The claim has been rolled back - please try again.`, 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
-      }
-      
-      // Mark all as claimed
-      for (const reward of unclaimedRewards) {
-        await dbStakingPools.claimUserReward(guildId, poolId, userId, reward.distribution_id);
       }
       
       // Get USD value
@@ -21196,16 +21242,31 @@ async function createStakingPoolEmbed(guildId, pool) {
     }
     embed.addFields({ name: '🎯 Trait Requirements', value: traitText, inline: false });
     
-    // Next Reward Distribution
-    const nextDist = new Date(pool.nextRewardDistributionAt);
-    const now = Date.now();
-    const timeUntil = nextDist.getTime() - now;
-    const hoursUntil = Math.floor(timeUntil / (1000 * 60 * 60));
-    const minutesUntil = Math.floor((timeUntil % (1000 * 60 * 60)) / (1000 * 60));
-    const countdownText = timeUntil > 0 
-      ? `${hoursUntil}h ${minutesUntil}m`
-      : 'Due now';
-    embed.addFields({ name: '⏰ Next Reward Distribution', value: countdownText, inline: true });
+    // Next Reward Distribution - Use Discord's live timestamp for countdown
+    if (pool.nextRewardDistributionAt) {
+      const nextDistTimestamp = Math.floor(pool.nextRewardDistributionAt / 1000);
+      const now = Date.now();
+      const timeUntil = pool.nextRewardDistributionAt - now;
+      
+      let countdownText;
+      if (timeUntil > 0) {
+        // Use Discord's relative timestamp for live countdown: <t:timestamp:R>
+        // This will show "in X hours" or "in X minutes" and update automatically
+        countdownText = `<t:${nextDistTimestamp}:R>`;
+      } else {
+        // Distribution is due - show absolute time and how overdue
+        const overdue = Math.abs(timeUntil);
+        const overdueMinutes = Math.floor(overdue / (1000 * 60));
+        if (overdueMinutes < 5) {
+          countdownText = `Due now (<t:${nextDistTimestamp}:f>)`;
+        } else {
+          countdownText = `Overdue by ${overdueMinutes}m (<t:${nextDistTimestamp}:f>)`;
+        }
+      }
+      embed.addFields({ name: '⏰ Next Reward Distribution', value: countdownText, inline: true });
+    } else {
+      embed.addFields({ name: '⏰ Next Reward Distribution', value: 'Not scheduled', inline: true });
+    }
     
     // Status
     let statusText = '🟢 Active';
@@ -21440,8 +21501,19 @@ async function processStakingPoolRewards(guildId, poolId) {
     // before the new distribution deducts from it
     await dbStakingPools.expireRewardsForOldDistributions();
     
+    // CRITICAL: Check if distribution is already in progress to prevent race conditions
+    // Use a distributed lock by checking if nextRewardDistributionAt is in the future
+    // (meaning a distribution just happened or is scheduled)
     const pool = await dbStakingPools.getStakingPool(guildId, poolId);
     if (!pool || pool.status !== 'ACTIVE') {
+      return;
+    }
+    
+    // Check if distribution was already processed (race condition protection)
+    // If nextRewardDistributionAt is more than 1 minute in the future, distribution likely already happened
+    const now = Date.now();
+    if (pool.nextRewardDistributionAt && pool.nextRewardDistributionAt > now + 60000) {
+      console.log(`[STAKING] Distribution for pool ${poolId} already processed (next distribution at ${new Date(pool.nextRewardDistributionAt).toISOString()})`);
       return;
     }
     
@@ -21457,20 +21529,24 @@ async function processStakingPoolRewards(guildId, poolId) {
       return;
     }
     
+    // Refetch pool to get updated supply after expiration
+    const updatedPool = await dbStakingPools.getStakingPool(guildId, poolId);
+    if (!updatedPool) {
+      console.error(`[STAKING] Pool ${poolId} not found after expiration`);
+      return;
+    }
+    
     // Calculate total rewards needed
-    const rewardPerNftBN = new BigNumber(pool.rewardPerNftPerDayWei);
+    const rewardPerNftBN = new BigNumber(updatedPool.rewardPerNftPerDayWei);
     const totalRewardsNeededBN = rewardPerNftBN.multipliedBy(stakedNFTs.length);
-    const currentSupplyBN = new BigNumber(pool.currentSupplyWei);
+    const currentSupplyBN = new BigNumber(updatedPool.currentSupplyWei);
     
-    // Check if supply is sufficient for next day
-    const requiredForNextDay = totalRewardsNeededBN;
-    const isLowSupply = currentSupplyBN.isLessThan(requiredForNextDay);
-    
-    if (isLowSupply) {
+    // CRITICAL: Check if supply is sufficient BEFORE creating any rewards
+    if (currentSupplyBN.isLessThan(totalRewardsNeededBN)) {
+      console.warn(`[STAKING] Insufficient supply for pool ${poolId}. Current: ${currentSupplyBN.toString()}, Required: ${totalRewardsNeededBN.toString()}`);
       // Pause pool and set warning
-      const now = Date.now();
-      const warningAt = pool.lowSupplyWarningAt || now;
-      const autoCloseAt = pool.autoCloseAt || (warningAt + (48 * 60 * 60 * 1000));
+      const warningAt = updatedPool.lowSupplyWarningAt || now;
+      const autoCloseAt = updatedPool.autoCloseAt || (warningAt + (48 * 60 * 60 * 1000));
       
       await dbStakingPools.updateStakingPool(guildId, poolId, {
         status: 'PAUSED',
@@ -21479,15 +21555,15 @@ async function processStakingPoolRewards(guildId, poolId) {
       });
       
       // Post warning in thread
-      if (pool.threadId) {
+      if (updatedPool.threadId) {
         try {
-          const channel = await client.channels.fetch(pool.channelId);
+          const channel = await client.channels.fetch(updatedPool.channelId);
           if (channel) {
-            const thread = await channel.threads.cache.get(pool.threadId) || await channel.threads.fetch(pool.threadId);
+            const thread = await channel.threads.cache.get(updatedPool.threadId) || await channel.threads.fetch(updatedPool.threadId);
             if (thread) {
-              const creatorMention = pool.creatorId ? `<@${pool.creatorId}>` : pool.creatorTag || 'Pool Creator';
+              const creatorMention = updatedPool.creatorId ? `<@${updatedPool.creatorId}>` : updatedPool.creatorTag || 'Pool Creator';
               const hoursUntilClose = Math.floor((autoCloseAt - now) / (1000 * 60 * 60));
-              await thread.send(`⚠️ **Low Supply Warning**\n\n${creatorMention} - The staking pool supply is running low and cannot cover the next day's rewards.\n\n**Current Supply:** ${new BigNumber(pool.currentSupplyWei).dividedBy(new BigNumber(10).pow(pool.rewardTokenDecimals)).toString()} ${pool.rewardTokenTicker}\n**Required for Next Day:** ${requiredForNextDay.dividedBy(new BigNumber(10).pow(pool.rewardTokenDecimals)).toString()} ${pool.rewardTokenTicker}\n\n⚠️ **Action Required:** Please top-up the pool or it will be automatically closed in ${hoursUntilClose} hours.`);
+              await thread.send(`⚠️ **Low Supply Warning**\n\n${creatorMention} - The staking pool supply is running low and cannot cover the next day's rewards.\n\n**Current Supply:** ${currentSupplyBN.dividedBy(new BigNumber(10).pow(updatedPool.rewardTokenDecimals || 18)).toString()} ${updatedPool.rewardTokenTicker}\n**Required for Next Day:** ${totalRewardsNeededBN.dividedBy(new BigNumber(10).pow(updatedPool.rewardTokenDecimals || 18)).toString()} ${updatedPool.rewardTokenTicker}\n\n⚠️ **Action Required:** Please top-up the pool or it will be automatically closed in ${hoursUntilClose} hours.`);
             }
           }
         } catch (threadError) {
@@ -21507,59 +21583,111 @@ async function processStakingPoolRewards(guildId, poolId) {
     }
     
     // Distribute rewards
-    const tokenPriceUsd = await getTokenPriceUsd(pool.rewardTokenIdentifier);
-    const tokenDecimals = pool.rewardTokenDecimals || 18;
+    const tokenPriceUsd = await getTokenPriceUsd(updatedPool.rewardTokenIdentifier);
+    const tokenDecimals = updatedPool.rewardTokenDecimals || 18;
     const distributionId = `dist_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const distributedAt = Date.now();
     const nextDistributionAt = distributedAt + (24 * 60 * 60 * 1000);
     
     let totalRewardsPaidBN = new BigNumber('0');
+    const createdRewards = []; // Track created rewards for rollback if needed
     
-    // Create user rewards
-    for (const [userId, nftCount] of Object.entries(userNFTCounts)) {
-      const userRewardBN = rewardPerNftBN.multipliedBy(nftCount);
-      totalRewardsPaidBN = totalRewardsPaidBN.plus(userRewardBN);
+    try {
+      // Create user rewards
+      for (const [userId, nftCount] of Object.entries(userNFTCounts)) {
+        const userRewardBN = rewardPerNftBN.multipliedBy(nftCount);
+        totalRewardsPaidBN = totalRewardsPaidBN.plus(userRewardBN);
+        
+        const rewardAmountUsd = tokenPriceUsd > 0 
+          ? new BigNumber(userRewardBN).dividedBy(new BigNumber(10).pow(tokenDecimals)).multipliedBy(tokenPriceUsd).toFixed(2)
+          : 0;
+        
+        const reward = await dbStakingPools.createUserReward(guildId, {
+          poolId: poolId,
+          userId: userId,
+          distributionId: distributionId,
+          nftsStakedCount: nftCount,
+          rewardAmountWei: userRewardBN.toString(),
+          rewardAmountUsd: parseFloat(rewardAmountUsd)
+        });
+        
+        createdRewards.push(reward);
+      }
       
-      const rewardAmountUsd = tokenPriceUsd > 0 
-        ? new BigNumber(userRewardBN).dividedBy(new BigNumber(10).pow(tokenDecimals)).multipliedBy(tokenPriceUsd).toFixed(2)
+      // Create distribution record
+      const totalRewardsPaidUsd = tokenPriceUsd > 0
+        ? new BigNumber(totalRewardsPaidBN).dividedBy(new BigNumber(10).pow(tokenDecimals)).multipliedBy(tokenPriceUsd).toFixed(2)
         : 0;
       
-      await dbStakingPools.createUserReward(guildId, {
-        poolId: poolId,
-        userId: userId,
-        distributionId: distributionId,
-        nftsStakedCount: nftCount,
-        rewardAmountWei: userRewardBN.toString(),
-        rewardAmountUsd: parseFloat(rewardAmountUsd)
+      // Update pool supply (deduct distributed rewards)
+      const newSupplyBN = currentSupplyBN.minus(totalRewardsPaidBN);
+      
+      await dbStakingPools.updateStakingPool(guildId, poolId, {
+        currentSupplyWei: newSupplyBN.toString(),
+        nextRewardDistributionAt: nextDistributionAt,
+        lastRewardDistributionAt: distributedAt
       });
+      
+      // Create distribution record
+      await dbStakingPools.createRewardDistribution(guildId, {
+        poolId: poolId,
+        distributionId: distributionId,
+        totalRewardsPaidWei: totalRewardsPaidBN.toString(),
+        totalRewardsPaidUsd: parseFloat(totalRewardsPaidUsd),
+        nftsStakedAtTime: stakedNFTs.length,
+        uniqueStakersAtTime: Object.keys(userNFTCounts).length,
+        distributedAt: distributedAt,
+        nextDistributionAt: nextDistributionAt,
+        threadId: updatedPool.threadId,
+        notificationMessageId: null // Will be set below
+      });
+      
+    } catch (distributionError) {
+      // CRITICAL: If distribution fails partway through, rollback created rewards
+      console.error(`[STAKING] CRITICAL: Distribution failed for pool ${poolId}. Rolling back created rewards...`, distributionError);
+      
+      if (createdRewards.length > 0) {
+        try {
+          const supabase = require('./supabase-client');
+          const rewardIds = createdRewards.map(r => r.id);
+          await supabase
+            .from('staking_pool_user_rewards')
+            .delete()
+            .in('id', rewardIds);
+          console.log(`[STAKING] Rolled back ${createdRewards.length} reward records`);
+        } catch (rollbackError) {
+          console.error(`[STAKING] CRITICAL: Failed to rollback rewards:`, rollbackError);
+        }
+      }
+      
+      // Re-throw to be caught by outer try-catch
+      throw distributionError;
     }
     
-    // Create distribution record
+    // Post notification to thread (outside try block so we have access to variables)
+    let notificationMessageId = null;
     const totalRewardsPaidUsd = tokenPriceUsd > 0
       ? new BigNumber(totalRewardsPaidBN).dividedBy(new BigNumber(10).pow(tokenDecimals)).multipliedBy(tokenPriceUsd).toFixed(2)
       : 0;
     
-    // Update pool supply
-    const newSupplyBN = currentSupplyBN.minus(totalRewardsPaidBN);
-    
-    await dbStakingPools.updateStakingPool(guildId, poolId, {
-      currentSupplyWei: newSupplyBN.toString(),
-      nextRewardDistributionAt: nextDistributionAt,
-      lastRewardDistributionAt: distributedAt
-    });
-    
-    // Create distribution record
-    let notificationMessageId = null;
-    if (pool.threadId) {
+    if (updatedPool.threadId) {
       try {
-        const channel = await client.channels.fetch(pool.channelId);
+        const channel = await client.channels.fetch(updatedPool.channelId);
         if (channel) {
-          const thread = await channel.threads.cache.get(pool.threadId) || await channel.threads.fetch(pool.threadId);
+          const thread = await channel.threads.cache.get(updatedPool.threadId) || await channel.threads.fetch(updatedPool.threadId);
           if (thread) {
             const totalRewardsHuman = totalRewardsPaidBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
             const totalRewardsUsdText = tokenPriceUsd > 0 ? ` (≈ $${totalRewardsPaidUsd})` : '';
-            const notification = await thread.send(`✅ **Reward Distribution Complete**\n\nTotal rewards paid: **${totalRewardsHuman} ${pool.rewardTokenTicker}${totalRewardsUsdText}**\n\nUsers can now claim their rewards using the "Claim Rewards" button.`);
+            const notification = await thread.send(`✅ **Reward Distribution Complete**\n\nTotal rewards paid: **${totalRewardsHuman} ${updatedPool.rewardTokenTicker}${totalRewardsUsdText}**\n\nUsers can now claim their rewards using the "Claim Rewards" button.`);
             notificationMessageId = notification.id;
+            
+            // Update distribution record with notification message ID
+            const supabase = require('./supabase-client');
+            await supabase
+              .from('staking_pool_reward_distributions')
+              .update({ notification_message_id: notificationMessageId })
+              .eq('distribution_id', distributionId)
+              .eq('guild_id', guildId);
           }
         }
       } catch (threadError) {
@@ -21567,23 +21695,12 @@ async function processStakingPoolRewards(guildId, poolId) {
       }
     }
     
-    await dbStakingPools.createRewardDistribution(guildId, {
-      poolId: poolId,
-      distributionId: distributionId,
-      totalRewardsPaidWei: totalRewardsPaidBN.toString(),
-      totalRewardsPaidUsd: parseFloat(totalRewardsPaidUsd),
-      nftsStakedAtTime: stakedNFTs.length,
-      uniqueStakersAtTime: Object.keys(userNFTCounts).length,
-      distributedAt: distributedAt,
-      nextDistributionAt: nextDistributionAt,
-      threadId: pool.threadId,
-      notificationMessageId: notificationMessageId
-    });
+    // Distribution record already created in try block above
     
     // Update embed
     await updateStakingPoolEmbed(guildId, poolId);
     
-    console.log(`[STAKING] Rewards distributed for pool ${poolId}: ${totalRewardsPaidBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString()} ${pool.rewardTokenTicker}`);
+    console.log(`[STAKING] Rewards distributed for pool ${poolId}: ${totalRewardsPaidBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString()} ${updatedPool.rewardTokenTicker}`);
     
   } catch (error) {
     console.error(`[STAKING] Error processing rewards for pool ${poolId}:`, error.message);

@@ -467,6 +467,31 @@ async function getUserUnclaimedRewards(guildId, poolId, userId) {
 
 async function claimUserReward(guildId, poolId, userId, distributionId) {
   try {
+    // First, check if reward exists and is not already claimed or expired
+    const { data: existingReward, error: checkError } = await supabase
+      .from('staking_pool_user_rewards')
+      .select('*')
+      .eq('pool_id', poolId)
+      .eq('guild_id', guildId)
+      .eq('user_id', userId)
+      .eq('distribution_id', distributionId)
+      .single();
+    
+    if (checkError) throw checkError;
+    
+    if (!existingReward) {
+      throw new Error('Reward not found');
+    }
+    
+    if (existingReward.claimed) {
+      throw new Error('Reward already claimed');
+    }
+    
+    if (existingReward.expired) {
+      throw new Error('Reward has expired');
+    }
+    
+    // Now update to mark as claimed (only if not already claimed/expired)
     const { data, error } = await supabase
       .from('staking_pool_user_rewards')
       .update({
@@ -477,10 +502,18 @@ async function claimUserReward(guildId, poolId, userId, distributionId) {
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .eq('distribution_id', distributionId)
+      .eq('claimed', false)
+      .eq('expired', false)
       .select()
       .single();
     
     if (error) throw error;
+    
+    // If no rows were updated, it means the reward was claimed/expired between check and update
+    if (!data) {
+      throw new Error('Reward was already claimed or expired');
+    }
+    
     return data;
   } catch (error) {
     console.error('[DB] Error claiming user reward:', error);
