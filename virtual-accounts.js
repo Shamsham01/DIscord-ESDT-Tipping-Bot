@@ -195,17 +195,32 @@ async function addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHas
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") or ticker for backward compatibility
 async function deductFundsFromAccount(guildId, userId, tokenIdentifier, amount, description, gameType = null) {
   try {
-    // Validate and convert amount to string
-    const amountNum = typeof amount === 'string' ? parseFloat(amount) : Number(amount);
-    if (isNaN(amountNum) || amountNum <= 0) {
+    // Validate and convert amount to string using BigNumber to preserve precision
+    // CRITICAL: Do NOT use parseFloat() as it loses precision for large decimal numbers
+    let amountBN;
+    try {
+      amountBN = new BigNumber(amount);
+    } catch (e) {
       return {
         success: false,
         error: `Invalid amount: ${amount}`,
         currentBalance: '0',
-        requiredAmount: amount
+        requiredAmount: String(amount)
       };
     }
-    const amountStr = amountNum.toString();
+    
+    // Check if amount is valid and positive
+    if (amountBN.isNaN() || amountBN.isLessThanOrEqualTo(0)) {
+      return {
+        success: false,
+        error: `Invalid amount: ${amount}`,
+        currentBalance: '0',
+        requiredAmount: amountBN.toString()
+      };
+    }
+    
+    // Use BigNumber's toString() to preserve full precision
+    const amountStr = amountBN.toString();
     
     // Get current account to find existing token key
     const account = await getUserAccount(guildId, userId);
@@ -256,7 +271,16 @@ async function deductFundsFromAccount(guildId, userId, tokenIdentifier, amount, 
     const currentBalance = new BigNumber(balances[tokenIdentifier] || '0');
     const deductionAmount = new BigNumber(amountStr);
     
+    // Debug logging for precision issues
     if (currentBalance.isLessThan(deductionAmount)) {
+      const difference = deductionAmount.minus(currentBalance);
+      console.log(`[VIRTUAL] Insufficient balance check failed:`);
+      console.log(`[VIRTUAL]   Current balance: ${currentBalance.toString()} (${currentBalance.toFixed()})`);
+      console.log(`[VIRTUAL]   Deduction amount: ${deductionAmount.toString()} (${deductionAmount.toFixed()})`);
+      console.log(`[VIRTUAL]   Difference: ${difference.toString()} (${difference.toFixed()})`);
+      console.log(`[VIRTUAL]   Original amount input: ${amount}`);
+      console.log(`[VIRTUAL]   Amount string after conversion: ${amountStr}`);
+      
       return {
         success: false,
         error: 'Insufficient balance',

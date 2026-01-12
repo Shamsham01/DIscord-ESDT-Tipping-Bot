@@ -10911,18 +10911,33 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Parse amount - handle "MAX" or "ALL" options
+      // CRITICAL: Use BigNumber to preserve precision for large decimal numbers
       let withdrawAmount;
       if (amountStr.toUpperCase() === 'MAX' || amountStr.toUpperCase() === 'ALL') {
-        withdrawAmount = currentBalance;
+        withdrawAmount = currentBalance; // Keep as string to preserve precision
       } else {
-        withdrawAmount = parseFloat(amountStr);
-        if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
+        // Validate amount using BigNumber to avoid precision loss from parseFloat
+        let amountBN;
+        try {
+          amountBN = new BigNumber(amountStr);
+        } catch (e) {
           await interaction.editReply({ 
             content: `❌ **Invalid amount!**\n\nPlease provide a valid number or use "MAX"/"ALL" to withdraw your entire balance.`, 
             flags: [MessageFlags.Ephemeral] 
           });
           return;
         }
+        
+        if (amountBN.isNaN() || amountBN.isLessThanOrEqualTo(0)) {
+          await interaction.editReply({ 
+            content: `❌ **Invalid amount!**\n\nPlease provide a valid number or use "MAX"/"ALL" to withdraw your entire balance.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+        
+        // Keep as string to preserve precision
+        withdrawAmount = amountBN.toString();
       }
       
       // Check if user has sufficient balance
@@ -11028,6 +11043,16 @@ client.on('interactionCreate', async (interaction) => {
           if (withdrawalResolve) {
             withdrawalResolve();
           }
+          
+          // Log detailed error information for debugging
+          console.log(`[WITHDRAW] Deduction failed for user ${userId}:`);
+          console.log(`[WITHDRAW]   Balance before deduction: ${balanceBeforeDeduction}`);
+          console.log(`[WITHDRAW]   Withdraw amount: ${withdrawAmount}`);
+          console.log(`[WITHDRAW]   Withdraw amount string: ${withdrawAmountStr}`);
+          console.log(`[WITHDRAW]   Deduct result error: ${deductResult.error}`);
+          console.log(`[WITHDRAW]   Deduct result currentBalance: ${deductResult.currentBalance}`);
+          console.log(`[WITHDRAW]   Deduct result requiredAmount: ${deductResult.requiredAmount}`);
+          
           await interaction.editReply({ 
             content: `❌ **Insufficient balance!**\n\nYou have: **${balanceBeforeDeduction}** ${tokenTicker}\nRequested: **${withdrawAmount}** ${tokenTicker}\n\nYour balance may have changed. Please check your balance and try again.`, 
             flags: [MessageFlags.Ephemeral] 
