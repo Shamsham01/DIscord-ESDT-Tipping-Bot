@@ -21523,28 +21523,35 @@ async function updateStakingPoolEmbed(guildId, poolId) {
     
     if (!message) return;
     
-    const embed = await createStakingPoolEmbed(guildId, pool);
+    // Refetch pool to ensure we have the latest status (important after status changes like CLOSED)
+    const freshPool = await dbStakingPools.getStakingPool(guildId, poolId);
+    if (!freshPool) {
+      console.warn(`[STAKING] Pool ${poolId} not found when updating embed`);
+      return;
+    }
+    
+    const embed = await createStakingPoolEmbed(guildId, freshPool);
     
     // Create buttons
     const components = [];
-    if (pool.status === 'ACTIVE' || pool.status === 'PAUSED') {
+    if (freshPool.status === 'ACTIVE' || freshPool.status === 'PAUSED') {
       const stakeButton = new ButtonBuilder()
         .setCustomId(`staking-stake:${poolId}`)
         .setLabel('Stake')
         .setStyle(ButtonStyle.Success)
-        .setDisabled(pool.status === 'PAUSED');
+        .setDisabled(freshPool.status === 'PAUSED');
       
       const unstakeButton = new ButtonBuilder()
         .setCustomId(`staking-unstake:${poolId}`)
         .setLabel('Unstake')
         .setStyle(ButtonStyle.Danger)
-        .setDisabled(pool.status === 'PAUSED');
+        .setDisabled(freshPool.status === 'PAUSED');
       
       const claimRewardsButton = new ButtonBuilder()
         .setCustomId(`staking-claim-rewards:${poolId}`)
         .setLabel('Claim')
         .setStyle(ButtonStyle.Primary)
-        .setDisabled(pool.status === 'PAUSED');
+        .setDisabled(freshPool.status === 'PAUSED');
       
       const myStakedNFTsButton = new ButtonBuilder()
         .setCustomId(`staking-my-nfts:${poolId}`)
@@ -21555,7 +21562,7 @@ async function updateStakingPoolEmbed(guildId, poolId) {
         .addComponents(stakeButton, unstakeButton, claimRewardsButton, myStakedNFTsButton);
       
       components.push(buttonRow);
-    } else if (pool.status === 'CLOSED') {
+    } else if (freshPool.status === 'CLOSED') {
       // For closed pools, show claim button and my staked NFTs button
       const claimRewardsButton = new ButtonBuilder()
         .setCustomId(`staking-claim-rewards:${poolId}`)
@@ -21871,8 +21878,7 @@ async function generateDistributionSummaries() {
           `**Distribution Date:** <t:${Math.floor(distribution.distributed_at / 1000)}:F>\n\n` +
           `**Total Rewards Distributed:** ${totalRewardsHuman} ${pool.rewardTokenTicker}${usdText(totalRewardsUsd)}\n` +
           `**Claimed:** ${claimedRewardsHuman} ${pool.rewardTokenTicker}${usdText(claimedRewardsUsd)} (${stats.claimedUsers} user${stats.claimedUsers !== 1 ? 's' : ''})\n` +
-          `**Unclaimed:** ${unclaimedRewardsHuman} ${pool.rewardTokenTicker}${usdText(unclaimedRewardsUsd)} (${stats.unclaimedUsers} user${stats.unclaimedUsers !== 1 ? 's' : ''})\n` +
-          `**Expired & Returned to Pool:** ${expiredRewardsHuman} ${pool.rewardTokenTicker}${usdText(expiredRewardsUsd)} (${stats.expiredUsers} user${stats.expiredUsers !== 1 ? 's' : ''})\n\n` +
+          `**Unclaimed & Returned to Pool:** ${expiredRewardsHuman} ${pool.rewardTokenTicker}${usdText(expiredRewardsUsd)} (${stats.expiredUsers} user${stats.expiredUsers !== 1 ? 's' : ''})\n\n` +
           `*Unclaimed rewards expire after 24 hours and are automatically returned to the pool supply.*`;
         
         // Post summary to thread if available
