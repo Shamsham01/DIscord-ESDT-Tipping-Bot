@@ -850,11 +850,16 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
           // Process NFT/SFT refund
           const dbVirtualAccountsNFT = require('./db/virtual-accounts-nft');
           
+          // Construct full token identifier (includes nonce)
+          // Use identifier from refund if it's already full format, otherwise construct from identifier and nonce
+          const fullTokenIdentifier = refund.identifier && refund.identifier.includes('-') && refund.identifier.split('-').length >= 3
+            ? refund.identifier
+            : `${refund.identifier || refund.collection}-${(refund.nonce || 0).toString().padStart(4, '0')}`;
+          
           // Perform blockchain transfer
           const transferResult = await transferNFTFromCommunityFund(
             refund.wallet,
-            refund.identifier,
-            refund.nonce,
+            fullTokenIdentifier, // Full identifier includes nonce
             communityFundProject,
             guildId,
             refund.amount,
@@ -2229,7 +2234,7 @@ async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, a
 }
 
 // Transfer NFT using project wallet
-async function transferNFT(recipientWallet, tokenIdentifier, tokenNonce, projectName, guildId) {
+async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, guildId) {
   try {
     if (!API_BASE_URL || !API_TOKEN) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
@@ -2260,15 +2265,14 @@ async function transferNFT(recipientWallet, tokenIdentifier, tokenNonce, project
     const requestBody = {
       walletPem: pemToSend,
       recipient: recipientWallet,
-      tokenIdentifier: tokenIdentifier,
-      tokenNonce: Number(tokenNonce), // Ensure it's a number, not a string
+      tokenIdentifier: fullTokenIdentifier, // Full identifier includes nonce (e.g., "COLLECTION-abc123-02")
     };
     
     const fullEndpoint = API_BASE_URL.endsWith('/') 
       ? `${API_BASE_URL}execute/nftTransfer` 
       : `${API_BASE_URL}/execute/nftTransfer`;
     
-    console.log(`Transferring NFT ${tokenIdentifier}#${tokenNonce} to: ${recipientWallet} using project: ${projectName}`);
+    console.log(`Transferring NFT ${fullTokenIdentifier} to: ${recipientWallet} using project: ${projectName}`);
     console.log(`API endpoint: ${fullEndpoint}`);
     
     const controller = new AbortController();
@@ -2356,7 +2360,7 @@ async function transferNFT(recipientWallet, tokenIdentifier, tokenNonce, project
       };
       
       if (result.success) {
-        console.log(`Successfully sent NFT ${tokenIdentifier}#${tokenNonce} to: ${recipientWallet} using project: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
+        console.log(`Successfully sent NFT ${fullTokenIdentifier} to: ${recipientWallet} using project: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
       } else {
         console.error(`API reported failure for NFT transfer: ${errorMessage || 'Unknown error'}`);
         if (txHash) {
@@ -2559,7 +2563,7 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
 
 // Transfer NFT from Community Fund to user wallet
 // Auto-detects SFT vs NFT based on token_type from database (bulletproof detection)
-async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, tokenNonce, projectName, guildId, amount = 1, tokenType = null) {
+async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier, projectName, guildId, amount = 1, tokenType = null) {
   try {
     // Convert amount to number
     const amountNum = typeof amount === 'string' ? parseInt(amount, 10) : Number(amount);
@@ -2578,51 +2582,49 @@ async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, to
       console.log(`[WITHDRAW-NFT] Detected SFT (token_type: ${detectedTokenType}, amount: ${finalAmount}), routing to SFT transfer endpoint`);
       
       // Extract collection ticker from identifier
-      // The tokenIdentifier might be:
+      // The fullTokenIdentifier might be:
       // 1. Full identifier with nonce: "OOXTCK-08aa7c-02" -> extract "OOXTCK-08aa7c"
       // 2. Collection ticker only: "OOXTCK-08aa7c" -> use as is
-      let collectionTicker = tokenIdentifier;
+      let collectionTicker = fullTokenIdentifier;
       
       // Check if identifier contains nonce appended (format: COLLECTION-NONCE)
-      // If tokenIdentifier has 3+ parts separated by '-', the last part is likely the nonce
+      // If fullTokenIdentifier has 3+ parts separated by '-', the last part is likely the nonce
       let extractedNonce = null;
-      if (tokenIdentifier.includes('-')) {
-        const parts = tokenIdentifier.split('-');
+      if (fullTokenIdentifier.includes('-')) {
+        const parts = fullTokenIdentifier.split('-');
         // If we have 3+ parts, the last part is likely the nonce
         // Example: "OOXTCK-08aa7c-02" -> ["OOXTCK", "08aa7c", "02"]
         if (parts.length >= 3) {
           // Extract collection ticker by removing the last part (nonce)
           collectionTicker = parts.slice(0, -1).join('-');
           extractedNonce = parts[parts.length - 1];
-          console.log(`[WITHDRAW-NFT] Extracted collection ticker "${collectionTicker}" and nonce "${extractedNonce}" from identifier "${tokenIdentifier}"`);
+          console.log(`[WITHDRAW-NFT] Extracted collection ticker "${collectionTicker}" and nonce "${extractedNonce}" from identifier "${fullTokenIdentifier}"`);
         }
       }
       
-      // Use provided nonce if available, otherwise use extracted nonce
-      const nonceToUse = tokenNonce !== null && tokenNonce !== undefined ? tokenNonce : extractedNonce;
+      // Use extracted nonce (nonce is now derived from full identifier)
+      if (!extractedNonce) {
+        throw new Error('Nonce is required for SFT transfer but could not be extracted from identifier');
+      }
       
       // Ensure tokenNonce is properly converted to number
       // Handle hex nonces (e.g., "02" in hex = 2, "0f" in hex = 15)
-      let nonceValue = nonceToUse;
-      if (nonceToUse !== null && nonceToUse !== undefined) {
-        if (typeof nonceToUse === 'string') {
-          // Try parsing as hex first (common format for nonces in MultiversX)
-          const hexValue = parseInt(nonceToUse, 16);
-          if (!isNaN(hexValue) && /^[0-9a-f]+$/i.test(nonceToUse)) {
-            nonceValue = hexValue;
-          } else {
-            // Fall back to decimal
-            const decValue = parseInt(nonceToUse, 10);
-            nonceValue = isNaN(decValue) ? Number(nonceToUse) : decValue;
-          }
+      let nonceValue;
+      if (typeof extractedNonce === 'string') {
+        // Try parsing as hex first (common format for nonces in MultiversX)
+        const hexValue = parseInt(extractedNonce, 16);
+        if (!isNaN(hexValue) && /^[0-9a-f]+$/i.test(extractedNonce)) {
+          nonceValue = hexValue;
         } else {
-          nonceValue = Number(nonceToUse);
+          // Fall back to decimal
+          const decValue = parseInt(extractedNonce, 10);
+          nonceValue = isNaN(decValue) ? Number(extractedNonce) : decValue;
         }
       } else {
-        throw new Error('Nonce is required for SFT transfer but was not provided');
+        nonceValue = Number(extractedNonce);
       }
       
-      console.log(`[WITHDRAW-NFT] Using collection ticker: "${collectionTicker}", nonce: ${nonceValue} (original: ${tokenNonce}, extracted: ${extractedNonce})`);
+      console.log(`[WITHDRAW-NFT] Using collection ticker: "${collectionTicker}", nonce: ${nonceValue} (extracted from identifier: ${fullTokenIdentifier})`);
       return await transferSFTFromCommunityFund(recipientWallet, collectionTicker, nonceValue, finalAmount, projectName, guildId);
     }
     
@@ -2672,15 +2674,14 @@ async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, to
     const requestBody = {
       walletPem: pemToSend,
       recipient: recipientWallet,
-      tokenIdentifier: tokenIdentifier,
-      tokenNonce: Number(tokenNonce), // Ensure it's a number, not a string
+      tokenIdentifier: fullTokenIdentifier, // Full identifier includes nonce (e.g., "COLLECTION-abc123-02")
     };
     
     const fullEndpoint = API_BASE_URL.endsWith('/') 
       ? `${API_BASE_URL}execute/nftTransfer` 
       : `${API_BASE_URL}/execute/nftTransfer`;
     
-    console.log(`[WITHDRAW-NFT] Transferring NFT ${tokenIdentifier}#${tokenNonce} to: ${recipientWallet} using Community Fund: ${projectName}`);
+    console.log(`[WITHDRAW-NFT] Transferring NFT ${fullTokenIdentifier} to: ${recipientWallet} using Community Fund: ${projectName}`);
     console.log(`[WITHDRAW-NFT] API endpoint: ${fullEndpoint}`);
     
     const controller = new AbortController();
@@ -2782,7 +2783,7 @@ async function transferNFTFromCommunityFund(recipientWallet, tokenIdentifier, to
       };
       
       if (result.success) {
-        console.log(`[WITHDRAW-NFT] Successfully sent NFT ${tokenIdentifier}#${tokenNonce} to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
+        console.log(`[WITHDRAW-NFT] Successfully sent NFT ${fullTokenIdentifier} to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
       } else {
         console.error(`[WITHDRAW-NFT] API reported failure for NFT transfer: ${errorMessage || 'Unknown error'}`);
         if (txHash) {
@@ -3889,6 +3890,10 @@ client.on('interactionCreate', async (interaction) => {
       // Use the actual collection identifier from NFT details (canonical identifier from API)
       const collectionIdentifier = nftDetails.collection || collection;
       
+      // Construct full token identifier (includes nonce)
+      // Use identifier from API if available, otherwise construct from collection and nonce
+      const fullTokenIdentifier = nftDetails.identifier || `${collectionIdentifier}-${nftDetails.nonce.toString().padStart(4, '0')}`;
+      
       await interaction.editReply({ 
         content: `Preparing to send ${nftName} (${collectionIdentifier}#${nftDetails.nonce}) to ${userTag}...\nMemo: ${memo}`, 
         flags: [MessageFlags.Ephemeral] 
@@ -3896,11 +3901,11 @@ client.on('interactionCreate', async (interaction) => {
       
       console.log(`Admin ${interaction.user.tag} (${interaction.user.id}) is sending NFT ${nftName} (${collectionIdentifier}#${nftDetails.nonce}) to ${userTag} (${recipientWallet}) using project ${projectName}`);
       console.log(`Transfer memo: ${memo}`);
+      console.log(`Full token identifier: ${fullTokenIdentifier}`);
       
       const transferResult = await transferNFT(
         recipientWallet, 
-        collectionIdentifier, // Use canonical collection identifier from API
-        nftDetails.nonce, // tokenNonce
+        fullTokenIdentifier, // Full identifier includes nonce
         projectName, 
         guildId
       );
@@ -10196,11 +10201,15 @@ client.on('interactionCreate', async (interaction) => {
       
       console.log(`[WITHDRAW-NFT] User ${interaction.user.tag} (${userId}) withdrawing ${tokenType} ${nftDisplayName}${amountText} (${collection}#${nft.nonce}) to ${userWallet}`);
       
+      // Construct full token identifier (includes nonce)
+      // Use identifier from database if available, otherwise construct from collection and nonce
+      const fullTokenIdentifier = nft.identifier || `${collection}-${nft.nonce.toString().padStart(4, '0')}`;
+      console.log(`[WITHDRAW-NFT] Full token identifier: ${fullTokenIdentifier}`);
+      
       // Transfer NFT/SFT from Community Fund to user wallet (use token_type from database)
       const transferResult = await transferNFTFromCommunityFund(
         userWallet,
-        collection,
-        nft.nonce,
+        fullTokenIdentifier, // Full identifier includes nonce
         communityFundProjectName,
         guildId,
         amount,
@@ -23713,9 +23722,14 @@ async function processAuctionClosure(guildId, auctionId) {
       
       // Transfer NFT/SFT via blockchain
       try {
+        // Construct full token identifier (includes nonce)
+        // Use identifier from auction if available, otherwise construct from collection and nonce
+        const fullTokenIdentifier = auction.nftIdentifier || `${auction.collection}-${(auction.nftNonce || 0).toString().padStart(4, '0')}`;
+        
         console.log(`[AUCTIONS] Starting NFT transfer for auction ${auctionId}:`);
         console.log(`[AUCTIONS] - Collection: ${auction.collection}`);
         console.log(`[AUCTIONS] - Nonce: ${auction.nftNonce}`);
+        console.log(`[AUCTIONS] - Full Identifier: ${fullTokenIdentifier}`);
         console.log(`[AUCTIONS] - Amount: ${auctionAmount}`);
         console.log(`[AUCTIONS] - Token Type: ${tokenType}`);
         console.log(`[AUCTIONS] - Winner Wallet: ${winnerWallet}`);
@@ -23723,8 +23737,7 @@ async function processAuctionClosure(guildId, auctionId) {
         
         transferResult = await transferNFTFromCommunityFund(
           winnerWallet,
-          auction.collection,
-          auction.nftNonce,
+          fullTokenIdentifier, // Full identifier includes nonce
           auction.projectName,
           guildId,
           auctionAmount,
