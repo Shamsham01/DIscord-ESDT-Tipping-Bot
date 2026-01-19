@@ -106,6 +106,7 @@ console.log('[FOOTBALL] ✅ dbFootball module loaded successfully with methods:'
 const lotteryHelpers = require('./utils/lottery-helpers');
 const traitValidator = require('./utils/trait-validator');
 const collectionTraits = require('./utils/collection-traits');
+const { transferMultipleNFTs } = require('./multiversx-transfers-bulk-send');
 
 const client = new Client({
   intents: [
@@ -2380,209 +2381,6 @@ async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, gu
     }
   } catch (error) {
     console.error(`Error transferring NFT:`, error.message);
-    throw error;
-  }
-}
-
-// Helper function to extract collection and nonce from full identifier
-// Full identifier format: "COLLECTION-abc123-02" or "COLLECTION-abc123-0112"
-// Returns: { collection: "COLLECTION-abc123", nonce: "02" or "0112" }
-function extractCollectionAndNonce(fullTokenIdentifier) {
-  if (!fullTokenIdentifier || typeof fullTokenIdentifier !== 'string') {
-    throw new Error('Invalid full token identifier: must be a non-empty string');
-  }
-
-  // Check if identifier contains nonce appended (format: COLLECTION-NONCE)
-  // If fullTokenIdentifier has 3+ parts separated by '-', the last part is likely the nonce
-  if (fullTokenIdentifier.includes('-')) {
-    const parts = fullTokenIdentifier.split('-');
-    // If we have 3+ parts, the last part is likely the nonce
-    // Example: "EMP-897b49-0112" -> ["EMP", "897b49", "0112"]
-    if (parts.length >= 3) {
-      // Extract collection ticker by removing the last part (nonce)
-      const collection = parts.slice(0, -1).join('-');
-      const nonce = parts[parts.length - 1];
-      return { collection, nonce };
-    }
-  }
-
-  // If format doesn't match expected pattern, throw error
-  throw new Error(`Invalid full token identifier format: "${fullTokenIdentifier}". Expected format: "COLLECTION-abc123-02"`);
-}
-
-// Transfer multiple NFTs using project wallet
-// Accepts array of full identifiers (e.g., ["EMP-897b49-0112", "EMP-897b49-014d"])
-async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, projectName, guildId) {
-  try {
-    if (!API_BASE_URL || !API_TOKEN) {
-      throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
-    }
-
-    if (!Array.isArray(tokenIdentifiers) || tokenIdentifiers.length === 0) {
-      throw new Error('tokenIdentifiers must be a non-empty array of full token identifiers');
-    }
-
-    if (tokenIdentifiers.length > 50) {
-      throw new Error('Maximum 50 NFTs can be transferred in a single transaction');
-    }
-
-    const projects = await getProjects(guildId);
-    const project = projects[projectName];
-    
-    if (!project) {
-      throw new Error(`Project "${projectName}" not found. Use /register-project to add it.`);
-    }
-
-    if (!project.walletPem) {
-      throw new Error(`Project "${projectName}" has no wallet configured.`);
-    }
-    
-    // Restore PEM line breaks if needed
-    let pemToSend = project.walletPem;
-    if (!pemToSend.includes('\n')) {
-      // Replace the spaces between the header/footer and base64 with line breaks
-      pemToSend = pemToSend
-        .replace(/-----BEGIN ([A-Z ]+)-----\s*/, '-----BEGIN $1-----\n')
-        .replace(/\s*-----END ([A-Z ]+)-----/, '\n-----END $1-----')
-        .replace(/ ([A-Za-z0-9+/=]{64})/g, '\n$1') // Break base64 into lines of 64 chars
-        .replace(/ ([A-Za-z0-9+/=]+)-----END/, '\n$1-----END'); // Final line before footer
-    }
-
-    // Validate and extract collection/nonce from each identifier
-    const validatedIdentifiers = [];
-    for (const identifier of tokenIdentifiers) {
-      try {
-        const { collection, nonce } = extractCollectionAndNonce(identifier);
-        validatedIdentifiers.push({
-          fullIdentifier: identifier,
-          collection: collection,
-          nonce: nonce
-        });
-      } catch (error) {
-        throw new Error(`Invalid token identifier "${identifier}": ${error.message}`);
-      }
-    }
-
-    const requestBody = {
-      walletPem: pemToSend,
-      recipient: recipientWallet,
-      tokenIdentifiers: tokenIdentifiers, // Array of full identifiers (e.g., ["EMP-897b49-0112"])
-    };
-    
-    const fullEndpoint = API_BASE_URL.endsWith('/') 
-      ? `${API_BASE_URL}execute/multiNFTTransfer` 
-      : `${API_BASE_URL}/execute/multiNFTTransfer`;
-    
-    console.log(`Transferring ${tokenIdentifiers.length} NFTs to: ${recipientWallet} using project: ${projectName}`);
-    console.log(`API endpoint: ${fullEndpoint}`);
-    console.log(`NFTs: ${tokenIdentifiers.join(', ')}`);
-    
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes timeout for bulk transfers
-    
-    try {
-      const response = await fetch(fullEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${API_TOKEN}`,
-        },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      const responseText = await response.text();
-      console.log(`API response status: ${response.status}`);
-      console.log(`API response for multi NFT transfer: ${responseText}`);
-      
-      let parsedResponse;
-      try {
-        parsedResponse = JSON.parse(responseText);
-      } catch (parseError) {
-        console.error('Error parsing API response:', parseError.message);
-        parsedResponse = { success: response.ok, message: responseText };
-      }
-      
-      let txHash = null;
-      let txStatus = null;
-      
-      if (parsedResponse.txHash) {
-        txHash = parsedResponse.txHash;
-      } else if (parsedResponse.result && parsedResponse.result.txHash) {
-        txHash = parsedResponse.result.txHash;
-      } else if (parsedResponse.data && parsedResponse.data.txHash) {
-        txHash = parsedResponse.data.txHash;
-      } else if (parsedResponse.transaction && parsedResponse.transaction.txHash) {
-        txHash = parsedResponse.transaction.txHash;
-      }
-      
-      // Check for transaction status in the response
-      if (parsedResponse.result && parsedResponse.result.status) {
-        txStatus = parsedResponse.result.status;
-      } else if (parsedResponse.status) {
-        txStatus = parsedResponse.status;
-      }
-      
-      // Handle error messages from API
-      let errorMessage = null;
-      if (!response.ok) {
-        // Check for error message in various possible locations
-        errorMessage = parsedResponse.message || 
-                      parsedResponse.error || 
-                      (parsedResponse.result && parsedResponse.result.error) ||
-                      (parsedResponse.data && parsedResponse.data.error);
-        
-        // Add HTTP status context if no specific error message
-        if (!errorMessage) {
-          if (response.status === 400) {
-            errorMessage = 'Bad Request - Invalid parameters or validation error';
-          } else if (response.status === 401) {
-            errorMessage = 'Unauthorized - Missing or invalid API token';
-          } else if (response.status === 404) {
-            errorMessage = 'Not Found - Invalid API endpoint';
-          } else if (response.status === 500) {
-            errorMessage = 'Internal Server Error - Transaction failed or server error';
-          } else {
-            errorMessage = `API error (${response.status})`;
-          }
-        }
-      }
-      
-      // Only treat as success if status is 'success', HTTP is OK, and txHash exists
-      const isApiSuccess = response.ok && txStatus === 'success' && !!txHash;
-      
-      const result = {
-        success: isApiSuccess,
-        txHash: txHash,
-        errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
-        rawResponse: parsedResponse,
-        httpStatus: response.status,
-        nftCount: tokenIdentifiers.length
-      };
-      
-      if (result.success) {
-        console.log(`Successfully sent ${tokenIdentifiers.length} NFTs to: ${recipientWallet} using project: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
-      } else {
-        console.error(`API reported failure for multi NFT transfer: ${errorMessage || 'Unknown error'}`);
-        if (txHash) {
-          console.log(`Transaction hash was returned (${txHash}), but transaction failed (status: ${txStatus}).`);
-        }
-      }
-      
-      return result;
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-      
-      if (fetchError.name === 'AbortError') {
-        console.error('Multi NFT transfer API request timed out after 120 seconds');
-        throw new Error('API request timed out after 120 seconds');
-      }
-      throw fetchError;
-    }
-  } catch (error) {
-    console.error(`Error transferring multiple NFTs:`, error.message);
     throw error;
   }
 }
@@ -10529,6 +10327,109 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (commandName === 'withdraw-nft-bulk') {
+    try {
+      let guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const collectionFilter = interaction.options.getString('collection');
+      
+      // If guildId is null (DM context), try to find user's guilds from database
+      if (!guildId) {
+        console.log(`[WITHDRAW-NFT-BULK] Guild ID is null, searching for user's guilds...`);
+        const userGuilds = await virtualAccounts.getUserGuilds(userId);
+        if (userGuilds && userGuilds.length > 0) {
+          guildId = userGuilds[0];
+          console.log(`[WITHDRAW-NFT-BULK] Found ${userGuilds.length} guild(s) for user, using first: ${guildId}`);
+        } else {
+          await interaction.reply({ 
+            content: `❌ **No guild context found!**\n\nThis command must be run in a server where you have registered your wallet, or you must have a registered wallet with NFT balances.`, 
+            flags: [MessageFlags.Ephemeral] 
+          });
+          return;
+        }
+      }
+      
+      // Get user's registered wallet
+      const userWallet = await getUserWallet(userId, guildId);
+      if (!userWallet) {
+        await interaction.reply({ 
+          content: `❌ **No wallet registered!**\n\nPlease register your wallet using \`/set-wallet\` before withdrawing NFTs.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      if (!userWallet.startsWith('erd1') || userWallet.length !== 62) {
+        await interaction.reply({ 
+          content: `❌ **Invalid wallet address!**\n\nYour registered wallet address is invalid. Please update it using \`/set-wallet\`.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Get user's NFTs (filtered by collection if provided)
+      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, collectionFilter || null, false);
+      
+      if (!userNFTs || userNFTs.length === 0) {
+        const collectionText = collectionFilter ? ` in collection "${collectionFilter}"` : '';
+        await interaction.reply({ 
+          content: `❌ You don't have any NFTs${collectionText} in your Virtual Account.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Limit to 50 NFTs max (API limit)
+      const nftsToShow = userNFTs.slice(0, 50);
+      const hasMore = userNFTs.length > 50;
+      
+      // Create select menu - encode collection filter in customId (use empty string if null)
+      const collectionFilterEncoded = collectionFilter ? encodeURIComponent(collectionFilter) : '';
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId(`withdraw-nft-bulk-select:${guildId}:${userId}:${collectionFilterEncoded}`)
+        .setPlaceholder(`Select NFTs to withdraw (${nftsToShow.length} available${hasMore ? ', showing first 50' : ''})`)
+        .setMinValues(1)
+        .setMaxValues(Math.min(25, nftsToShow.length + 1)); // +1 for "Withdraw All" option, max 25 options in Discord
+      
+      // Add "Withdraw All" option
+      selectMenu.addOptions(
+        new StringSelectMenuOptionBuilder()
+          .setLabel('Withdraw All')
+          .setDescription(`Withdraw all ${nftsToShow.length} NFT(s)${hasMore ? ' (showing first 50)' : ''}`)
+          .setValue('all')
+      );
+      
+      // Add individual NFT options (limit to 24 to fit with "Withdraw All")
+      const individualNFTsToShow = nftsToShow.slice(0, 24);
+      for (const nft of individualNFTsToShow) {
+        const displayName = nft.nft_name || `${nft.collection}#${nft.nonce}`;
+        const value = `${nft.collection}-${nft.nonce}`;
+        const amountText = (nft.amount && nft.amount > 1) ? ` (${nft.amount}x)` : '';
+        selectMenu.addOptions(
+          new StringSelectMenuOptionBuilder()
+            .setLabel(displayName.length > 100 ? displayName.substring(0, 97) + '...' : displayName)
+            .setDescription(`Nonce: ${nft.nonce}${amountText}`)
+            .setValue(value)
+        );
+      }
+      
+      const selectRow = new ActionRowBuilder().addComponents(selectMenu);
+      
+      const collectionText = collectionFilter ? ` from collection "${collectionFilter}"` : '';
+      await interaction.reply({ 
+        content: `Select NFTs to withdraw${collectionText}:\n\n**Note:** Maximum 50 NFTs can be withdrawn in a single transaction.${hasMore ? `\n⚠️ You have ${userNFTs.length} NFTs total, but only the first 50 are shown.` : ''}`, 
+        components: [selectRow],
+        flags: [MessageFlags.Ephemeral] 
+      });
+      
+    } catch (error) {
+      console.error('Error in withdraw-nft-bulk command:', error.message);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
   } else if (commandName === 'blockchain-status') {
     try {
       // Check if user has admin permissions
@@ -15437,10 +15338,11 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   // COLLECTION AUTOCOMPLETE FOR CHECK-BALANCE-NFT, BALANCE-HISTORY-NFT, SELL-NFT, WITHDRAW-NFT, AND SHOW-MY-NFT
-  if ((interaction.commandName === 'check-balance-nft' || 
-       interaction.commandName === 'balance-history-nft' || 
+  if (      (interaction.commandName === 'check-balance-nft' ||
+       interaction.commandName === 'balance-history-nft' ||
        interaction.commandName === 'sell-nft' ||
        interaction.commandName === 'withdraw-nft' ||
+       interaction.commandName === 'withdraw-nft-bulk' ||
        interaction.commandName === 'tip-virtual-nft' ||
        interaction.commandName === 'show-my-nft') && 
       interaction.options.getFocused(true).name === 'collection') {
@@ -18981,6 +18883,339 @@ client.on('interactionCreate', async (interaction) => {
       
     } catch (error) {
       console.error('[STAKING] Error handling unstake select menu:', error);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (customId.startsWith('withdraw-nft-bulk-select:')) {
+    // Bulk withdraw NFT select menu handler
+    try {
+      await interaction.deferUpdate();
+      
+      const parts = customId.split(':');
+      const guildIdFromCustomId = parts[1];
+      const userIdFromCustomId = parts[2];
+      const collectionFilterEncoded = parts[3] || ''; // Get collection filter from customId
+      const collectionFilter = collectionFilterEncoded ? decodeURIComponent(collectionFilterEncoded) : null;
+      const selections = interaction.values;
+      
+      // Verify user matches
+      if (interaction.user.id !== userIdFromCustomId) {
+        await interaction.followUp({ content: '❌ This selection menu is not for you.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Get user's registered wallet
+      const userWallet = await getUserWallet(interaction.user.id, guildIdFromCustomId);
+      if (!userWallet) {
+        await interaction.followUp({ 
+          content: `❌ **No wallet registered!**\n\nPlease register your wallet using \`/set-wallet\` before withdrawing NFTs.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Get user's NFTs - use the collection filter from the original command
+      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildIdFromCustomId, interaction.user.id, collectionFilter, false);
+      
+      if (!userNFTs || userNFTs.length === 0) {
+        await interaction.followUp({ content: '❌ You don\'t have any NFTs in your Virtual Account.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Limit to 50 NFTs max
+      const availableNFTs = userNFTs.slice(0, 50);
+      
+      // Determine which NFTs to withdraw
+      let nftsToWithdraw = [];
+      
+      if (selections.includes('all')) {
+        // Withdraw all (up to 50)
+        nftsToWithdraw = availableNFTs;
+      } else {
+        // Withdraw selected NFTs
+        for (const selection of selections) {
+          // Parse selection: format is "COLLECTION-NONCE"
+          const parts = selection.split('-');
+          if (parts.length < 2) {
+            console.warn(`[WITHDRAW-NFT-BULK] Invalid selection format: ${selection}`);
+            continue;
+          }
+          
+          // Nonce is always the last part
+          const nonceStr = parts[parts.length - 1];
+          // Collection is everything before the last part
+          const collection = parts.slice(0, -1).join('-');
+          
+          const nonce = parseInt(nonceStr, 10);
+          if (isNaN(nonce)) {
+            console.warn(`[WITHDRAW-NFT-BULK] Invalid nonce in selection: ${selection} (parsed nonce: ${nonceStr})`);
+            continue;
+          }
+          
+          const nft = availableNFTs.find(n => n.collection === collection && n.nonce === nonce);
+          if (nft) {
+            nftsToWithdraw.push(nft);
+          } else {
+            console.warn(`[WITHDRAW-NFT-BULK] NFT not found: collection=${collection}, nonce=${nonce} (selection: ${selection})`);
+          }
+        }
+      }
+      
+      if (nftsToWithdraw.length === 0) {
+        await interaction.followUp({ content: '❌ No valid NFTs selected.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Enforce 50 NFT limit
+      if (nftsToWithdraw.length > 50) {
+        await interaction.followUp({ 
+          content: `❌ **Too many NFTs selected!**\n\nMaximum 50 NFTs can be withdrawn in a single transaction. You selected ${nftsToWithdraw.length} NFTs.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Get Community Fund project
+      const communityFundProjectName = getCommunityFundProjectName();
+      const projects = await getProjects(guildIdFromCustomId);
+      const communityFundProject = projects[communityFundProjectName];
+      
+      if (!communityFundProject) {
+        await interaction.followUp({ 
+          content: `❌ Community Fund project not configured. Please contact an administrator.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Check Community Fund balances (1 transfer for bulk NFT withdraw)
+      const balanceCheck = await checkCommunityFundBalances(guildIdFromCustomId, 1);
+      if (!balanceCheck.sufficient) {
+        const errorEmbed = await createBalanceErrorEmbed(guildIdFromCustomId, balanceCheck, '/withdraw-nft-bulk');
+        await interaction.followUp({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Show processing message
+      const processingEmbed = new EmbedBuilder()
+        .setColor(0x0099FF)
+        .setTitle('🔄 Processing Bulk NFT Withdrawal')
+        .setDescription(`Withdrawing ${nftsToWithdraw.length} NFT(s) to your registered wallet`)
+        .addFields(
+          { name: 'NFT Count', value: nftsToWithdraw.length.toString(), inline: true },
+          { name: 'Recipient', value: `\`${userWallet}\``, inline: false },
+          { name: 'Status', value: 'Preparing transaction...', inline: true }
+        )
+        .setTimestamp();
+      
+      await interaction.followUp({ embeds: [processingEmbed], flags: [MessageFlags.Ephemeral] });
+      
+      // Prepare token identifiers for bulk transfer
+      const tokenIdentifiers = [];
+      for (const nft of nftsToWithdraw) {
+        // Construct full token identifier (includes nonce)
+        const fullTokenIdentifier = nft.identifier || `${nft.collection}-${nft.nonce.toString().padStart(4, '0')}`;
+        tokenIdentifiers.push(fullTokenIdentifier);
+      }
+      
+      console.log(`[WITHDRAW-NFT-BULK] User ${interaction.user.tag} (${interaction.user.id}) withdrawing ${nftsToWithdraw.length} NFT(s) to ${userWallet}`);
+      
+      // Call bulk transfer API
+      const transferResult = await transferMultipleNFTs(
+        userWallet,
+        tokenIdentifiers,
+        communityFundProject.walletPem,
+        API_BASE_URL,
+        API_TOKEN
+      );
+      
+      if (transferResult.success && transferResult.txHash) {
+        // Remove NFTs from virtual account
+        let removedCount = 0;
+        let failedRemovals = [];
+        
+        for (const nft of nftsToWithdraw) {
+          try {
+            await virtualAccountsNFT.removeNFTFromAccount(guildIdFromCustomId, interaction.user.id, nft.collection, nft.nonce, 1);
+            removedCount++;
+            
+            // Cancel active listings for this NFT
+            try {
+              const activeListings = await virtualAccountsNFT.getUserListings(guildIdFromCustomId, interaction.user.id, 'ACTIVE');
+              const listingsForThisNFT = activeListings.filter(listing => 
+                listing.collection === nft.collection && listing.nonce === nft.nonce
+              );
+              
+              for (const listing of listingsForThisNFT) {
+                await virtualAccountsNFT.updateListing(guildIdFromCustomId, listing.listingId, { status: 'CANCELLED' });
+                try {
+                  await updateNFTListingEmbed(guildIdFromCustomId, listing.listingId);
+                } catch (embedError) {
+                  console.error(`[WITHDRAW-NFT-BULK] Error updating listing embed:`, embedError.message);
+                }
+              }
+            } catch (listingError) {
+              console.error(`[WITHDRAW-NFT-BULK] Error cancelling listings:`, listingError.message);
+            }
+            
+            // Create transaction record
+            const nftDisplayName = nft.nft_name || `${nft.collection}#${nft.nonce}`;
+            const nftIdentifier = nft.identifier || `${nft.collection}-${String(nft.nonce).padStart(4, '0')}`;
+            const tokenType = nft.token_type || 'NFT';
+            
+            await virtualAccountsNFT.addNFTTransaction(guildIdFromCustomId, interaction.user.id, {
+              id: `withdraw_bulk_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+              type: 'withdraw',
+              collection: nft.collection,
+              identifier: nftIdentifier,
+              nonce: nft.nonce,
+              nft_name: nftDisplayName,
+              amount: 1,
+              token_type: tokenType,
+              price_token_identifier: null,
+              price_amount: null,
+              timestamp: Date.now(),
+              description: `Bulk withdrawal: ${nftDisplayName} to wallet ${userWallet}`,
+              tx_hash: transferResult.txHash
+            });
+          } catch (removeError) {
+            console.error(`[WITHDRAW-NFT-BULK] Failed to remove NFT ${nft.collection}#${nft.nonce}:`, removeError.message);
+            failedRemovals.push(`${nft.collection}#${nft.nonce}`);
+          }
+        }
+        
+        // Get collection info and thumbnail
+        let collectionName = null;
+        let collectionIdentifier = null;
+        let thumbnailUrl = null;
+        
+        if (nftsToWithdraw.length > 0) {
+          // Check if all NFTs are from the same collection
+          const uniqueCollections = [...new Set(nftsToWithdraw.map(nft => nft.collection))];
+          const isSingleCollection = uniqueCollections.length === 1;
+          
+          if (isSingleCollection) {
+            // Single collection - get collection info
+            collectionIdentifier = uniqueCollections[0];
+            
+            // Try to get collection image or use NFT image as thumbnail
+            try {
+              // Try to fetch collection image
+              const collectionData = await collectionTraits.fetchCollectionTraits(collectionIdentifier);
+              if (collectionData && collectionData.collectionImageUrl) {
+                thumbnailUrl = collectionData.collectionImageUrl;
+                collectionName = collectionData.collectionName || collectionIdentifier;
+              }
+              
+              // Fallback: use first NFT's image if collection image not found
+              if (!thumbnailUrl) {
+                const firstNFT = nftsToWithdraw[0];
+                if (firstNFT.nft_image_url) {
+                  thumbnailUrl = firstNFT.nft_image_url;
+                }
+              }
+              
+              // Fallback: try to find any NFT with an image from this collection
+              if (!thumbnailUrl) {
+                const nftWithImage = nftsToWithdraw.find(nft => nft.nft_image_url);
+                if (nftWithImage && nftWithImage.nft_image_url) {
+                  thumbnailUrl = nftWithImage.nft_image_url;
+                }
+              }
+              
+              // If still no collection name, use identifier
+              if (!collectionName) {
+                collectionName = collectionIdentifier;
+              }
+            } catch (error) {
+              console.error(`[WITHDRAW-NFT-BULK] Error fetching collection info:`, error.message);
+              collectionName = collectionIdentifier;
+              // Try to get thumbnail from first NFT
+              const firstNFT = nftsToWithdraw[0];
+              if (firstNFT.nft_image_url) {
+                thumbnailUrl = firstNFT.nft_image_url;
+              }
+            }
+          } else {
+            // Multiple collections - use first NFT's image as thumbnail
+            collectionName = 'Multiple Collections';
+            collectionIdentifier = `${uniqueCollections.length} Collections`;
+            const firstNFT = nftsToWithdraw[0];
+            if (firstNFT.nft_image_url) {
+              thumbnailUrl = firstNFT.nft_image_url;
+            }
+          }
+        }
+        
+        // Create success embed
+        const explorerUrl = transferResult.txHash
+          ? `https://explorer.multiversx.com/transactions/${transferResult.txHash}`
+          : null;
+        
+        const successEmbed = new EmbedBuilder()
+          .setColor(0x00FF00)
+          .setTitle('✅ Bulk NFT Withdrawal Successful!')
+          .setDescription(`Successfully withdrew ${removedCount} NFT(s) to your registered wallet`)
+          .addFields(
+            { name: 'NFT Count', value: removedCount.toString(), inline: true },
+            { name: 'Collection', value: collectionName || 'N/A', inline: true }
+          );
+        
+        // Only add collection identifier if it's a single collection (not "Multiple Collections")
+        if (collectionIdentifier && collectionName !== 'Multiple Collections') {
+          successEmbed.addFields({ name: 'Collection Identifier', value: `\`${collectionIdentifier}\``, inline: false });
+        }
+        
+        successEmbed.addFields(
+          { name: 'Recipient', value: `\`${userWallet}\``, inline: false },
+          { name: 'Transaction Hash', value: explorerUrl ? `[View on Explorer](${explorerUrl})` : 'N/A', inline: false }
+        );
+        
+        successEmbed.setTimestamp();
+        
+        // Set thumbnail if available
+        if (thumbnailUrl) {
+          successEmbed.setThumbnail(thumbnailUrl);
+        } else {
+          successEmbed.setThumbnail('https://i.ibb.co/FkZdFMPz/NFT-Wallet-Logo.png');
+        }
+        
+        if (failedRemovals.length > 0) {
+          successEmbed.addFields({
+            name: '⚠️ Warning',
+            value: `${failedRemovals.length} NFT(s) were transferred but balance update failed:\n${failedRemovals.slice(0, 5).join(', ')}${failedRemovals.length > 5 ? '...' : ''}\n\nPlease contact an administrator.`,
+            inline: false
+          });
+        }
+        
+        successEmbed.setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        await interaction.followUp({ embeds: [successEmbed], flags: [MessageFlags.Ephemeral] });
+        
+        console.log(`[WITHDRAW-NFT-BULK] Successfully withdrew ${removedCount} NFT(s) for user ${interaction.user.tag} (${interaction.user.id})`);
+      } else {
+        // Transfer failed
+        const errorEmbed = new EmbedBuilder()
+          .setColor(0xFF0000)
+          .setTitle('❌ Bulk Withdrawal Failed')
+          .setDescription(transferResult.errorMessage || transferResult.error || 'Unknown error occurred')
+          .addFields(
+            { name: 'NFT Count', value: nftsToWithdraw.length.toString(), inline: true },
+            { name: 'Recipient', value: `\`${userWallet}\``, inline: false }
+          )
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        
+        await interaction.followUp({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
+        
+        console.error(`[WITHDRAW-NFT-BULK] Failed to withdraw NFTs for user ${interaction.user.tag} (${interaction.user.id}): ${transferResult.errorMessage || transferResult.error}`);
+      }
+      
+    } catch (error) {
+      console.error('[WITHDRAW-NFT-BULK] Error handling bulk withdraw select menu:', error);
       if (interaction.deferred || interaction.replied) {
         await interaction.followUp({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       } else {

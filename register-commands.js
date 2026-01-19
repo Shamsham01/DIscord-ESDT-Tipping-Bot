@@ -826,6 +826,20 @@ const commands = [
         default_member_permissions: null,
     },
     {
+        name: 'withdraw-nft-bulk',
+        description: 'Withdraw multiple NFTs from your Virtual Account to your registered wallet (up to 50 NFTs)',
+        options: [
+            {
+                name: 'collection',
+                description: 'Filter by NFT/SFT collection (optional - leave empty to see all collections)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                autocomplete: true
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
         name: 'sell-nft',
         description: 'List an NFT for sale on the marketplace',
         options: [
@@ -922,7 +936,7 @@ const commands = [
     },
     {
         name: 'check-community-fund-balance',
-        description: 'Check Community Fund balances for withdrawals. Automatically calculates mass withdraw costs (Admin only)',
+        description: 'Check Community Fund balances. Calculates mass withdraw costs (Admin only)',
         options: [
             {
                 name: 'transfers',
