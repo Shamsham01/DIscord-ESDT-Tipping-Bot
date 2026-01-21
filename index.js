@@ -22715,20 +22715,87 @@ async function createDropRoundEmbed(guildId, roundId, game, round, isClosed = fa
       countdownText = 'Round Closed';
     }
     
+    // Get token ticker for display
+    const tokenTickerDisplay = game.tokenTicker ? (game.tokenTicker.includes('-') ? game.tokenTicker.split('-')[0] : game.tokenTicker) : 'None';
+    
+    // Get house balance and USD value
+    let houseBalanceText = 'N/A';
+    let houseBalanceUsd = null;
+    if (game.tokenTicker) {
+      try {
+        const houseBalance = await getHouseBalance(guildId, game.tokenTicker);
+        if (houseBalance) {
+          const dropEarnings = new BigNumber(houseBalance.dropEarnings?.[game.tokenTicker] || '0');
+          const dropSpending = new BigNumber(houseBalance.dropSpending?.[game.tokenTicker] || '0');
+          const dropBalance = dropEarnings.minus(dropSpending);
+          
+          // Get token decimals
+          const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+          const tokenDecimals = tokenMetadata[game.tokenTicker]?.decimals || 8;
+          const balanceHuman = dropBalance.dividedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(2);
+          
+          // Get USD price
+          try {
+            const tokenPriceUsd = await getTokenPriceUsd(game.tokenTicker);
+            if (tokenPriceUsd > 0) {
+              const balanceBN = new BigNumber(balanceHuman);
+              houseBalanceUsd = balanceBN.multipliedBy(tokenPriceUsd).toFixed(2);
+            }
+          } catch (error) {
+            console.error('[DROP] Error fetching token price:', error.message);
+          }
+          
+          houseBalanceText = `${balanceHuman} ${tokenTickerDisplay}`;
+          if (houseBalanceUsd) {
+            houseBalanceText += ` (≈ $${houseBalanceUsd})`;
+          }
+        }
+      } catch (error) {
+        console.error('[DROP] Error fetching house balance:', error.message);
+      }
+    }
+    
     const embed = new EmbedBuilder()
       .setTitle(`🪂 DROP Game - Round ${roundId.split('-').pop() || 'N'}`)
       .setColor(color)
       .setDescription(`**Status:** ${statusText}\n**Time Remaining:** ${countdownText}`)
       .addFields(
         { name: 'Current Droppers', value: `${round.currentDroppers}/${round.minDroppers}`, inline: true },
-        { name: 'Reward Token', value: game.tokenTicker ? (game.tokenTicker.includes('-') ? game.tokenTicker.split('-')[0] : game.tokenTicker) : 'None', inline: true }
+        { name: 'Reward Token', value: tokenTickerDisplay, inline: true },
+        { name: 'House Balance', value: houseBalanceText, inline: false }
       )
       .setImage(isClosed ? 'https://i.ibb.co/LynfM9F/Round-Closed.png' : 'https://i.ibb.co/kTvPqzj/Round-Live.png')
       .setFooter({ text: 'React with 🪂 to enter', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
       .setTimestamp();
     
+    // Add NFT collection identifier and supporter status multiplier info
     if (game.nftCollectionMultiplier && game.collectionIdentifier) {
-      embed.addFields({ name: 'Supporter Status Multiplier', value: 'Active (based on NFT holdings)', inline: false });
+      embed.addFields({ 
+        name: 'NFT Collection', 
+        value: `\`${game.collectionIdentifier}\``, 
+        inline: false 
+      });
+      
+      // Add supporter status multiplier tiers
+      const multiplierTiers = [
+        { name: 'Mega Whale', range: '500+ NFTs', multiplier: '×10' },
+        { name: 'Whale', range: '250-499 NFTs', multiplier: '×8' },
+        { name: 'Shark', range: '100-249 NFTs', multiplier: '×5' },
+        { name: 'Dolphin', range: '50-99 NFTs', multiplier: '×4' },
+        { name: 'Crab', range: '25-49 NFTs', multiplier: '×3' },
+        { name: 'Fish', range: '10-24 NFTs', multiplier: '×2' },
+        { name: 'Plankton', range: '1-9 NFTs', multiplier: '×1' }
+      ];
+      
+      const multiplierText = multiplierTiers.map(tier => {
+        return `**${tier.name}**: ${tier.range} → ${tier.multiplier}`;
+      }).join('\n');
+      
+      embed.addFields({ 
+        name: '🪙 Supporter Status Multiplier', 
+        value: multiplierText, 
+        inline: false 
+      });
     }
     
     return embed;
