@@ -32,4 +32,14 @@ Below is a list of all available commands for the ESDT Tipping Bot, grouped by c
 
 ---
 
+## 🪂 DROP Game
+
+- **/start-drop-game-automation** — Admins: Start automated DROP Game with hourly rounds and weekly leaderboard.
+- **/stop-drop-game-automation** — Admins: Stop the active DROP Game automation.
+- **/show-drop-game-leaderboard** — View the current weekly leaderboard with points and rankings.
+
+**Note**: Users participate by reacting with 🪂 emoji on the DROP Game embed. No commands needed!
+
+---
+
 For more details on each command, use `/help` or refer to the documentation. 
