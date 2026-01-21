@@ -23188,9 +23188,10 @@ async function handleStopDropGame(interaction) {
 }
 
 // Command: /show-drop-game-leaderboard
+// Public command - anyone can view the leaderboard
 async function handleShowDropLeaderboard(interaction) {
   try {
-    await interaction.deferReply();
+    await interaction.deferReply(); // Public reply (no ephemeral flag)
     
     const guildId = interaction.guildId;
     const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
