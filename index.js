@@ -83,6 +83,9 @@ const dbLeaderboard = require('./db/leaderboard');
 const dbLottery = require('./db/lottery');
 const dbStakingPools = require('./db/staking-pools');
 const nftMetadataCache = require('./db/nft-metadata-cache');
+const dbDropGames = require('./db/drop-games');
+const dbDropRounds = require('./db/drop-rounds');
+const dropHelpers = require('./utils/drop-helpers');
 
 // Validate dbFootball module is loaded correctly
 if (!dbFootball || typeof dbFootball !== 'object') {
@@ -6740,6 +6743,12 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (commandName === 'start-drop-game-automation') {
+    await handleStartDropGame(interaction);
+  } else if (commandName === 'stop-drop-game-automation') {
+    await handleStopDropGame(interaction);
+  } else if (commandName === 'show-drop-game-leaderboard') {
+    await handleShowDropLeaderboard(interaction);
   } else if (commandName === 'help') {
     try {
       await interaction.deferReply();
@@ -7336,7 +7345,7 @@ client.on('interactionCreate', async (interaction) => {
 
       const embed = new EmbedBuilder()
         .setTitle('🏛️ House Balance Overview')
-        .setDescription('Separate tracking for Betting, Auction, and Lottery house balances')
+        .setDescription('Separate tracking for Betting, Auction, Lottery, and Drop house balances')
         .setColor('#8B5CF6')
         .setTimestamp();
 
@@ -7351,7 +7360,10 @@ client.on('interactionCreate', async (interaction) => {
         auctionPNL: {},
         lotteryEarnings: {},
         lotterySpending: {},
-        lotteryPNL: {}
+        lotteryPNL: {},
+        dropEarnings: {},
+        dropSpending: {},
+        dropPNL: {}
       };
       
       const allTokens = new Set();
@@ -7420,6 +7432,30 @@ client.on('interactionCreate', async (interaction) => {
             aggregatedBalances.lotterySpending[token] = current.plus(new BigNumber(amount || '0')).toString();
           }
         }
+        
+        // Merge drop earnings
+        if (tokenData.dropEarnings && typeof tokenData.dropEarnings === 'object' && Object.keys(tokenData.dropEarnings).length > 0) {
+          for (const [token, amount] of Object.entries(tokenData.dropEarnings)) {
+            allTokens.add(token);
+            if (!aggregatedBalances.dropEarnings[token]) {
+              aggregatedBalances.dropEarnings[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.dropEarnings[token] || '0');
+            aggregatedBalances.dropEarnings[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
+        
+        // Merge drop spending
+        if (tokenData.dropSpending && typeof tokenData.dropSpending === 'object' && Object.keys(tokenData.dropSpending).length > 0) {
+          for (const [token, amount] of Object.entries(tokenData.dropSpending)) {
+            allTokens.add(token);
+            if (!aggregatedBalances.dropSpending[token]) {
+              aggregatedBalances.dropSpending[token] = '0';
+            }
+            const current = new BigNumber(aggregatedBalances.dropSpending[token] || '0');
+            aggregatedBalances.dropSpending[token] = current.plus(new BigNumber(amount || '0')).toString();
+          }
+        }
       }
       
       // Debug: Log aggregated lottery balances
@@ -7472,6 +7508,11 @@ client.on('interactionCreate', async (interaction) => {
           const lotterySpending = new BigNumber(lotterySpendingId).plus(new BigNumber(lotterySpendingTicker));
           const lotteryBalance = lotteryEarnings.minus(lotterySpending);
           
+          // Drop balance
+          const dropEarnings = new BigNumber(aggregatedBalances.dropEarnings[tokenTicker] || aggregatedBalances.dropEarnings[tokenTickerOnly] || '0');
+          const dropSpending = new BigNumber(aggregatedBalances.dropSpending[tokenTicker] || aggregatedBalances.dropSpending[tokenTickerOnly] || '0');
+          const dropBalance = dropEarnings.minus(dropSpending);
+          
           // Convert to human-readable
           const bettingEarningsHuman = new BigNumber(bettingEarnings).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
           const bettingSpendingHuman = new BigNumber(bettingSpending).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
@@ -7484,6 +7525,10 @@ client.on('interactionCreate', async (interaction) => {
           const lotteryEarningsHuman = new BigNumber(lotteryEarnings).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
           const lotterySpendingHuman = new BigNumber(lotterySpending).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
           const lotteryBalanceHuman = new BigNumber(lotteryBalance).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
+          
+          const dropEarningsHuman = new BigNumber(dropEarnings).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
+          const dropSpendingHuman = new BigNumber(dropSpending).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
+          const dropBalanceHuman = new BigNumber(dropBalance).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
           
           // Status emojis
           let bettingEmoji = '🟢';
@@ -7498,8 +7543,12 @@ client.on('interactionCreate', async (interaction) => {
           if (lotteryBalance.isLessThan(0)) lotteryEmoji = '🔴';
           else if (lotteryBalance.isEqualTo(0)) lotteryEmoji = '⚪';
           
+          let dropEmoji = '🟢';
+          if (dropBalance.isLessThan(0)) dropEmoji = '🔴';
+          else if (dropBalance.isEqualTo(0)) dropEmoji = '⚪';
+          
           // Total balance
-          const totalBalance = bettingBalance.plus(auctionBalance).plus(lotteryBalance);
+          const totalBalance = bettingBalance.plus(auctionBalance).plus(lotteryBalance).plus(dropBalance);
           const totalBalanceHuman = new BigNumber(totalBalance).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
           
           // Skip tokens with zero total balance to save space
@@ -7509,7 +7558,7 @@ client.on('interactionCreate', async (interaction) => {
           
           embed.addFields({
             name: `💰 ${tokenTicker}`,
-            value: `**⚽ Betting:** ${bettingBalanceHuman} (Earned: ${bettingEarningsHuman} | Spent: ${bettingSpendingHuman})\n**🎨 Auction:** ${auctionBalanceHuman} (Earned: ${auctionEarningsHuman} | Spent: ${auctionSpendingHuman})\n**🎲 Lottery:** ${lotteryBalanceHuman} (Earned: ${lotteryEarningsHuman} | Spent: ${lotterySpendingHuman})\n**📊 Total:** ${totalBalanceHuman}`,
+            value: `**⚽ Betting:** ${bettingBalanceHuman} (Earned: ${bettingEarningsHuman} | Spent: ${bettingSpendingHuman})\n**🎨 Auction:** ${auctionBalanceHuman} (Earned: ${auctionEarningsHuman} | Spent: ${auctionSpendingHuman})\n**🎲 Lottery:** ${lotteryBalanceHuman} (Earned: ${lotteryEarningsHuman} | Spent: ${lotterySpendingHuman})\n**🪂 Drop:** ${dropBalanceHuman} (Earned: ${dropEarningsHuman} | Spent: ${dropSpendingHuman})\n**📊 Total:** ${totalBalanceHuman}`,
             inline: false
           });
         }
@@ -10842,7 +10891,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Validate house type
-      const validHouseTypes = ['betting', 'auction', 'lottery'];
+      const validHouseTypes = ['betting', 'auction', 'lottery', 'drop'];
       if (!validHouseTypes.includes(houseType)) {
         await interaction.editReply({ 
           content: `❌ Invalid house type: "${houseType}". Must be one of: ${validHouseTypes.join(', ')}`, 
@@ -10945,7 +10994,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Success response
-      const houseTypeName = houseType === 'betting' ? '⚽ Betting House' : houseType === 'auction' ? '🎨 Auction House' : '🎲 Lottery House';
+      const houseTypeName = houseType === 'betting' ? '⚽ Betting House' : houseType === 'auction' ? '🎨 Auction House' : houseType === 'drop' ? '🪂 Drop House' : '🎲 Lottery House';
       const newHouseBalance = topupResult.newBalances[houseType];
       const newHouseBalanceHuman = new BigNumber(newHouseBalance).dividedBy(new BigNumber(10).pow(decimals)).toString();
       
@@ -15114,6 +15163,66 @@ client.on('interactionCreate', async (interaction) => {
         }))
       );
     } catch (error) {
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // TOKEN AUTOCOMPLETE FOR START-DROP-GAME-AUTOMATION supported-tokens
+  if (interaction.commandName === 'start-drop-game-automation' && interaction.options.getFocused(true).name === 'supported-tokens') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const guildId = interaction.guildId;
+      
+      // Get supported tokens from Community Fund project
+      const fundProject = await getCommunityFundProject(guildId);
+      let supportedTokens = [];
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      if (fundProject && projects[projectName]) {
+        supportedTokens = projects[projectName].supportedTokens || [];
+      }
+      
+      // If no tokens found, try to get tokens from any available project
+      if (supportedTokens.length === 0) {
+        for (const [projectName, project] of Object.entries(projects)) {
+          if (project.supportedTokens && project.supportedTokens.length > 0) {
+            supportedTokens = project.supportedTokens;
+            break;
+          }
+        }
+      }
+      
+      // Parse already-selected tokens (if user typed comma-separated values)
+      const currentValue = focusedValue.trim();
+      const alreadySelected = currentValue.includes(',') 
+        ? currentValue.split(',').map(t => t.trim()).filter(t => t)
+        : [];
+      
+      // Get the part the user is currently typing (after the last comma, or the whole value if no comma)
+      const currentInput = currentValue.includes(',')
+        ? currentValue.split(',').pop().trim()
+        : currentValue.trim();
+      
+      // Filter tokens: exclude already selected ones, and match current input
+      const availableTokens = supportedTokens.filter(token => {
+        // Exclude if already selected
+        if (alreadySelected.includes(token)) return false;
+        // Match current input
+        return token.toLowerCase().includes(currentInput.toLowerCase());
+      });
+      
+      // Format choices
+      const choices = availableTokens.slice(0, 25).map(token => ({
+        name: `${token.includes('-') ? token.split('-')[0] : token} (${token})`,
+        value: alreadySelected.length > 0 
+          ? `${alreadySelected.join(',')},${token}` // Append to existing selection
+          : token // Just the token if nothing selected yet
+      }));
+      
+      await safeRespond(interaction, choices);
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in start-drop-game-automation supported-tokens autocomplete:', error.message);
       await safeRespond(interaction, []);
     }
     return;
@@ -21082,7 +21191,10 @@ async function trackLotteryEarnings(guildId, tokenIdentifier, commissionWei) {
       auctionPNL: {},
       lotteryEarnings: {},
       lotterySpending: {},
-      lotteryPNL: {}
+      lotteryPNL: {},
+      dropEarnings: {},
+      dropSpending: {},
+      dropPNL: {}
     };
     
     // Track lottery earnings (using identifier as key, not ticker)
@@ -22591,6 +22703,555 @@ async function autoCloseStakingPool(guildId, poolId) {
   }
 }
 
+// ============================================
+// DROP GAME IMPLEMENTATION
+// ============================================
+
+// DROP Game helper functions
+async function createDropRoundEmbed(guildId, roundId, game, round, isClosed = false) {
+  try {
+    const now = Date.now();
+    const timeRemaining = round.drawTime - now;
+    
+    let color = '#00FF00'; // Green - min droppers met
+    let statusText = '🟢 LIVE';
+    let countdownText = dropHelpers.formatCountdown(Math.max(0, timeRemaining));
+    
+    if (round.currentDroppers < round.minDroppers) {
+      color = '#FFA500'; // Orange - waiting for min droppers
+      statusText = '🟠 WAITING';
+      const missing = round.minDroppers - round.currentDroppers;
+      countdownText = `${countdownText} | Need ${missing} more dropper${missing !== 1 ? 's' : ''}`;
+    }
+    
+    if (isClosed) {
+      color = '#FF0000'; // Red - closed
+      statusText = '🔴 CLOSED';
+      countdownText = 'Round Closed';
+    }
+    
+    const embed = new EmbedBuilder()
+      .setTitle(`🪂 DROP Game - Round ${roundId.split('-').pop() || 'N'}`)
+      .setColor(color)
+      .setDescription(`**Status:** ${statusText}\n**Time Remaining:** ${countdownText}`)
+      .addFields(
+        { name: 'Current Droppers', value: `${round.currentDroppers}/${round.minDroppers}`, inline: true },
+        { name: 'Supported Tokens', value: game.supportedTokens.join(', ') || 'None', inline: true }
+      )
+      .setImage(isClosed ? 'https://i.ibb.co/LynfM9F/Round-Closed.png' : 'https://i.ibb.co/kTvPqzj/Round-Live.png')
+      .setFooter({ text: 'React with 🪂 to enter', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+      .setTimestamp();
+    
+    if (game.nftCollectionMultiplier && game.collectionIdentifier) {
+      embed.addFields({ name: 'Supporter Status Multiplier', value: 'Active (based on NFT holdings)', inline: false });
+    }
+    
+    return embed;
+  } catch (error) {
+    console.error('[DROP] Error creating round embed:', error);
+    return null;
+  }
+}
+
+async function createWinnerAnnouncementEmbed(guildId, round, game) {
+  try {
+    const embed = new EmbedBuilder()
+      .setTitle('🎉 DROP Game Winner!')
+      .setDescription(`**Round:** ${round.roundId.split('-').pop() || 'N'}\n**Winner:** <@${round.winnerId}> (${round.winnerTag || 'Unknown'})`)
+      .setColor('#00FF00')
+      .setFooter({ text: 'Congratulations!', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+      .setTimestamp();
+    
+    return embed;
+  } catch (error) {
+    console.error('[DROP] Error creating winner embed:', error);
+    return null;
+  }
+}
+
+async function processDropRound(guildId, roundId) {
+  try {
+    const round = await dbDropRounds.getRound(guildId, roundId);
+    if (!round || round.status !== 'LIVE') return;
+    
+    const now = Date.now();
+    const game = await dbDropGames.getDropGame(guildId);
+    if (!game || game.status !== 'ACTIVE') return;
+    
+    // Check if round expired
+    if (now >= round.drawTime) {
+      // Check if min droppers met
+      const participantCount = await dbDropRounds.getParticipantCount(guildId, roundId);
+      
+      if (participantCount >= round.minDroppers) {
+        // Select winner
+        const participants = await dbDropRounds.getParticipants(guildId, roundId);
+        if (participants.length === 0) {
+          console.log(`[DROP] No participants for round ${roundId}, skipping`);
+          return;
+        }
+        
+        const winner = participants[Math.floor(Math.random() * participants.length)];
+        
+        // Update round
+        await dbDropRounds.updateRound(guildId, roundId, {
+          status: 'COMPLETED',
+          closedAt: now,
+          currentDroppers: participantCount,
+          winnerId: winner.userId,
+          winnerTag: winner.userTag
+        });
+        
+        // Update leaderboard
+        const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
+        await dbDropRounds.updateLeaderboardEntry(guildId, winner.userId, winner.userTag, weekStart, weekEnd, {
+          points: 1,
+          wins: 1
+        });
+        
+        // Create winner announcement
+        const channel = await client.channels.fetch(round.channelId).catch(() => null);
+        if (channel) {
+          const winnerEmbed = await createWinnerAnnouncementEmbed(guildId, {
+            ...round,
+            winnerId: winner.userId,
+            winnerTag: winner.userTag
+          }, game);
+          if (winnerEmbed) {
+            await channel.send({ embeds: [winnerEmbed] });
+          }
+          
+          // Update closed round embed
+          const closedEmbed = await createDropRoundEmbed(guildId, roundId, game, {
+            ...round,
+            currentDroppers: participantCount,
+            status: 'CLOSED'
+          }, true);
+          if (closedEmbed && round.messageId) {
+            try {
+              const message = await channel.messages.fetch(round.messageId);
+              await message.edit({ embeds: [closedEmbed] });
+            } catch (e) {
+              console.error('[DROP] Error updating closed embed:', e);
+            }
+          }
+          
+          // Create next round
+          await createNextDropRound(guildId, game);
+        }
+        
+        // Clean up participants
+        await dbDropRounds.deleteParticipantsForRound(guildId, roundId);
+        
+        console.log(`[DROP] Round ${roundId} completed, winner: ${winner.userTag}`);
+      } else {
+        // Update embed to show missing droppers
+        const channel = await client.channels.fetch(round.channelId).catch(() => null);
+        if (channel && round.messageId) {
+          const updatedEmbed = await createDropRoundEmbed(guildId, roundId, game, {
+            ...round,
+            currentDroppers: participantCount
+          });
+          if (updatedEmbed) {
+            try {
+              const message = await channel.messages.fetch(round.messageId);
+              await message.edit({ embeds: [updatedEmbed] });
+            } catch (e) {
+              console.error('[DROP] Error updating waiting embed:', e);
+            }
+          }
+        }
+      }
+    } else {
+      // Update countdown
+      const channel = await client.channels.fetch(round.channelId).catch(() => null);
+      if (channel && round.messageId) {
+        const participantCount = await dbDropRounds.getParticipantCount(guildId, roundId);
+        await dbDropRounds.updateRound(guildId, roundId, { currentDroppers: participantCount });
+        
+        const updatedEmbed = await createDropRoundEmbed(guildId, roundId, game, {
+          ...round,
+          currentDroppers: participantCount
+        });
+        if (updatedEmbed) {
+          try {
+            const message = await channel.messages.fetch(round.messageId);
+            await message.edit({ embeds: [updatedEmbed] });
+          } catch (e) {
+            // Ignore errors - might be rate limited
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`[DROP] Error processing round ${roundId}:`, error);
+  }
+}
+
+async function createNextDropRound(guildId, game) {
+  try {
+    const now = Date.now();
+    const oneHour = 60 * 60 * 1000;
+    const drawTime = now + oneHour;
+    const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
+    const roundId = `drop-${guildId}-${now}`;
+    
+    // Create round
+    await dbDropRounds.createRound(guildId, {
+      roundId,
+      channelId: game.channelId,
+      createdAt: now,
+      drawTime,
+      minDroppers: game.minDroppers,
+      weekStart,
+      weekEnd
+    });
+    
+    // Create embed
+    const channel = await client.channels.fetch(game.channelId).catch(() => null);
+    if (channel) {
+      const round = await dbDropRounds.getRound(guildId, roundId);
+      const embed = await createDropRoundEmbed(guildId, roundId, game, round);
+      if (embed) {
+        const message = await channel.send({ embeds: [embed] });
+        await message.react('🪂');
+        
+        // Update round and game with message ID
+        await dbDropRounds.updateRound(guildId, roundId, { messageId: message.id });
+        await dbDropGames.updateDropGame(guildId, { messageId: message.id });
+      }
+    }
+  } catch (error) {
+    console.error(`[DROP] Error creating next round for guild ${guildId}:`, error);
+  }
+}
+
+async function distributeWeeklyAirdrops() {
+  try {
+    const activeGames = await dbDropGames.getActiveDropGames();
+    
+    for (const game of activeGames) {
+      try {
+        const leaderboardEntries = await dbDropRounds.getLeaderboardForAirdrop(game.guildId);
+        
+        if (leaderboardEntries.length === 0) continue;
+        
+        const { weekStart, weekEnd } = dropHelpers.getPreviousWeekBoundaries();
+        
+        for (const entry of leaderboardEntries) {
+          try {
+            // Get user wallet
+            const userWallets = await getUserWallets(game.guildId);
+            const walletAddress = userWallets[entry.userId];
+            
+            if (!walletAddress) {
+              console.log(`[DROP] Skipping ${entry.userTag} - no wallet registered`);
+              continue;
+            }
+            
+            // Get NFT count if multiplier enabled
+            let multiplier = 1;
+            if (game.nftCollectionMultiplier && game.collectionIdentifier) {
+              const nftResult = await dropHelpers.getUserNFTCount(walletAddress, game.collectionIdentifier);
+              if (nftResult.success) {
+                const supporterStatus = dropHelpers.calculateSupporterStatus(nftResult.count);
+                multiplier = supporterStatus.multiplier;
+              }
+            }
+            
+            // Calculate airdrop for each supported token
+            for (const tokenIdentifier of game.supportedTokens) {
+              const airdropAmountWei = dropHelpers.calculateWeeklyAirdrop(entry.points, game.baseAmountWei, multiplier);
+              
+              if (new BigNumber(airdropAmountWei).isGreaterThan(0)) {
+                // Credit virtual account
+                const tokenDecimals = await getStoredTokenDecimals(game.guildId, tokenIdentifier);
+                const airdropAmountHuman = new BigNumber(airdropAmountWei).dividedBy(new BigNumber(10).pow(tokenDecimals || 8)).toString();
+                await virtualAccounts.addFundsToAccount(
+                  game.guildId,
+                  entry.userId,
+                  tokenIdentifier,
+                  airdropAmountHuman,
+                  null,
+                  `Weekly DROP game airdrop (${entry.points} points × ${multiplier}x multiplier)`
+                );
+                
+                // Track house spending
+                await trackHouseSpending(game.guildId, airdropAmountWei, tokenIdentifier, 'weekly_airdrop', 'drop');
+              }
+            }
+            
+            // Update airdrop status
+            await dbDropRounds.updateLeaderboardEntry(game.guildId, entry.userId, entry.userTag, weekStart, weekEnd, {
+              airdropStatus: true
+            });
+            
+            console.log(`[DROP] Distributed airdrop to ${entry.userTag}: ${entry.points} points × ${multiplier}x = ${entry.points * multiplier} multiplier`);
+          } catch (error) {
+            console.error(`[DROP] Error distributing airdrop to ${entry.userTag}:`, error);
+          }
+        }
+        
+        // Create announcement
+        const channel = await client.channels.fetch(game.channelId).catch(() => null);
+        if (channel && leaderboardEntries.length > 0) {
+          const embed = new EmbedBuilder()
+            .setTitle('🎁 Weekly DROP Airdrop Distributed!')
+            .setDescription(`**${leaderboardEntries.length}** winner(s) received their weekly airdrops!`)
+            .setColor('#00FF00')
+            .setFooter({ text: 'Check your virtual account balance!', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+            .setTimestamp();
+          
+          await channel.send({ embeds: [embed] });
+        }
+      } catch (error) {
+        console.error(`[DROP] Error processing weekly airdrops for guild ${game.guildId}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error('[DROP] Error in weekly airdrop distribution:', error);
+  }
+}
+
+// DROP Game command handlers
+// These should be added in the interactionCreate handler where other commands are handled
+// For now, adding them here as reference - they need to be integrated into the main interaction handler
+
+// Command: /start-drop-game-automation
+async function handleStartDropGame(interaction) {
+  try {
+    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+    
+    const guildId = interaction.guildId;
+    const userId = interaction.user.id;
+    
+    // Check admin permissions
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      await interaction.editReply({ content: '❌ You need Administrator permissions to use this command.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+    
+    // Check if drop game already exists
+    const existingGame = await dbDropGames.getDropGame(guildId);
+    if (existingGame && existingGame.status === 'ACTIVE') {
+      await interaction.editReply({ content: '❌ A DROP game is already active in this server. Use `/stop-drop-game-automation` to stop it first.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+    
+    // Get parameters
+    const supportedTokensStr = interaction.options.getString('supported-tokens');
+    const baseAmount = interaction.options.getNumber('base-amount');
+    const minDroppers = interaction.options.getInteger('min-droppers');
+    const collectionIdentifier = interaction.options.getString('collection-identifier');
+    const nftCollectionMultiplier = interaction.options.getBoolean('nft-collection-multiplier') || false;
+    
+    // Parse supported tokens
+    const supportedTokens = supportedTokensStr.split(',').map(t => t.trim()).filter(t => t);
+    
+    if (supportedTokens.length === 0) {
+      await interaction.editReply({ content: '❌ At least one supported token is required.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+    
+    // Validate token identifiers
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    for (const token of supportedTokens) {
+      if (!esdtIdentifierRegex.test(token)) {
+        await interaction.editReply({ content: `❌ Invalid token identifier: ${token}. Must be in format TICKER-6hexchars (e.g., REWARD-cf6eac)`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+    }
+    
+    // Get token decimals for base amount
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    const firstToken = supportedTokens[0];
+    const tokenDecimals = tokenMetadata[firstToken]?.decimals || 8;
+    const baseAmountWei = new BigNumber(baseAmount).multipliedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    
+    // Create drop game
+    const channelId = interaction.channelId;
+    await dbDropGames.createDropGame(guildId, {
+      channelId,
+      status: 'ACTIVE',
+      supportedTokens,
+      baseAmountWei,
+      minDroppers,
+      collectionIdentifier: collectionIdentifier || null,
+      nftCollectionMultiplier
+    });
+    
+    // Create first round
+    await createNextDropRound(guildId, {
+      channelId,
+      supportedTokens,
+      baseAmountWei,
+      minDroppers,
+      collectionIdentifier,
+      nftCollectionMultiplier
+    });
+    
+    await interaction.editReply({ 
+      content: `✅ **DROP Game automation started!**\n\n**Channel:** <#${channelId}>\n**Base Amount:** ${baseAmount} tokens\n**Min Droppers:** ${minDroppers}\n**Supported Tokens:** ${supportedTokens.join(', ')}\n${nftCollectionMultiplier && collectionIdentifier ? `**NFT Multiplier:** Enabled (${collectionIdentifier})` : ''}`, 
+      flags: [MessageFlags.Ephemeral] 
+    });
+  } catch (error) {
+    console.error('[DROP] Error starting drop game:', error);
+    if (interaction.deferred) {
+      await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+    } else {
+      await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+    }
+  }
+}
+
+// Command: /stop-drop-game-automation
+async function handleStopDropGame(interaction) {
+  try {
+    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+    
+    const guildId = interaction.guildId;
+    
+    // Check admin permissions
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      await interaction.editReply({ content: '❌ You need Administrator permissions to use this command.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+    
+    const game = await dbDropGames.getDropGame(guildId);
+    if (!game || game.status !== 'ACTIVE') {
+      await interaction.editReply({ content: '❌ No active DROP game found.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+    
+    // Stop game
+    await dbDropGames.stopDropGame(guildId);
+    
+    // Close current round if exists
+    const activeRounds = await dbDropRounds.getActiveRounds(guildId);
+    for (const round of activeRounds) {
+      await dbDropRounds.updateRound(guildId, round.roundId, { status: 'CLOSED', closedAt: Date.now() });
+    }
+    
+    await interaction.editReply({ content: '✅ DROP game automation stopped.', flags: [MessageFlags.Ephemeral] });
+  } catch (error) {
+    console.error('[DROP] Error stopping drop game:', error);
+    if (interaction.deferred) {
+      await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+    } else {
+      await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+    }
+  }
+}
+
+// Command: /show-drop-game-leaderboard
+async function handleShowDropLeaderboard(interaction) {
+  try {
+    await interaction.deferReply();
+    
+    const guildId = interaction.guildId;
+    const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
+    
+    const leaderboard = await dbDropRounds.getWeeklyLeaderboard(guildId, weekStart, weekEnd);
+    
+    if (leaderboard.length === 0) {
+      await interaction.editReply({ content: '📊 No entries in the current week leaderboard yet.' });
+      return;
+    }
+    
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 DROP Game Weekly Leaderboard')
+      .setDescription(`Current Week Leaderboard`)
+      .setColor('#4d55dc')
+      .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+      .setTimestamp();
+    
+    const topEntries = leaderboard.slice(0, 10);
+    const fields = [];
+    
+    for (let i = 0; i < topEntries.length; i++) {
+      const entry = topEntries[i];
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+      fields.push({
+        name: `${medal} ${entry.userTag || 'Unknown'}`,
+        value: `**Points:** ${entry.points} | **Wins:** ${entry.wins}`,
+        inline: false
+      });
+    }
+    
+    embed.addFields(fields);
+    await interaction.editReply({ embeds: [embed] });
+  } catch (error) {
+    console.error('[DROP] Error showing leaderboard:', error);
+    if (interaction.deferred) {
+      await interaction.editReply({ content: `❌ Error: ${error.message}` });
+    } else {
+      await interaction.reply({ content: `❌ Error: ${error.message}` });
+    }
+  }
+}
+
+// Reaction handler for 🪂 emoji
+client.on('messageReactionAdd', async (reaction, user) => {
+  try {
+    // Ignore bot reactions
+    if (user.bot) return;
+    
+    // Check if reaction is 🪂 emoji
+    if (reaction.emoji.name !== '🪂') return;
+    
+    const message = reaction.message;
+    const guildId = message.guildId;
+    if (!guildId) return;
+    
+    // Check if message is a drop round embed
+    const activeRounds = await dbDropRounds.getAllActiveRounds();
+    const round = activeRounds.find(r => r.messageId === message.id && r.guildId === guildId);
+    
+    if (!round || round.status !== 'LIVE') return;
+    
+    // Check if round is still live (not expired)
+    const now = Date.now();
+    if (now >= round.drawTime) {
+      // Round expired, but might be waiting for min droppers
+      const participantCount = await dbDropRounds.getParticipantCount(guildId, round.roundId);
+      if (participantCount >= round.minDroppers) {
+        // Round should be closed, remove reaction
+        await reaction.users.remove(user.id);
+        return;
+      }
+    }
+    
+    // Add participant
+    const result = await dbDropRounds.addParticipant(guildId, round.roundId, {
+      userId: user.id,
+      userTag: user.tag,
+      enteredAt: now
+    });
+    
+    if (result.alreadyEntered) {
+      // User already entered, remove duplicate reaction
+      await reaction.users.remove(user.id);
+      return;
+    }
+    
+    // Update round count
+    const participantCount = await dbDropRounds.getParticipantCount(guildId, round.roundId);
+    await dbDropRounds.updateRound(guildId, round.roundId, { currentDroppers: participantCount });
+    
+    // Update embed
+    const game = await dbDropGames.getDropGame(guildId);
+    if (game) {
+      const updatedRound = await dbDropRounds.getRound(guildId, round.roundId);
+      const embed = await createDropRoundEmbed(guildId, round.roundId, game, updatedRound);
+      if (embed) {
+        await message.edit({ embeds: [embed] });
+      }
+    }
+  } catch (error) {
+    console.error('[DROP] Error handling reaction:', error);
+  }
+});
+
 // Ready event
 client.on('ready', async () => {
   console.log(`Multi-Server ESDT Tipping Bot with Virtual Accounts is ready with ID: ${client.user.tag}`);
@@ -22643,6 +23304,30 @@ client.on('ready', async () => {
       console.error('[LOTTERY] Error checking expired lotteries:', error.message);
     }
   }, 60 * 1000); // Check every minute
+  
+  // Set up periodic check for DROP game rounds
+  setInterval(async () => {
+    try {
+      const activeRounds = await dbDropRounds.getAllActiveRounds();
+      for (const round of activeRounds) {
+        await processDropRound(round.guildId, round.roundId);
+      }
+    } catch (error) {
+      console.error('[DROP] Error checking drop rounds:', error.message);
+    }
+  }, 60 * 1000); // Check every minute
+  
+  // Set up weekly airdrop distribution (check every hour for Sunday 18:00 ECT)
+  setInterval(async () => {
+    try {
+      if (dropHelpers.isSunday1800ECT()) {
+        console.log('[DROP] Sunday 18:00 ECT detected, distributing weekly airdrops...');
+        await distributeWeeklyAirdrops();
+      }
+    } catch (error) {
+      console.error('[DROP] Error checking for weekly airdrop distribution:', error.message);
+    }
+  }, 60 * 60 * 1000); // Check every hour
   
   // Set up periodic cleanup of old auction bid reservations
   // Clean up reservations for auctions that ended more than 7 days ago
@@ -24384,7 +25069,10 @@ async function trackHouseSpending(guildId, amountWei, tokenIdentifier, reason = 
         auctionPNL: {},
         lotteryEarnings: {},
         lotterySpending: {},
-        lotteryPNL: {}
+        lotteryPNL: {},
+        dropEarnings: {},
+        dropSpending: {},
+        dropPNL: {}
       });
     }
     
@@ -24397,7 +25085,10 @@ async function trackHouseSpending(guildId, amountWei, tokenIdentifier, reason = 
       auctionPNL: {},
       lotteryEarnings: {},
       lotterySpending: {},
-      lotteryPNL: {}
+      lotteryPNL: {},
+      dropEarnings: {},
+      dropSpending: {},
+      dropPNL: {}
     };
     
     // Track spending by source (using identifier as key, not ticker)
@@ -24437,6 +25128,18 @@ async function trackHouseSpending(guildId, amountWei, tokenIdentifier, reason = 
       // Recalculate lottery PNL (using identifier as key)
       const lotteryEarnings = new BigNumber(houseBalance.lotteryEarnings[tokenIdentifier] || '0');
       houseBalance.lotteryPNL[tokenIdentifier] = lotteryEarnings.minus(newLotterySpending).toString();
+    } else if (source === 'drop') {
+      // Track drop spending
+      if (!houseBalance.dropSpending[tokenIdentifier]) {
+        houseBalance.dropSpending[tokenIdentifier] = '0';
+      }
+      const currentDropSpending = new BigNumber(houseBalance.dropSpending[tokenIdentifier] || '0');
+      const newDropSpending = currentDropSpending.plus(new BigNumber(amountWei));
+      houseBalance.dropSpending[tokenIdentifier] = newDropSpending.toString();
+      
+      // Recalculate drop PNL (using identifier as key)
+      const dropEarnings = new BigNumber(houseBalance.dropEarnings[tokenIdentifier] || '0');
+      houseBalance.dropPNL[tokenIdentifier] = dropEarnings.minus(newDropSpending).toString();
     }
     
     // Save to database (using identifier)
@@ -24446,7 +25149,7 @@ async function trackHouseSpending(guildId, amountWei, tokenIdentifier, reason = 
     const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
     const displayDecimals = storedDecimals !== null ? storedDecimals : 8;
     const humanAmount = new BigNumber(amountWei).dividedBy(new BigNumber(10).pow(displayDecimals)).toString();
-    const sourceName = source === 'auction' ? 'Auction' : source === 'lottery' ? 'Lottery' : 'Betting';
+    const sourceName = source === 'auction' ? 'Auction' : source === 'lottery' ? 'Lottery' : source === 'drop' ? 'Drop' : 'Betting';
     console.log(`[HOUSE] Tracked ${sourceName} spending: -${humanAmount} ${tokenTicker} (Reason: ${reason})`);
     
     // Get current balance for return value (using identifier as key)
@@ -24458,6 +25161,9 @@ async function trackHouseSpending(guildId, amountWei, tokenIdentifier, reason = 
     } else if (source === 'lottery') {
       currentBalanceValue = houseBalance.lotteryPNL[tokenIdentifier];
       totalSpent = houseBalance.lotterySpending[tokenIdentifier] || '0';
+    } else if (source === 'drop') {
+      currentBalanceValue = houseBalance.dropPNL[tokenIdentifier];
+      totalSpent = houseBalance.dropSpending[tokenIdentifier] || '0';
     } else {
       currentBalanceValue = houseBalance.bettingPNL[tokenIdentifier];
       totalSpent = houseBalance.bettingSpending[tokenIdentifier] || '0';
@@ -24501,7 +25207,13 @@ async function trackHouseEarnings(guildId, matchId, totalPotWei, tokenDecimals, 
       bettingPNL: {},
       auctionEarnings: {},
       auctionSpending: {},
-      auctionPNL: {}
+      auctionPNL: {},
+      lotteryEarnings: {},
+      lotterySpending: {},
+      lotteryPNL: {},
+      dropEarnings: {},
+      dropSpending: {},
+      dropPNL: {}
     };
     
     // Track betting earnings (using identifier as key, not ticker)
@@ -24553,7 +25265,13 @@ async function trackAuctionEarnings(guildId, auctionId, amountWei, tokenDecimals
       bettingPNL: {},
       auctionEarnings: {},
       auctionSpending: {},
-      auctionPNL: {}
+      auctionPNL: {},
+      lotteryEarnings: {},
+      lotterySpending: {},
+      lotteryPNL: {},
+      dropEarnings: {},
+      dropSpending: {},
+      dropPNL: {}
     };
     
     // Track auction earnings (using identifier as key, not ticker)
@@ -24593,7 +25311,7 @@ async function trackHouseTopup(guildId, amountWei, tokenIdentifier, houseType, u
     }
 
     // Validate house type
-    const validHouseTypes = ['betting', 'auction', 'lottery'];
+    const validHouseTypes = ['betting', 'auction', 'lottery', 'drop'];
     if (!validHouseTypes.includes(houseType)) {
       return { success: false, error: `Invalid house type: ${houseType}. Must be one of: ${validHouseTypes.join(', ')}` };
     }
@@ -24613,8 +25331,22 @@ async function trackHouseTopup(guildId, amountWei, tokenIdentifier, houseType, u
       auctionPNL: {},
       lotteryEarnings: {},
       lotterySpending: {},
-      lotteryPNL: {}
+      lotteryPNL: {},
+      dropEarnings: {},
+      dropSpending: {},
+      dropPNL: {}
     };
+
+    // Ensure drop fields are initialized even if currentBalance exists but doesn't have them
+    if (!houseBalance.dropEarnings) {
+      houseBalance.dropEarnings = {};
+    }
+    if (!houseBalance.dropSpending) {
+      houseBalance.dropSpending = {};
+    }
+    if (!houseBalance.dropPNL) {
+      houseBalance.dropPNL = {};
+    }
 
     const amountBN = new BigNumber(amountWei);
 
@@ -24649,6 +25381,16 @@ async function trackHouseTopup(guildId, amountWei, tokenIdentifier, houseType, u
       // Recalculate lottery PNL
       const lotterySpending = new BigNumber(houseBalance.lotterySpending[tokenIdentifier] || '0');
       houseBalance.lotteryPNL[tokenIdentifier] = new BigNumber(houseBalance.lotteryEarnings[tokenIdentifier]).minus(lotterySpending).toString();
+    } else if (houseType === 'drop') {
+      if (!houseBalance.dropEarnings[tokenIdentifier]) {
+        houseBalance.dropEarnings[tokenIdentifier] = '0';
+      }
+      const currentDropEarnings = new BigNumber(houseBalance.dropEarnings[tokenIdentifier] || '0');
+      houseBalance.dropEarnings[tokenIdentifier] = currentDropEarnings.plus(amountBN).toString();
+      
+      // Recalculate drop PNL
+      const dropSpending = new BigNumber(houseBalance.dropSpending[tokenIdentifier] || '0');
+      houseBalance.dropPNL[tokenIdentifier] = new BigNumber(houseBalance.dropEarnings[tokenIdentifier]).minus(dropSpending).toString();
     }
 
     // Save to database
@@ -24657,7 +25399,7 @@ async function trackHouseTopup(guildId, amountWei, tokenIdentifier, houseType, u
     // Log top-up
     const tokenDecimals = tokenMetadata[tokenIdentifier]?.decimals || 8;
     const humanAmount = amountBN.dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
-    const houseTypeName = houseType === 'betting' ? 'Betting' : houseType === 'auction' ? 'Auction' : 'Lottery';
+    const houseTypeName = houseType === 'betting' ? 'Betting' : houseType === 'auction' ? 'Auction' : houseType === 'drop' ? 'Drop' : 'Lottery';
     console.log(`[HOUSE-TOPUP] Tracked top-up: +${humanAmount} ${tokenTicker} to ${houseTypeName} house by ${userTag} (${userId})`);
 
     return {
@@ -24665,7 +25407,8 @@ async function trackHouseTopup(guildId, amountWei, tokenIdentifier, houseType, u
       newBalances: {
         betting: houseBalance.bettingPNL[tokenIdentifier] || '0',
         auction: houseBalance.auctionPNL[tokenIdentifier] || '0',
-        lottery: houseBalance.lotteryPNL[tokenIdentifier] || '0'
+        lottery: houseBalance.lotteryPNL[tokenIdentifier] || '0',
+        drop: houseBalance.dropPNL[tokenIdentifier] || '0'
       }
     };
 

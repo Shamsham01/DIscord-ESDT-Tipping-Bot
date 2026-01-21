@@ -474,7 +474,10 @@ async function getHouseBalance(guildId, tokenIdentifier) {
       auctionPNL: data.auction_pnl || {},
       lotteryEarnings: data.lottery_earnings || {},
       lotterySpending: data.lottery_spending || {},
-      lotteryPNL: data.lottery_pnl || {}
+      lotteryPNL: data.lottery_pnl || {},
+      dropEarnings: data.drop_earnings || {},
+      dropSpending: data.drop_spending || {},
+      dropPNL: data.drop_pnl || {}
     };
   } catch (error) {
     console.error('[DB] Error getting house balance:', error);
@@ -502,7 +505,10 @@ async function getAllHouseBalances(guildId) {
         auctionPNL: row.auction_pnl || {},
         lotteryEarnings: row.lottery_earnings || {},
         lotterySpending: row.lottery_spending || {},
-        lotteryPNL: row.lottery_pnl || {}
+        lotteryPNL: row.lottery_pnl || {},
+        dropEarnings: row.drop_earnings || {},
+        dropSpending: row.drop_spending || {},
+        dropPNL: row.drop_pnl || {}
       };
     });
     return balances;
@@ -528,6 +534,9 @@ async function updateHouseBalance(guildId, tokenIdentifier, balanceData) {
         lottery_earnings: balanceData.lotteryEarnings || {},
         lottery_spending: balanceData.lotterySpending || {},
         lottery_pnl: balanceData.lotteryPNL || {},
+        drop_earnings: balanceData.dropEarnings || {},
+        drop_spending: balanceData.dropSpending || {},
+        drop_pnl: balanceData.dropPNL || {},
         updated_at: new Date().toISOString()
       }, {
         onConflict: 'guild_id,token_identifier'

@@ -613,6 +613,10 @@ const commands = [
                     {
                         name: '🎲 Lottery House Balance',
                         value: 'lottery'
+                    },
+                    {
+                        name: '🪂 Drop House Balance',
+                        value: 'drop'
                     }
                 ]
             },
@@ -660,6 +664,10 @@ const commands = [
                     {
                         name: '🎲 Lottery House Balance',
                         value: 'lottery'
+                    },
+                    {
+                        name: '🪂 Drop House Balance',
+                        value: 'drop'
                     }
                 ]
             },
@@ -1056,6 +1064,10 @@ const commands = [
                     {
                         name: '🎲 Lottery House Balance',
                         value: 'lottery'
+                    },
+                    {
+                        name: '🪂 Drop House Balance',
+                        value: 'drop'
                     }
                 ]
             },
@@ -1418,6 +1430,63 @@ const commands = [
                 type: ApplicationCommandOptionType.String,
                 required: true,
                 autocomplete: true
+            }
+        ],
+        default_member_permissions: null
+    },
+    {
+        name: 'start-drop-game-automation',
+        description: 'Start automated DROP game with hourly rounds',
+        options: [
+            {
+                name: 'supported-tokens',
+                description: 'Comma-separated list of supported token identifiers (e.g., REWARD-cf6eac,USDC-c76f1f)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'base-amount',
+                description: 'Base reward amount per point',
+                type: ApplicationCommandOptionType.Number,
+                required: true
+            },
+            {
+                name: 'min-droppers',
+                description: 'Minimum number of participants required to close a round',
+                type: ApplicationCommandOptionType.Integer,
+                required: true
+            },
+            {
+                name: 'collection-identifier',
+                description: 'NFT collection identifier for supporter status (optional)',
+                type: ApplicationCommandOptionType.String,
+                required: false
+            },
+            {
+                name: 'nft-collection-multiplier',
+                description: 'Enable NFT collection multiplier for supporter status',
+                type: ApplicationCommandOptionType.Boolean,
+                required: false
+            }
+        ],
+        default_member_permissions: '0'
+    },
+    {
+        name: 'stop-drop-game-automation',
+        description: 'Stop automated DROP game',
+        options: [],
+        default_member_permissions: '0'
+    },
+    {
+        name: 'show-drop-game-leaderboard',
+        description: 'Show DROP game weekly leaderboard',
+        options: [
+            {
+                name: 'week',
+                description: 'Show specific week (leave empty for current week)',
+                type: ApplicationCommandOptionType.String,
+                required: false
             }
         ],
         default_member_permissions: null
