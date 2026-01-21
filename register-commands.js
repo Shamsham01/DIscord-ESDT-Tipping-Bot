@@ -1439,8 +1439,8 @@ const commands = [
         description: 'Start automated DROP game with hourly rounds',
         options: [
             {
-                name: 'supported-tokens',
-                description: 'Comma-separated list of supported token identifiers (e.g., REWARD-cf6eac,USDC-c76f1f)',
+                name: 'token-ticker',
+                description: 'Token identifier for airdrop rewards (e.g., REWARD-cf6eac)',
                 type: ApplicationCommandOptionType.String,
                 required: true,
                 autocomplete: true

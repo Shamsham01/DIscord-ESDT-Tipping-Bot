@@ -15169,7 +15169,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   // TOKEN AUTOCOMPLETE FOR START-DROP-GAME-AUTOMATION supported-tokens
-  if (interaction.commandName === 'start-drop-game-automation' && interaction.options.getFocused(true).name === 'supported-tokens') {
+  if (interaction.commandName === 'start-drop-game-automation' && interaction.options.getFocused(true).name === 'token-ticker') {
     try {
       const focusedValue = interaction.options.getFocused();
       const guildId = interaction.guildId;
@@ -15193,36 +15193,21 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
       
-      // Parse already-selected tokens (if user typed comma-separated values)
-      const currentValue = focusedValue.trim();
-      const alreadySelected = currentValue.includes(',') 
-        ? currentValue.split(',').map(t => t.trim()).filter(t => t)
-        : [];
-      
-      // Get the part the user is currently typing (after the last comma, or the whole value if no comma)
-      const currentInput = currentValue.includes(',')
-        ? currentValue.split(',').pop().trim()
-        : currentValue.trim();
-      
-      // Filter tokens: exclude already selected ones, and match current input
-      const availableTokens = supportedTokens.filter(token => {
-        // Exclude if already selected
-        if (alreadySelected.includes(token)) return false;
-        // Match current input
-        return token.toLowerCase().includes(currentInput.toLowerCase());
-      });
+      // Filter tokens to match current input
+      const currentInput = focusedValue.trim().toLowerCase();
+      const availableTokens = supportedTokens.filter(token => 
+        token.toLowerCase().includes(currentInput)
+      );
       
       // Format choices
       const choices = availableTokens.slice(0, 25).map(token => ({
         name: `${token.includes('-') ? token.split('-')[0] : token} (${token})`,
-        value: alreadySelected.length > 0 
-          ? `${alreadySelected.join(',')},${token}` // Append to existing selection
-          : token // Just the token if nothing selected yet
+        value: token
       }));
       
       await safeRespond(interaction, choices);
     } catch (error) {
-      console.error('[AUTOCOMPLETE] Error in start-drop-game-automation supported-tokens autocomplete:', error.message);
+      console.error('[AUTOCOMPLETE] Error in start-drop-game-automation token-ticker autocomplete:', error.message);
       await safeRespond(interaction, []);
     }
     return;
@@ -22736,7 +22721,7 @@ async function createDropRoundEmbed(guildId, roundId, game, round, isClosed = fa
       .setDescription(`**Status:** ${statusText}\n**Time Remaining:** ${countdownText}`)
       .addFields(
         { name: 'Current Droppers', value: `${round.currentDroppers}/${round.minDroppers}`, inline: true },
-        { name: 'Supported Tokens', value: game.supportedTokens.join(', ') || 'None', inline: true }
+        { name: 'Reward Token', value: game.tokenTicker ? (game.tokenTicker.includes('-') ? game.tokenTicker.split('-')[0] : game.tokenTicker) : 'None', inline: true }
       )
       .setImage(isClosed ? 'https://i.ibb.co/LynfM9F/Round-Closed.png' : 'https://i.ibb.co/kTvPqzj/Round-Live.png')
       .setFooter({ text: 'React with 🪂 to enter', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
@@ -22959,25 +22944,25 @@ async function distributeWeeklyAirdrops() {
               }
             }
             
-            // Calculate airdrop for each supported token
-            for (const tokenIdentifier of game.supportedTokens) {
+            // Calculate airdrop for the reward token
+            if (game.tokenTicker) {
               const airdropAmountWei = dropHelpers.calculateWeeklyAirdrop(entry.points, game.baseAmountWei, multiplier);
               
               if (new BigNumber(airdropAmountWei).isGreaterThan(0)) {
                 // Credit virtual account
-                const tokenDecimals = await getStoredTokenDecimals(game.guildId, tokenIdentifier);
+                const tokenDecimals = await getStoredTokenDecimals(game.guildId, game.tokenTicker);
                 const airdropAmountHuman = new BigNumber(airdropAmountWei).dividedBy(new BigNumber(10).pow(tokenDecimals || 8)).toString();
                 await virtualAccounts.addFundsToAccount(
                   game.guildId,
                   entry.userId,
-                  tokenIdentifier,
+                  game.tokenTicker,
                   airdropAmountHuman,
                   null,
                   `Weekly DROP game airdrop (${entry.points} points × ${multiplier}x multiplier)`
                 );
                 
                 // Track house spending
-                await trackHouseSpending(game.guildId, airdropAmountWei, tokenIdentifier, 'weekly_airdrop', 'drop');
+                await trackHouseSpending(game.guildId, airdropAmountWei, game.tokenTicker, 'weekly_airdrop', 'drop');
               }
             }
             
@@ -23039,41 +23024,33 @@ async function handleStartDropGame(interaction) {
     }
     
     // Get parameters
-    const supportedTokensStr = interaction.options.getString('supported-tokens');
+    const tokenTicker = interaction.options.getString('token-ticker');
     const baseAmount = interaction.options.getNumber('base-amount');
     const minDroppers = interaction.options.getInteger('min-droppers');
     const collectionIdentifier = interaction.options.getString('collection-identifier');
     const nftCollectionMultiplier = interaction.options.getBoolean('nft-collection-multiplier') || false;
     
-    // Parse supported tokens
-    const supportedTokens = supportedTokensStr.split(',').map(t => t.trim()).filter(t => t);
-    
-    if (supportedTokens.length === 0) {
-      await interaction.editReply({ content: '❌ At least one supported token is required.', flags: [MessageFlags.Ephemeral] });
-      return;
-    }
-    
-    // Validate token identifiers
+    // Validate token identifier
     const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
-    for (const token of supportedTokens) {
-      if (!esdtIdentifierRegex.test(token)) {
-        await interaction.editReply({ content: `❌ Invalid token identifier: ${token}. Must be in format TICKER-6hexchars (e.g., REWARD-cf6eac)`, flags: [MessageFlags.Ephemeral] });
-        return;
-      }
+    if (!tokenTicker || !esdtIdentifierRegex.test(tokenTicker)) {
+      await interaction.editReply({ content: `❌ Invalid token identifier: ${tokenTicker || 'empty'}. Must be in format TICKER-6hexchars (e.g., REWARD-cf6eac)`, flags: [MessageFlags.Ephemeral] });
+      return;
     }
     
     // Get token decimals for base amount
     const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
-    const firstToken = supportedTokens[0];
-    const tokenDecimals = tokenMetadata[firstToken]?.decimals || 8;
+    const tokenDecimals = tokenMetadata[tokenTicker]?.decimals || 8;
     const baseAmountWei = new BigNumber(baseAmount).multipliedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    
+    // Get token ticker for display
+    const tokenTickerDisplay = tokenMetadata[tokenTicker]?.ticker || tokenTicker.split('-')[0];
     
     // Create drop game
     const channelId = interaction.channelId;
     await dbDropGames.createDropGame(guildId, {
       channelId,
       status: 'ACTIVE',
-      supportedTokens,
+      tokenTicker,
       baseAmountWei,
       minDroppers,
       collectionIdentifier: collectionIdentifier || null,
@@ -23083,7 +23060,7 @@ async function handleStartDropGame(interaction) {
     // Create first round
     await createNextDropRound(guildId, {
       channelId,
-      supportedTokens,
+      tokenTicker,
       baseAmountWei,
       minDroppers,
       collectionIdentifier,
@@ -23091,7 +23068,7 @@ async function handleStartDropGame(interaction) {
     });
     
     await interaction.editReply({ 
-      content: `✅ **DROP Game automation started!**\n\n**Channel:** <#${channelId}>\n**Base Amount:** ${baseAmount} tokens\n**Min Droppers:** ${minDroppers}\n**Supported Tokens:** ${supportedTokens.join(', ')}\n${nftCollectionMultiplier && collectionIdentifier ? `**NFT Multiplier:** Enabled (${collectionIdentifier})` : ''}`, 
+      content: `✅ **DROP Game automation started!**\n\n**Channel:** <#${channelId}>\n**Reward Token:** ${tokenTickerDisplay} (${tokenTicker})\n**Base Amount:** ${baseAmount} ${tokenTickerDisplay}\n**Min Droppers:** ${minDroppers}\n${nftCollectionMultiplier && collectionIdentifier ? `**NFT Multiplier:** Enabled (${collectionIdentifier})` : ''}`, 
       flags: [MessageFlags.Ephemeral] 
     });
   } catch (error) {

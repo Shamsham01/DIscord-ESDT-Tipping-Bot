@@ -279,10 +279,10 @@ Close a staking pool and return NFTs to users.
 ### `/start-drop-game-automation`
 Start the DROP Game automation system with hourly rounds and weekly leaderboard.
 
-**Usage**: `/start-drop-game-automation supported-tokens base-amount min-droppers [collection-identifier] [nft-collection-multiplier]`
+**Usage**: `/start-drop-game-automation token-ticker base-amount min-droppers [collection-identifier] [nft-collection-multiplier]`
 
 **Parameters**:
-- `supported-tokens` (Required): Comma-separated list of token identifiers (e.g., `REWARD-cf6eac,USDC-c76f1f`)
+- `token-ticker` (Required): Token identifier for airdrop rewards (e.g., `REWARD-cf6eac`)
 - `base-amount` (Required): Base amount per point for weekly airdrops (e.g., `10`)
 - `min-droppers` (Required): Minimum number of participants required to close a round (e.g., `5`)
 - `collection-identifier` (Optional): NFT collection identifier for supporter status calculation
@@ -290,10 +290,10 @@ Start the DROP Game automation system with hourly rounds and weekly leaderboard.
 
 **Example**:
 ```
-/start-drop-game-automation REWARD-cf6eac,USDC-c76f1f 10 5 COLLECTION-abc123 true
+/start-drop-game-automation token-ticker:REWARD-cf6eac base-amount:10 min-droppers:5 collection-identifier:COLLECTION-abc123 nft-collection-multiplier:true
 ```
 
-**Note**: Once started, the game runs automatically with hourly rounds. Users participate by reacting with 🪂 emoji. Weekly airdrops are distributed every Sunday at 18:00 ECT.
+**Note**: Once started, the game runs automatically with hourly rounds. Users participate by reacting with 🪂 emoji. Weekly airdrops are distributed every Sunday at 18:00 ECT in the specified reward token.
 
 ### `/stop-drop-game-automation`
 Stop the active DROP Game automation.

@@ -496,12 +496,12 @@ The DROP Game is an automated engagement system that runs hourly rounds where us
 Admins start the DROP Game automation using:
 
 ```
-/start-drop-game-automation supported-tokens base-amount min-droppers [collection-identifier] [nft-collection-multiplier]
+/start-drop-game-automation token-ticker base-amount min-droppers [collection-identifier] [nft-collection-multiplier]
 ```
 
 **Parameters Explained**:
 
-* **`supported-tokens`** (Required): Comma-separated list of token identifiers (e.g., `REWARD-cf6eac,USDC-c76f1f`)
+* **`token-ticker`** (Required): Token identifier for airdrop rewards (e.g., `REWARD-cf6eac`)
 * **`base-amount`** (Required): Base amount per point for weekly airdrops (e.g., `10`)
 * **`min-droppers`** (Required): Minimum number of participants required to close a round (e.g., `5`)
 * **`collection-identifier`** (Optional): NFT collection identifier for supporter status calculation
@@ -510,11 +510,11 @@ Admins start the DROP Game automation using:
 **Example**:
 
 ```
-/start-drop-game-automation REWARD-cf6eac,USDC-c76f1f 10 5 COLLECTION-abc123 true
+/start-drop-game-automation REWARD-cf6eac 10 5 COLLECTION-abc123 true
 ```
 
 This creates a DROP Game with:
-* Supported tokens: REWARD and USDC
+* Reward token: REWARD (REWARD-cf6eac)
 * Base amount: 10 tokens per point
 * Minimum droppers: 5 participants
 * NFT collection: COLLECTION-abc123 (for multiplier calculation)
@@ -526,6 +526,7 @@ This creates a DROP Game with:
 * **Embed Display**: A Discord embed is posted showing:
   * Round information and countdown timer
   * Current number of participants
+  * Reward token for airdrops
   * Supporter status multiplier (if enabled)
   * Instructions to join
 * **Joining**: Users react with 🪂 emoji to enter the round
@@ -614,7 +615,7 @@ Users participate by simply reacting with 🪂 emoji on the DROP Game embed. No 
 #### Starting a Game
 
 ```
-/start-drop-game-automation REWARD-cf6eac 10 5 COLLECTION-abc123 true
+/start-drop-game-automation token-ticker:REWARD-cf6eac base-amount:10 min-droppers:5 collection-identifier:COLLECTION-abc123 nft-collection-multiplier:true
 ```
 
 #### Stopping a Game
