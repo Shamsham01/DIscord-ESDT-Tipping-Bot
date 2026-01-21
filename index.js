@@ -23278,9 +23278,8 @@ async function handleShowDropLeaderboard(interaction) {
         usdValue = tdaBN.multipliedBy(tokenPriceUsd).toFixed(2);
       }
       
-      // Build value string
-      let valueText = `**Points:** ${entry.points}`;
-      valueText += `\n**TDA:** ${tdaHuman} ${tokenTickerDisplay}`;
+      // Build value string (all in one line like Football Betting leaderboard)
+      let valueText = `**Points:** ${entry.points} | **TDA:** ${tdaHuman} ${tokenTickerDisplay}`;
       if (usdValue) {
         valueText += ` (≈ $${usdValue})`;
       }
@@ -23292,6 +23291,7 @@ async function handleShowDropLeaderboard(interaction) {
       });
     }
     
+    embed.setDescription(`**Top ${topEntries.length} players** based on points and TDA (To Date Airdrop)`);
     embed.addFields(fields);
     await interaction.editReply({ embeds: [embed] });
   } catch (error) {
