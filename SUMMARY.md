@@ -17,6 +17,7 @@
   * [NFT Auctions](running-activities.md#nft-auctions)
   * [NFT Staking](running-activities.md#nft-staking)
   * [Rock Paper Scissors](running-activities.md#rock-paper-scissors)
+  * [DROP Game](running-activities.md#drop-game)
 * [User Guide](user-guide.md)
   * [Registering Your Wallet](user-guide.md#registering-your-wallet)
   * [Topping Up Your Account](user-guide.md#topping-up-your-account)

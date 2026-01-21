@@ -485,6 +485,189 @@ The bot automatically:
 
 ***
 
+## DROP Game
+
+The DROP Game is an automated engagement system that runs hourly rounds where users can participate by reacting with a 🪂 emoji. Winners are selected randomly from participants, and weekly leaderboard winners receive airdrops based on their points and supporter status multiplier.
+
+### How DROP Game Works
+
+#### 1. Game Setup (Admin Only)
+
+Admins start the DROP Game automation using:
+
+```
+/start-drop-game-automation supported-tokens base-amount min-droppers [collection-identifier] [nft-collection-multiplier]
+```
+
+**Parameters Explained**:
+
+* **`supported-tokens`** (Required): Comma-separated list of token identifiers (e.g., `REWARD-cf6eac,USDC-c76f1f`)
+* **`base-amount`** (Required): Base amount per point for weekly airdrops (e.g., `10`)
+* **`min-droppers`** (Required): Minimum number of participants required to close a round (e.g., `5`)
+* **`collection-identifier`** (Optional): NFT collection identifier for supporter status calculation
+* **`nft-collection-multiplier`** (Optional): Enable NFT-based multiplier system (`true` or `false`)
+
+**Example**:
+
+```
+/start-drop-game-automation REWARD-cf6eac,USDC-c76f1f 10 5 COLLECTION-abc123 true
+```
+
+This creates a DROP Game with:
+* Supported tokens: REWARD and USDC
+* Base amount: 10 tokens per point
+* Minimum droppers: 5 participants
+* NFT collection: COLLECTION-abc123 (for multiplier calculation)
+* Multiplier enabled: Yes
+
+#### 2. Hourly Rounds
+
+* **Round Creation**: Every hour, the bot automatically creates a new DROP round
+* **Embed Display**: A Discord embed is posted showing:
+  * Round information and countdown timer
+  * Current number of participants
+  * Supporter status multiplier (if enabled)
+  * Instructions to join
+* **Joining**: Users react with 🪂 emoji to enter the round
+* **Countdown**: The embed shows a live countdown until the round closes
+
+#### 3. Round Closure
+
+* **Minimum Participants**: A round only closes if the minimum number of "droppers" (participants) is met
+* **Insufficient Participants**: If minimum is not met:
+  * Embed turns orange
+  * Shows how many more participants are needed
+  * Round stays open until minimum is reached
+* **Sufficient Participants**: When minimum is met:
+  * Round closes automatically
+  * Winner is selected randomly from all participants
+  * Winner receives 1 point added to their weekly leaderboard score
+
+#### 4. Winner Selection
+
+* **Random Selection**: One winner is chosen randomly from all participants
+* **Point Award**: Winner receives 1 point added to their weekly leaderboard
+* **Announcement**: Winner is announced via a new embed
+* **Next Round**: A new round embed is automatically created for the next hour
+
+#### 5. Weekly Leaderboard & Airdrops
+
+* **Leaderboard Period**: Weekly leaderboard runs from Sunday 18:00 ECT (European Central Time) to the following Sunday 18:00 ECT
+* **Point Tracking**: Each win adds 1 point to the user's weekly total
+* **Airdrop Distribution**: Every Sunday at 18:00 ECT, weekly airdrops are automatically distributed
+* **Airdrop Calculation**: 
+  ```
+  Airdrop Amount = Total Points × Base Amount × Supporter Status Multiplier
+  ```
+
+### Supporter Status Multiplier
+
+If NFT collection multiplier is enabled, users receive multipliers based on their NFT ownership:
+
+| Status | NFT Count | Multiplier |
+|--------|-----------|-----------|
+| **Mega Whale** | 500+ NFTs | ×10 |
+| **Whale** | 250-499 NFTs | ×8 |
+| **Shark** | 100-249 NFTs | ×5 |
+| **Dolphin** | 50-99 NFTs | ×4 |
+| **Crab** | 25-49 NFTs | ×3 |
+| **Fish** | 10-24 NFTs | ×2 |
+| **Plankton** | 1-9 NFTs | ×1 |
+
+**Example Calculation**:
+
+* User has 275 NFTs (Whale status = ×8 multiplier)
+* User won 24 rounds in the week (24 points)
+* Base amount: 10 tokens
+* **Airdrop**: 24 × 10 × 8 = **1,920 tokens**
+
+### Commands
+
+#### Admin Commands
+
+**`/start-drop-game-automation`**
+Start the DROP Game automation system.
+
+**`/stop-drop-game-automation`**
+Stop the active DROP Game automation.
+
+**`/show-drop-game-leaderboard`**
+Display the current weekly leaderboard with points and rankings.
+
+#### User Participation
+
+Users participate by simply reacting with 🪂 emoji on the DROP Game embed. No commands needed!
+
+### Game Rules & Dynamics
+
+* **Automated System**: Game runs automatically once started - no manual intervention needed
+* **Hourly Rounds**: New rounds start every hour automatically
+* **Minimum Participants**: Rounds require minimum participants before closing
+* **Fair Selection**: Winners are selected randomly from all participants
+* **Weekly Reset**: Leaderboard resets every Sunday at 18:00 ECT
+* **House Balance**: Airdrops are funded from Drop House balance (top up using `/virtual-house-topup` with house type `drop`)
+* **Virtual Account Integration**: All airdrops are credited directly to users' Virtual Accounts
+* **Guild Segregation**: Each Discord server has its own independent DROP Game
+
+### Managing DROP Game
+
+#### Starting a Game
+
+```
+/start-drop-game-automation REWARD-cf6eac 10 5 COLLECTION-abc123 true
+```
+
+#### Stopping a Game
+
+```
+/stop-drop-game-automation
+```
+
+#### Viewing Leaderboard
+
+```
+/show-drop-game-leaderboard
+```
+
+The leaderboard shows:
+* Current week's top participants
+* Points earned
+* Supporter status (if multiplier enabled)
+* Rankings
+
+### House Balance Integration
+
+DROP Game airdrops are funded from Drop House balance. Admins can:
+
+* **Top Up**: Use `/virtual-house-topup` with house type `drop` to add funds
+* **View Balance**: Use `/house-balance` to see Drop House balance
+* **Monitor**: Track earnings and spending for the drop category
+
+### Best Practices
+
+* **Set Reasonable Minimums**: Choose a minimum participant count that ensures engagement but isn't too high
+* **Base Amount**: Set base amount based on your community size and available funds
+* **NFT Multiplier**: Enable multiplier system to reward loyal NFT holders
+* **Monitor House Balance**: Ensure Drop House has sufficient funds for weekly airdrops
+* **Weekly Cutoff**: Remember airdrops distribute every Sunday at 18:00 ECT
+
+### Troubleshooting
+
+**Round Not Closing**:
+* Check if minimum participants requirement is met
+* Verify the game is still active (not stopped)
+
+**Airdrops Not Distributing**:
+* Verify it's Sunday 18:00 ECT
+* Check Drop House balance has sufficient funds
+* Ensure game is still active
+
+**Leaderboard Not Showing**:
+* Verify game is active
+* Check if any rounds have been completed in the current week
+
+***
+
 ## Cleanup Feature
 
 The bot automatically cleans up old messages to keep channels tidy:

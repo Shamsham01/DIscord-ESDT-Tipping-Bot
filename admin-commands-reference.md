@@ -100,7 +100,7 @@ Tip user from House Balance.
 - `user`: Discord user to tip
 - `token`: Token ticker
 - `amount`: Amount to send
-- `source`: Which house to use (`betting`, `auction`, or `lottery`)
+- `source`: Which house to use (`betting`, `auction`, `lottery`, or `drop`)
 - `memo` (Optional): Note about the tip
 
 **Example**:
@@ -276,6 +276,46 @@ Close a staking pool and return NFTs to users.
 /close-staking-pool pool-123
 ```
 
+### `/start-drop-game-automation`
+Start the DROP Game automation system with hourly rounds and weekly leaderboard.
+
+**Usage**: `/start-drop-game-automation supported-tokens base-amount min-droppers [collection-identifier] [nft-collection-multiplier]`
+
+**Parameters**:
+- `supported-tokens` (Required): Comma-separated list of token identifiers (e.g., `REWARD-cf6eac,USDC-c76f1f`)
+- `base-amount` (Required): Base amount per point for weekly airdrops (e.g., `10`)
+- `min-droppers` (Required): Minimum number of participants required to close a round (e.g., `5`)
+- `collection-identifier` (Optional): NFT collection identifier for supporter status calculation
+- `nft-collection-multiplier` (Optional): Enable NFT-based multiplier system (`true` or `false`)
+
+**Example**:
+```
+/start-drop-game-automation REWARD-cf6eac,USDC-c76f1f 10 5 COLLECTION-abc123 true
+```
+
+**Note**: Once started, the game runs automatically with hourly rounds. Users participate by reacting with 🪂 emoji. Weekly airdrops are distributed every Sunday at 18:00 ECT.
+
+### `/stop-drop-game-automation`
+Stop the active DROP Game automation.
+
+**Usage**: `/stop-drop-game-automation`
+
+**Note**: This stops the automated game system. Current round will complete, but no new rounds will be created.
+
+### `/show-drop-game-leaderboard`
+Display the current weekly leaderboard with points and rankings.
+
+**Usage**: `/show-drop-game-leaderboard [public]`
+
+**Parameters**:
+- `public` (Optional): Show leaderboard publicly or privately
+
+Shows:
+- Current week's top participants
+- Points earned
+- Supporter status (if multiplier enabled)
+- Rankings
+
 ---
 
 ## Monitoring & Debugging
@@ -300,6 +340,7 @@ Shows:
 - **Betting House**: Earnings, Spending, PNL
 - **Auction House**: Earnings, Spending, PNL
 - **Lottery House**: Earnings, Spending, PNL
+- **Drop House**: Earnings, Spending, PNL
 
 ### `/blockchain-status`
 Check blockchain listener status.
