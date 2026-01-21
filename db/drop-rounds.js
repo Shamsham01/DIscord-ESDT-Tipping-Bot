@@ -443,6 +443,39 @@ async function getLeaderboardForAirdrop(guildId) {
   }
 }
 
+// Get all-time leaderboard (sum of all points across all weeks)
+async function getAllTimeLeaderboard(guildId) {
+  try {
+    const { data, error } = await supabase
+      .from('drop_leaderboard')
+      .select('user_id, user_tag, points')
+      .eq('guild_id', guildId);
+    
+    if (error) throw error;
+    
+    // Aggregate points by user
+    const userTotals = {};
+    (data || []).forEach(row => {
+      const userId = row.user_id;
+      if (!userTotals[userId]) {
+        userTotals[userId] = {
+          userId,
+          userTag: row.user_tag,
+          totalPoints: 0
+        };
+      }
+      userTotals[userId].totalPoints += (row.points || 0);
+    });
+    
+    // Convert to array and sort by total points
+    return Object.values(userTotals)
+      .sort((a, b) => b.totalPoints - a.totalPoints);
+  } catch (error) {
+    console.error('[DB] Error getting all-time leaderboard:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   createRound,
   getRound,
@@ -456,5 +489,6 @@ module.exports = {
   deleteParticipantsForRound,
   getWeeklyLeaderboard,
   updateLeaderboardEntry,
-  getLeaderboardForAirdrop
+  getLeaderboardForAirdrop,
+  getAllTimeLeaderboard
 };

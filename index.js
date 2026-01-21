@@ -23196,12 +23196,42 @@ async function handleShowDropLeaderboard(interaction) {
     const guildId = interaction.guildId;
     const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
     
+    // Get current week leaderboard
     const leaderboard = await dbDropRounds.getWeeklyLeaderboard(guildId, weekStart, weekEnd);
     
     if (leaderboard.length === 0) {
       await interaction.editReply({ content: '📊 No entries in the current week leaderboard yet.' });
       return;
     }
+    
+    // Get game settings for TDA calculation
+    const game = await dbDropGames.getDropGame(guildId);
+    if (!game || !game.tokenTicker) {
+      await interaction.editReply({ content: '❌ DROP Game not configured for this server.' });
+      return;
+    }
+    
+    // Get all-time points for each user
+    const allTimeLeaderboard = await dbDropRounds.getAllTimeLeaderboard(guildId);
+    const allTimePointsMap = {};
+    allTimeLeaderboard.forEach(entry => {
+      allTimePointsMap[entry.userId] = entry.totalPoints;
+    });
+    
+    // Get token metadata and USD price
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    const tokenDecimals = tokenMetadata[game.tokenTicker]?.decimals || 8;
+    const tokenTickerDisplay = tokenMetadata[game.tokenTicker]?.ticker || game.tokenTicker.split('-')[0];
+    
+    let tokenPriceUsd = 0;
+    try {
+      tokenPriceUsd = await getTokenPriceUsd(game.tokenTicker);
+    } catch (error) {
+      console.error('[DROP] Error fetching token price:', error.message);
+    }
+    
+    // Get user wallets for NFT count lookup
+    const userWallets = await getUserWallets(guildId);
     
     const embed = new EmbedBuilder()
       .setTitle('🏆 DROP Game Weekly Leaderboard')
@@ -23216,9 +23246,48 @@ async function handleShowDropLeaderboard(interaction) {
     for (let i = 0; i < topEntries.length; i++) {
       const entry = topEntries[i];
       const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+      
+      // Get all-time points
+      const totalPoints = allTimePointsMap[entry.userId] || 0;
+      
+      // Calculate multiplier if NFT multiplier is enabled
+      let multiplier = 1;
+      if (game.nftCollectionMultiplier && game.collectionIdentifier) {
+        const walletAddress = userWallets[entry.userId];
+        if (walletAddress) {
+          try {
+            const nftResult = await dropHelpers.getUserNFTCount(walletAddress, game.collectionIdentifier);
+            if (nftResult.success) {
+              const supporterStatus = dropHelpers.calculateSupporterStatus(nftResult.count);
+              multiplier = supporterStatus.multiplier;
+            }
+          } catch (error) {
+            console.error(`[DROP] Error fetching NFT count for ${entry.userTag}:`, error.message);
+          }
+        }
+      }
+      
+      // Calculate TDA (To Date Airdrop)
+      const tdaWei = dropHelpers.calculateWeeklyAirdrop(totalPoints, game.baseAmountWei, multiplier);
+      const tdaHuman = new BigNumber(tdaWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(2);
+      
+      // Calculate USD value
+      let usdValue = null;
+      if (tokenPriceUsd > 0) {
+        const tdaBN = new BigNumber(tdaHuman);
+        usdValue = tdaBN.multipliedBy(tokenPriceUsd).toFixed(2);
+      }
+      
+      // Build value string
+      let valueText = `**Points:** ${entry.points}`;
+      valueText += `\n**TDA:** ${tdaHuman} ${tokenTickerDisplay}`;
+      if (usdValue) {
+        valueText += ` (≈ $${usdValue})`;
+      }
+      
       fields.push({
         name: `${medal} ${entry.userTag || 'Unknown'}`,
-        value: `**Points:** ${entry.points} | **Wins:** ${entry.wins}`,
+        value: valueText,
         inline: false
       });
     }
