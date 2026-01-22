@@ -155,8 +155,8 @@ Users can bet on:
 
 ### Viewing Statistics
 
-* **Leaderboard**: `/leaderboard` - Top bettors
-* **Filtered Leaderboard**: `/leaderboard-filtered` - By date range or competition
+* **Leaderboard**: `/football-leaderboard-all` - Top bettors
+* **Filtered Leaderboard**: `/football-leaderboard-filtered` - By date range or competition
 * **Your Stats**: `/my-football-stats` - Your betting statistics and PNL
 
 ### House Balance Integration

@@ -498,7 +498,7 @@ const commands = [
         default_member_permissions: null, // Permissions are checked in code
     },
     {
-        name: 'leaderboard',
+        name: 'football-leaderboard-all',
         description: 'Show football betting leaderboard',
         options: [
             {
@@ -524,7 +524,7 @@ const commands = [
         default_member_permissions: null,
     },
     {
-        name: 'leaderboard-filtered',
+        name: 'football-leaderboard-filtered',
         description: 'View leaderboard filtered by date range and competition',
         options: [
             {
@@ -1479,7 +1479,7 @@ const commands = [
         default_member_permissions: '0'
     },
     {
-        name: 'show-drop-game-leaderboard',
+        name: 'drop-leaderboard',
         description: 'Show DROP game weekly leaderboard',
         options: [
             {

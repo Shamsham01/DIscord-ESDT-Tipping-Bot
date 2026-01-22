@@ -6747,7 +6747,7 @@ client.on('interactionCreate', async (interaction) => {
     await handleStartDropGame(interaction);
   } else if (commandName === 'stop-drop-game-automation') {
     await handleStopDropGame(interaction);
-  } else if (commandName === 'show-drop-game-leaderboard') {
+  } else if (commandName === 'drop-leaderboard') {
     await handleShowDropLeaderboard(interaction);
   } else if (commandName === 'help') {
     try {
@@ -6780,8 +6780,8 @@ client.on('interactionCreate', async (interaction) => {
         ],
         '⚽ Football Betting': [
           '`/create-fixtures` 🔴 Admin - Create football matches for betting',
-          '`/leaderboard` - View betting leaderboard',
-          '`/leaderboard-filtered` - View leaderboard for date range',
+          '`/football-leaderboard-all` - View betting leaderboard',
+          '`/football-leaderboard-filtered` - View leaderboard for date range',
           '`/my-football-stats` - View your betting statistics & PNL'
         ],
         '🎮 Rock Paper Scissors': [
@@ -6913,7 +6913,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
-  } else if (commandName === 'leaderboard') {
+  } else if (commandName === 'football-leaderboard-all') {
     try {
       const isPublic = interaction.options.getBoolean('public') || false;
       
@@ -6934,8 +6934,8 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // Sort users by points (descending), then by wins (descending), then by total earnings (descending)
-      const sortedUsers = Object.entries(guildLeaderboard)
+      // Sort users by points (descending), then by wins (descending), then by PNL (descending)
+      const allSortedUsers = Object.entries(guildLeaderboard)
         .filter(([userId]) => userId !== 'HOUSE') // Exclude HOUSE from user leaderboard
         .map(([userId, data]) => ({
           userId,
@@ -6950,15 +6950,28 @@ client.on('interactionCreate', async (interaction) => {
           if (b.wins !== a.wins) {
             return b.wins - a.wins;
           }
-          // Then by total earnings
-          return new BigNumber(b.totalEarningsWei || 0).minus(new BigNumber(a.totalEarningsWei || 0)).toNumber();
-        })
-        .slice(0, 10); // Top 10 players
+          // When wins are tied, sort by PNL (higher gain or lower loss on top)
+          const pnlA = new BigNumber(a.pnlWei || 0);
+          const pnlB = new BigNumber(b.pnlWei || 0);
+          return pnlB.minus(pnlA).toNumber();
+        });
+
+      // Pagination settings
+      const entriesPerPage = 10;
+      const page = 1; // Always start at page 1 for initial command
+      const totalPages = Math.ceil(allSortedUsers.length / entriesPerPage);
+      const startIndex = (page - 1) * entriesPerPage;
+      const endIndex = startIndex + entriesPerPage;
+      const sortedUsers = allSortedUsers.slice(startIndex, endIndex);
 
       const embed = new EmbedBuilder()
         .setTitle('🏆 Football Betting Leaderboard')
-        .setDescription(`**Top ${sortedUsers.length} players** based on points, wins, and earnings`)
+        .setDescription(`**Top ${allSortedUsers.length} players** based on points, wins, and PNL`)
         .setColor('#FFD700')
+        .setFooter({ 
+          text: totalPages > 1 ? `Page ${page}/${totalPages}` : `Total: ${allSortedUsers.length} players`,
+          iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png'
+        })
         .setTimestamp();
 
       for (let i = 0; i < sortedUsers.length; i++) {
@@ -6996,12 +7009,13 @@ client.on('interactionCreate', async (interaction) => {
           }
         }
         
-        // Get emoji for position
+        // Get emoji for position (use global index)
+        const globalIndex = startIndex + i;
         let positionEmoji = '🥉';
-        if (i === 0) positionEmoji = '🥇';
-        else if (i === 1) positionEmoji = '🥈';
-        else if (i === 2) positionEmoji = '🥉';
-        else positionEmoji = `${i + 1}.`;
+        if (globalIndex === 0) positionEmoji = '🥇';
+        else if (globalIndex === 1) positionEmoji = '🥈';
+        else if (globalIndex === 2) positionEmoji = '🥉';
+        else positionEmoji = `${globalIndex + 1}.`;
         
         embed.addFields({
           name: `${positionEmoji} ${username}`,
@@ -7010,7 +7024,34 @@ client.on('interactionCreate', async (interaction) => {
         });
       }
 
-      await interaction.editReply({ embeds: [embed] });
+      // Create pagination buttons if more than 10 entries
+      const components = [];
+      if (totalPages > 1) {
+        const buttonRow = new ActionRowBuilder();
+        
+        const prevButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-all:${page - 1}`)
+          .setLabel('◀ Previous')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page === 1);
+        
+        const pageButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-all-page:${page}`)
+          .setLabel(`Page ${page}/${totalPages}`)
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+        
+        const nextButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-all:${page + 1}`)
+          .setLabel('Next ▶')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page === totalPages);
+        
+        buttonRow.addComponents(prevButton, pageButton, nextButton);
+        components.push(buttonRow);
+      }
+
+      await interaction.editReply({ embeds: [embed], components });
     } catch (error) {
       console.error('[FOOTBALL] Error in leaderboard command:', error.message);
       if (interaction.deferred) {
@@ -8195,7 +8236,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
-  } else if (commandName === 'leaderboard-filtered') {
+  } else if (commandName === 'football-leaderboard-filtered') {
     try {
       const startDate = interaction.options.getString('start-date');
       const endDate = interaction.options.getString('end-date');
@@ -8415,11 +8456,22 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Convert to array and sort
-      const sortedUsers = Object.values(userStats).sort((a, b) => {
+      const allSortedUsers = Object.values(userStats).sort((a, b) => {
         if (b.points !== a.points) return b.points - a.points;
         if (b.wins !== a.wins) return b.wins - a.wins;
-        return b.totalEarnings - a.totalEarnings;
-      }).slice(0, 20); // Top 20
+        // When wins are tied, sort by PNL (higher gain or lower loss on top)
+        const pnlA = a.totalEarnings - a.totalBets;
+        const pnlB = b.totalEarnings - b.totalBets;
+        return pnlB - pnlA;
+      });
+      
+      // Pagination settings
+      const entriesPerPage = 10;
+      const page = 1; // Always start at page 1 for initial command
+      const totalPages = Math.ceil(allSortedUsers.length / entriesPerPage);
+      const startIndex = (page - 1) * entriesPerPage;
+      const endIndex = startIndex + entriesPerPage;
+      const sortedUsers = allSortedUsers.slice(startIndex, endIndex);
       
       // Get competition name for display
       let competitionDisplay = '';
@@ -8433,8 +8485,12 @@ client.on('interactionCreate', async (interaction) => {
       // Create embed
       const embed = new EmbedBuilder()
         .setTitle('🏆 Filtered Leaderboard')
-        .setDescription(`**Top ${sortedUsers.length} players** from ${startDate} to ${endDate}${competitionDisplay}`)
+        .setDescription(`**Top ${allSortedUsers.length} players** from ${startDate} to ${endDate}${competitionDisplay}`)
         .setColor('#FFD700')
+        .setFooter({ 
+          text: totalPages > 1 ? `Page ${page}/${totalPages}` : `Total: ${allSortedUsers.length} players`,
+          iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png'
+        })
         .setTimestamp();
       
       for (let i = 0; i < sortedUsers.length; i++) {
@@ -8464,11 +8520,13 @@ client.on('interactionCreate', async (interaction) => {
           }
         }
         
+        // Get emoji for position (use global index)
+        const globalIndex = startIndex + i;
         let positionEmoji = '🥉';
-        if (i === 0) positionEmoji = '🥇';
-        else if (i === 1) positionEmoji = '🥈';
-        else if (i === 2) positionEmoji = '🥉';
-        else positionEmoji = `${i + 1}.`;
+        if (globalIndex === 0) positionEmoji = '🥇';
+        else if (globalIndex === 1) positionEmoji = '🥈';
+        else if (globalIndex === 2) positionEmoji = '🥉';
+        else positionEmoji = `${globalIndex + 1}.`;
         
         embed.addFields({
           name: `${positionEmoji} ${username}`,
@@ -8477,9 +8535,39 @@ client.on('interactionCreate', async (interaction) => {
         });
       }
       
-      await interaction.editReply({ embeds: [embed], flags: isPublic ? [] : [MessageFlags.Ephemeral] });
+      // Create pagination buttons if more than 10 entries
+      const components = [];
+      if (totalPages > 1) {
+        const buttonRow = new ActionRowBuilder();
+        
+        // Encode filter parameters in customId (base64 encode to handle special characters)
+        const filterParams = Buffer.from(JSON.stringify({ startDate, endDate, competition: competition || '' })).toString('base64');
+        
+        const prevButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-filtered:${page - 1}:${filterParams}`)
+          .setLabel('◀ Previous')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page === 1);
+        
+        const pageButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-filtered-page:${page}:${filterParams}`)
+          .setLabel(`Page ${page}/${totalPages}`)
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+        
+        const nextButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-filtered:${page + 1}:${filterParams}`)
+          .setLabel('Next ▶')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page === totalPages);
+        
+        buttonRow.addComponents(prevButton, pageButton, nextButton);
+        components.push(buttonRow);
+      }
+      
+      await interaction.editReply({ embeds: [embed], components, flags: isPublic ? [] : [MessageFlags.Ephemeral] });
     } catch (error) {
-      console.error('[FOOTBALL] Error in leaderboard-filtered command:', error.message);
+      console.error('[FOOTBALL] Error in show-football-leaderboard-filtered command:', error.message);
       if (interaction.deferred) {
         await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       } else {
@@ -14278,7 +14366,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   // COMPETITION AUTOCOMPLETE FOR LEADERBOARD-FILTERED
-  if (interaction.commandName === 'leaderboard-filtered' && interaction.options.getFocused(true).name === 'competition') {
+  if (interaction.commandName === 'football-leaderboard-filtered' && interaction.options.getFocused(true).name === 'competition') {
     try {
       const focusedValue = interaction.options.getFocused();
       
@@ -18494,6 +18582,486 @@ client.on('interactionCreate', async (interaction) => {
       } else {
         await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
+    }
+  } else if (customId.startsWith('football-leaderboard-all:')) {
+    // Football leaderboard all pagination handler
+    try {
+      await interaction.deferUpdate();
+      
+      const parts = customId.split(':');
+      const page = parseInt(parts[1], 10) || 1;
+      const guildId = interaction.guildId;
+      
+      // Get leaderboard from database
+      const guildLeaderboard = await dbLeaderboard.getLeaderboard(guildId) || {};
+      
+      if (Object.keys(guildLeaderboard).length === 0) {
+        await interaction.editReply({ content: '❌ **No leaderboard data found!**' });
+        return;
+      }
+
+      // Sort users by points (descending), then by wins (descending), then by PNL (descending)
+      const allSortedUsers = Object.entries(guildLeaderboard)
+        .filter(([userId]) => userId !== 'HOUSE')
+        .map(([userId, data]) => ({ userId, ...data }))
+        .sort((a, b) => {
+          if (b.points !== a.points) return b.points - a.points;
+          if (b.wins !== a.wins) return b.wins - a.wins;
+          const pnlA = new BigNumber(a.pnlWei || 0);
+          const pnlB = new BigNumber(b.pnlWei || 0);
+          return pnlB.minus(pnlA).toNumber();
+        });
+
+      // Pagination settings
+      const entriesPerPage = 10;
+      const totalPages = Math.ceil(allSortedUsers.length / entriesPerPage);
+      const currentPage = Math.max(1, Math.min(page, totalPages));
+      const startIndex = (currentPage - 1) * entriesPerPage;
+      const endIndex = startIndex + entriesPerPage;
+      const sortedUsers = allSortedUsers.slice(startIndex, endIndex);
+
+      const embed = new EmbedBuilder()
+        .setTitle('🏆 Football Betting Leaderboard')
+        .setDescription(`**Top ${allSortedUsers.length} players** based on points, wins, and PNL`)
+        .setColor('#FFD700')
+        .setFooter({ 
+          text: totalPages > 1 ? `Page ${currentPage}/${totalPages}` : `Total: ${allSortedUsers.length} players`,
+          iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png'
+        })
+        .setTimestamp();
+
+      for (let i = 0; i < sortedUsers.length; i++) {
+        const user = sortedUsers[i];
+        const userMember = await interaction.guild.members.fetch(user.userId).catch(() => null);
+        const username = userMember ? userMember.user.username : `User ${user.userId}`;
+        
+        let totalEarningsHuman = '0.00';
+        if (user.tokenEarnings && Object.keys(user.tokenEarnings).length > 0) {
+          const tokenEarningsList = [];
+          for (const [tokenTicker, earningsWei] of Object.entries(user.tokenEarnings)) {
+            const storedDecimals = await getStoredTokenDecimals(guildId, tokenTicker);
+            if (storedDecimals !== null) {
+              const earningsHuman = new BigNumber(earningsWei || 0).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
+              if (parseFloat(earningsHuman) > 0) {
+                tokenEarningsList.push(`${earningsHuman} ${tokenTicker}`);
+              }
+            } else {
+              tokenEarningsList.push(`❌ ${tokenTicker} (metadata missing)`);
+            }
+          }
+          totalEarningsHuman = tokenEarningsList.length > 0 ? tokenEarningsList.join(', ') : '0.00 tokens';
+        } else {
+          const storedDecimals = await getStoredTokenDecimals(guildId, 'REWARD-cf6eac');
+          if (storedDecimals !== null) {
+            totalEarningsHuman = new BigNumber(user.totalEarningsWei || 0).dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
+          } else {
+            totalEarningsHuman = '❌ Token metadata missing - run /update-token-metadata';
+          }
+        }
+        
+        const globalIndex = startIndex + i;
+        let positionEmoji = '🥉';
+        if (globalIndex === 0) positionEmoji = '🥇';
+        else if (globalIndex === 1) positionEmoji = '🥈';
+        else if (globalIndex === 2) positionEmoji = '🥉';
+        else positionEmoji = `${globalIndex + 1}.`;
+        
+        embed.addFields({
+          name: `${positionEmoji} ${username}`,
+          value: `**Points:** ${user.points || 0} | **Wins:** ${user.wins || 0} | **Total Earnings:** ${totalEarningsHuman}`,
+          inline: false
+        });
+      }
+
+      // Create pagination buttons
+      const components = [];
+      if (totalPages > 1) {
+        const buttonRow = new ActionRowBuilder();
+        
+        const prevButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-all:${currentPage - 1}`)
+          .setLabel('◀ Previous')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === 1);
+        
+        const pageButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-all-page:${currentPage}`)
+          .setLabel(`Page ${currentPage}/${totalPages}`)
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+        
+        const nextButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-all:${currentPage + 1}`)
+          .setLabel('Next ▶')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === totalPages);
+        
+        buttonRow.addComponents(prevButton, pageButton, nextButton);
+        components.push(buttonRow);
+      }
+
+      await interaction.editReply({ embeds: [embed], components });
+    } catch (error) {
+      console.error('[FOOTBALL] Error in football-leaderboard-all pagination:', error.message);
+      await interaction.editReply({ content: `❌ Error: ${error.message}` });
+    }
+  } else if (customId.startsWith('football-leaderboard-filtered:')) {
+    // Football leaderboard filtered pagination handler
+    try {
+      await interaction.deferUpdate();
+      
+      const parts = customId.split(':');
+      const page = parseInt(parts[1], 10) || 1;
+      const filterParamsBase64 = parts[2] || '';
+      const guildId = interaction.guildId;
+      
+      // Decode filter parameters
+      let filterParams;
+      try {
+        filterParams = JSON.parse(Buffer.from(filterParamsBase64, 'base64').toString());
+      } catch (e) {
+        await interaction.editReply({ content: '❌ Invalid filter parameters.' });
+        return;
+      }
+      
+      const { startDate, endDate, competition } = filterParams;
+      
+      // Get all matches and bets (same logic as command)
+      const guildMatches = await dbFootball.getMatches(guildId) || {};
+      const allBets = await dbFootball.getBets(guildId) || {};
+      
+      // Filter bets by date range and competition
+      const startTime = new Date(startDate).getTime();
+      const endTime = new Date(endDate).getTime() + (24 * 60 * 60 * 1000) - 1;
+      
+      const filteredBets = Object.values(allBets).filter(bet => {
+        if (!bet.createdAtISO) return false;
+        const betTime = new Date(bet.createdAtISO).getTime();
+        if (isNaN(betTime)) return false;
+        const inRange = betTime >= startTime && betTime <= endTime;
+        if (!inRange) return false;
+        
+        if (competition) {
+          const match = guildMatches[bet.matchId];
+          if (!match) return false;
+          const matchCompCode = (match.compCode || '').toUpperCase().trim();
+          const filterCompCode = competition.toUpperCase().trim();
+          if (matchCompCode !== filterCompCode) return false;
+        }
+        return true;
+      });
+      
+      if (filteredBets.length === 0) {
+        await interaction.editReply({ content: '❌ **No bets found** for the specified filters.' });
+        return;
+      }
+      
+      // Calculate stats for each user
+      const userStats = {};
+      for (const bet of filteredBets) {
+        const match = guildMatches[bet.matchId];
+        if (!match) continue;
+        
+        const userId = bet.userId;
+        if (!userId) continue;
+        
+        if (!userStats[userId]) {
+          userStats[userId] = {
+            userId: userId,
+            points: 0,
+            wins: 0,
+            totalBets: 0,
+            totalEarnings: 0,
+            matches: 0,
+            tokenStats: {}
+          };
+        }
+        
+        const betAmountWei = new BigNumber(bet.amountWei || '0');
+        if (betAmountWei.isZero() || !betAmountWei.isFinite()) continue;
+        
+        const tokenTicker = match.token?.ticker;
+        if (!tokenTicker) continue;
+        
+        if (!userStats[userId].tokenStats[tokenTicker]) {
+          userStats[userId].tokenStats[tokenTicker] = { bets: 0, earnings: 0 };
+        }
+        
+        userStats[userId].totalBets += betAmountWei.toNumber();
+        userStats[userId].matches += 1;
+        userStats[userId].tokenStats[tokenTicker].bets += betAmountWei.toNumber();
+        
+        if (bet.prizeSent === true && bet.prizeAmount) {
+          try {
+            const storedDecimals = match.token?.decimals || await getStoredTokenDecimals(guildId, tokenTicker);
+            if (storedDecimals !== null) {
+              const prizeAmountWei = toBlockchainAmount(bet.prizeAmount, storedDecimals);
+              const prizeBN = new BigNumber(prizeAmountWei);
+              if (prizeBN.isGreaterThan(0) && prizeBN.isFinite()) {
+                userStats[userId].totalEarnings += prizeBN.toNumber();
+                userStats[userId].tokenStats[tokenTicker].earnings += prizeBN.toNumber();
+                userStats[userId].wins += 1;
+                userStats[userId].points += 3;
+              }
+            }
+          } catch (prizeError) {
+            console.error(`[LEADERBOARD-FILTERED] Error processing prize:`, prizeError.message);
+          }
+        }
+      }
+      
+      // Sort users
+      const allSortedUsers = Object.values(userStats).sort((a, b) => {
+        if (b.points !== a.points) return b.points - a.points;
+        if (b.wins !== a.wins) return b.wins - a.wins;
+        const pnlA = a.totalEarnings - a.totalBets;
+        const pnlB = b.totalEarnings - b.totalBets;
+        return pnlB - pnlA;
+      });
+      
+      // Pagination settings
+      const entriesPerPage = 10;
+      const totalPages = Math.ceil(allSortedUsers.length / entriesPerPage);
+      const currentPage = Math.max(1, Math.min(page, totalPages));
+      const startIndex = (currentPage - 1) * entriesPerPage;
+      const endIndex = startIndex + entriesPerPage;
+      const sortedUsers = allSortedUsers.slice(startIndex, endIndex);
+      
+      // Get competition name for display
+      let competitionDisplay = '';
+      if (competition) {
+        const matchWithComp = Object.values(guildMatches).find(m => 
+          m.compCode && m.compCode.toUpperCase() === competition.toUpperCase()
+        );
+        competitionDisplay = matchWithComp ? ` in ${matchWithComp.compName}` : ` in ${competition}`;
+      }
+      
+      // Create embed
+      const embed = new EmbedBuilder()
+        .setTitle('🏆 Filtered Leaderboard')
+        .setDescription(`**Top ${allSortedUsers.length} players** from ${startDate} to ${endDate}${competitionDisplay}`)
+        .setColor('#FFD700')
+        .setFooter({ 
+          text: totalPages > 1 ? `Page ${currentPage}/${totalPages}` : `Total: ${allSortedUsers.length} players`,
+          iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png'
+        })
+        .setTimestamp();
+      
+      for (let i = 0; i < sortedUsers.length; i++) {
+        const user = sortedUsers[i];
+        const userMember = await interaction.guild.members.fetch(user.userId).catch(() => null);
+        const username = userMember ? userMember.user.username : `User ${user.userId}`;
+        
+        const pnlTokens = [];
+        for (const [tokenTicker, stats] of Object.entries(user.tokenStats)) {
+          const storedDecimals = await getStoredTokenDecimals(guildId, tokenTicker);
+          if (storedDecimals !== null) {
+            const tokenBetsBN = new BigNumber(stats.bets || 0);
+            const tokenEarningsBN = new BigNumber(stats.earnings || 0);
+            const tokenPNLBN = tokenEarningsBN.minus(tokenBetsBN);
+            const tokenPNLHuman = tokenPNLBN.dividedBy(new BigNumber(10).pow(storedDecimals)).toFixed(2);
+            const pnlEmoji = tokenPNLBN.isGreaterThanOrEqualTo(0) ? '🟢' : '🔴';
+            const pnlSign = tokenPNLBN.isGreaterThanOrEqualTo(0) ? '+' : '';
+            pnlTokens.push(`${pnlEmoji} ${pnlSign}${tokenPNLHuman} ${tokenTicker}`);
+          }
+        }
+        
+        const globalIndex = startIndex + i;
+        let positionEmoji = '🥉';
+        if (globalIndex === 0) positionEmoji = '🥇';
+        else if (globalIndex === 1) positionEmoji = '🥈';
+        else if (globalIndex === 2) positionEmoji = '🥉';
+        else positionEmoji = `${globalIndex + 1}.`;
+        
+        embed.addFields({
+          name: `${positionEmoji} ${username}`,
+          value: `**Points:** ${user.points} | **Wins:** ${user.wins} | **Bets:** ${user.matches}\n**PNL:** ${pnlTokens.join(', ') || 'N/A'}`,
+          inline: false
+        });
+      }
+      
+      // Create pagination buttons
+      const components = [];
+      if (totalPages > 1) {
+        const buttonRow = new ActionRowBuilder();
+        
+        const prevButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-filtered:${currentPage - 1}:${filterParamsBase64}`)
+          .setLabel('◀ Previous')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === 1);
+        
+        const pageButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-filtered-page:${currentPage}:${filterParamsBase64}`)
+          .setLabel(`Page ${currentPage}/${totalPages}`)
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+        
+        const nextButton = new ButtonBuilder()
+          .setCustomId(`football-leaderboard-filtered:${currentPage + 1}:${filterParamsBase64}`)
+          .setLabel('Next ▶')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === totalPages);
+        
+        buttonRow.addComponents(prevButton, pageButton, nextButton);
+        components.push(buttonRow);
+      }
+      
+      await interaction.editReply({ embeds: [embed], components });
+    } catch (error) {
+      console.error('[FOOTBALL] Error in football-leaderboard-filtered pagination:', error.message);
+      await interaction.editReply({ content: `❌ Error: ${error.message}` });
+    }
+  } else if (customId.startsWith('drop-leaderboard:')) {
+    // Drop leaderboard pagination handler
+    try {
+      await interaction.deferUpdate();
+      
+      const parts = customId.split(':');
+      const page = parseInt(parts[1], 10) || 1;
+      const guildId = interaction.guildId;
+      
+      const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
+      const leaderboard = await dbDropRounds.getWeeklyLeaderboard(guildId, weekStart, weekEnd);
+      
+      if (leaderboard.length === 0) {
+        await interaction.editReply({ content: '📊 No entries in the current week leaderboard yet.' });
+        return;
+      }
+      
+      const game = await dbDropGames.getDropGame(guildId);
+      if (!game || !game.tokenTicker) {
+        await interaction.editReply({ content: '❌ DROP Game not configured for this server.' });
+        return;
+      }
+      
+      const allTimeLeaderboard = await dbDropRounds.getAllTimeLeaderboard(guildId);
+      const allTimePointsMap = {};
+      allTimeLeaderboard.forEach(entry => {
+        allTimePointsMap[entry.userId] = entry.totalPoints;
+      });
+      
+      const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+      const tokenDecimals = tokenMetadata[game.tokenTicker]?.decimals || 8;
+      const tokenTickerDisplay = tokenMetadata[game.tokenTicker]?.ticker || game.tokenTicker.split('-')[0];
+      
+      let tokenPriceUsd = 0;
+      try {
+        tokenPriceUsd = await getTokenPriceUsd(game.tokenTicker);
+      } catch (error) {
+        console.error('[DROP] Error fetching token price:', error.message);
+      }
+      
+      const userWallets = await getUserWallets(guildId);
+      
+      const entriesWithTDA = await Promise.all(leaderboard.map(async (entry) => {
+        const totalPoints = allTimePointsMap[entry.userId] || 0;
+        let multiplier = 1;
+        if (game.nftCollectionMultiplier && game.collectionIdentifier) {
+          const walletAddress = userWallets[entry.userId];
+          if (walletAddress) {
+            try {
+              const nftResult = await dropHelpers.getUserNFTCount(walletAddress, game.collectionIdentifier);
+              if (nftResult.success) {
+                const supporterStatus = dropHelpers.calculateSupporterStatus(nftResult.count);
+                multiplier = supporterStatus.multiplier;
+              }
+            } catch (error) {
+              console.error(`[DROP] Error fetching NFT count:`, error.message);
+            }
+          }
+        }
+        const tdaWei = dropHelpers.calculateWeeklyAirdrop(totalPoints, game.baseAmountWei, multiplier);
+        return {
+          ...entry,
+          tdaWei: new BigNumber(tdaWei),
+          multiplier
+        };
+      }));
+      
+      entriesWithTDA.sort((a, b) => {
+        if (b.points !== a.points) return b.points - a.points;
+        return b.tdaWei.comparedTo(a.tdaWei);
+      });
+      
+      // Pagination settings
+      const entriesPerPage = 10;
+      const totalPages = Math.ceil(entriesWithTDA.length / entriesPerPage);
+      const currentPage = Math.max(1, Math.min(page, totalPages));
+      const startIndex = (currentPage - 1) * entriesPerPage;
+      const endIndex = startIndex + entriesPerPage;
+      const topEntries = entriesWithTDA.slice(startIndex, endIndex);
+      
+      const embed = new EmbedBuilder()
+        .setTitle('🏆 DROP Game Weekly Leaderboard')
+        .setDescription(`**Top ${entriesWithTDA.length} players** based on points and TDA (To Date Airdrop)`)
+        .setColor('#4d55dc')
+        .setFooter({ 
+          text: totalPages > 1 ? `Page ${currentPage}/${totalPages} • Powered by MakeX` : `Total: ${entriesWithTDA.length} players • Powered by MakeX`, 
+          iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' 
+        })
+        .setTimestamp();
+      
+      const fields = [];
+      for (let i = 0; i < topEntries.length; i++) {
+        const entry = topEntries[i];
+        const globalIndex = startIndex + i;
+        const medal = globalIndex === 0 ? '🥇' : globalIndex === 1 ? '🥈' : globalIndex === 2 ? '🥉' : `${globalIndex + 1}.`;
+        
+        const totalPoints = allTimePointsMap[entry.userId] || 0;
+        const tdaHuman = entry.tdaWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(2);
+        
+        let usdValue = null;
+        if (tokenPriceUsd > 0) {
+          const tdaBN = new BigNumber(tdaHuman);
+          usdValue = tdaBN.multipliedBy(tokenPriceUsd).toFixed(2);
+        }
+        
+        let valueText = `**Points:** ${entry.points} | **TDA:** ${tdaHuman} ${tokenTickerDisplay}`;
+        if (usdValue) {
+          valueText += ` (≈ $${usdValue})`;
+        }
+        
+        fields.push({
+          name: `${medal} ${entry.userTag || 'Unknown'}`,
+          value: valueText,
+          inline: false
+        });
+      }
+      
+      embed.addFields(fields);
+      
+      // Create pagination buttons
+      const components = [];
+      if (totalPages > 1) {
+        const buttonRow = new ActionRowBuilder();
+        
+        const prevButton = new ButtonBuilder()
+          .setCustomId(`drop-leaderboard:${currentPage - 1}`)
+          .setLabel('◀ Previous')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === 1);
+        
+        const pageButton = new ButtonBuilder()
+          .setCustomId(`drop-leaderboard-page:${currentPage}`)
+          .setLabel(`Page ${currentPage}/${totalPages}`)
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+        
+        const nextButton = new ButtonBuilder()
+          .setCustomId(`drop-leaderboard:${currentPage + 1}`)
+          .setLabel('Next ▶')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === totalPages);
+        
+        buttonRow.addComponents(prevButton, pageButton, nextButton);
+        components.push(buttonRow);
+      }
+      
+      await interaction.editReply({ embeds: [embed], components });
+    } catch (error) {
+      console.error('[DROP] Error in drop-leaderboard pagination:', error.message);
+      await interaction.editReply({ content: `❌ Error: ${error.message}` });
     }
   }
 });
@@ -23187,7 +23755,7 @@ async function handleStopDropGame(interaction) {
   }
 }
 
-// Command: /show-drop-game-leaderboard
+// Command: /drop-leaderboard
 // Public command - anyone can view the leaderboard
 async function handleShowDropLeaderboard(interaction) {
   try {
@@ -23233,20 +23801,8 @@ async function handleShowDropLeaderboard(interaction) {
     // Get user wallets for NFT count lookup
     const userWallets = await getUserWallets(guildId);
     
-    const embed = new EmbedBuilder()
-      .setTitle('🏆 DROP Game Weekly Leaderboard')
-      .setDescription(`Current Week Leaderboard`)
-      .setColor('#4d55dc')
-      .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-      .setTimestamp();
-    
-    const topEntries = leaderboard.slice(0, 10);
-    const fields = [];
-    
-    for (let i = 0; i < topEntries.length; i++) {
-      const entry = topEntries[i];
-      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
-      
+    // Calculate TDA for each entry and add it to the entry object
+    const entriesWithTDA = await Promise.all(leaderboard.map(async (entry) => {
       // Get all-time points
       const totalPoints = allTimePointsMap[entry.userId] || 0;
       
@@ -23267,9 +23823,54 @@ async function handleShowDropLeaderboard(interaction) {
         }
       }
       
-      // Calculate TDA (To Date Airdrop)
+      // Calculate TDA (To Date Airdrop) in wei for sorting
       const tdaWei = dropHelpers.calculateWeeklyAirdrop(totalPoints, game.baseAmountWei, multiplier);
-      const tdaHuman = new BigNumber(tdaWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(2);
+      
+      return {
+        ...entry,
+        tdaWei: new BigNumber(tdaWei),
+        multiplier
+      };
+    }));
+    
+    // Sort by points (desc), then by TDA (desc) when points are equal
+    entriesWithTDA.sort((a, b) => {
+      if (b.points !== a.points) return b.points - a.points;
+      // When points are tied, sort by TDA amount (higher TDA first)
+      return b.tdaWei.comparedTo(a.tdaWei);
+    });
+    
+    // Pagination settings
+    const entriesPerPage = 10;
+    const page = 1; // Always start at page 1 for initial command
+    const totalPages = Math.ceil(entriesWithTDA.length / entriesPerPage);
+    const startIndex = (page - 1) * entriesPerPage;
+    const endIndex = startIndex + entriesPerPage;
+    const topEntries = entriesWithTDA.slice(startIndex, endIndex);
+    
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 DROP Game Weekly Leaderboard')
+      .setDescription(`**Top ${entriesWithTDA.length} players** based on points and TDA (To Date Airdrop)`)
+      .setColor('#4d55dc')
+      .setFooter({ 
+        text: totalPages > 1 ? `Page ${page}/${totalPages} • Powered by MakeX` : `Total: ${entriesWithTDA.length} players • Powered by MakeX`, 
+        iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' 
+      })
+      .setTimestamp();
+    
+    const fields = [];
+    
+    for (let i = 0; i < topEntries.length; i++) {
+      const entry = topEntries[i];
+      // Get emoji for position (use global index)
+      const globalIndex = startIndex + i;
+      const medal = globalIndex === 0 ? '🥇' : globalIndex === 1 ? '🥈' : globalIndex === 2 ? '🥉' : `${globalIndex + 1}.`;
+      
+      // Get all-time points
+      const totalPoints = allTimePointsMap[entry.userId] || 0;
+      
+      // Calculate TDA (To Date Airdrop) for display
+      const tdaHuman = entry.tdaWei.dividedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(2);
       
       // Calculate USD value
       let usdValue = null;
@@ -23291,9 +23892,36 @@ async function handleShowDropLeaderboard(interaction) {
       });
     }
     
-    embed.setDescription(`**Top ${topEntries.length} players** based on points and TDA (To Date Airdrop)`);
     embed.addFields(fields);
-    await interaction.editReply({ embeds: [embed] });
+    
+    // Create pagination buttons if more than 10 entries
+    const components = [];
+    if (totalPages > 1) {
+      const buttonRow = new ActionRowBuilder();
+      
+      const prevButton = new ButtonBuilder()
+        .setCustomId(`drop-leaderboard:${page - 1}`)
+        .setLabel('◀ Previous')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page === 1);
+      
+      const pageButton = new ButtonBuilder()
+        .setCustomId(`drop-leaderboard-page:${page}`)
+        .setLabel(`Page ${page}/${totalPages}`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true);
+      
+      const nextButton = new ButtonBuilder()
+        .setCustomId(`drop-leaderboard:${page + 1}`)
+        .setLabel('Next ▶')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page === totalPages);
+      
+      buttonRow.addComponents(prevButton, pageButton, nextButton);
+      components.push(buttonRow);
+    }
+    
+    await interaction.editReply({ embeds: [embed], components });
   } catch (error) {
     console.error('[DROP] Error showing leaderboard:', error);
     if (interaction.deferred) {
