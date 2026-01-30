@@ -290,6 +290,24 @@ async function getParticipantCount(guildId, roundId) {
   }
 }
 
+// Remove a single participant from a round
+async function removeParticipant(guildId, roundId, userId) {
+  try {
+    const { error } = await supabase
+      .from('drop_participants')
+      .delete()
+      .eq('guild_id', guildId)
+      .eq('round_id', roundId)
+      .eq('user_id', userId);
+    
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('[DB] Error removing drop participant:', error);
+    throw error;
+  }
+}
+
 // Delete all participants for a round (cleanup after round closes)
 async function deleteParticipantsForRound(guildId, roundId) {
   try {
@@ -484,6 +502,7 @@ module.exports = {
   getRoundsForWeek,
   updateRound,
   addParticipant,
+  removeParticipant,
   getParticipants,
   getParticipantCount,
   deleteParticipantsForRound,

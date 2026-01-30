@@ -23994,6 +23994,57 @@ client.on('messageReactionAdd', async (reaction, user) => {
   }
 });
 
+// Reaction removal handler for 🪂 emoji
+client.on('messageReactionRemove', async (reaction, user) => {
+  try {
+    // Ignore bot reactions
+    if (user.bot) return;
+    
+    // Check if reaction is 🪂 emoji
+    if (reaction.emoji.name !== '🪂') return;
+    
+    const message = reaction.message;
+    const guildId = message.guildId;
+    if (!guildId) return;
+    
+    // Check if message is a drop round embed
+    const activeRounds = await dbDropRounds.getAllActiveRounds();
+    const round = activeRounds.find(r => r.messageId === message.id && r.guildId === guildId);
+    
+    if (!round || round.status !== 'LIVE') return;
+    
+    // Check if round is still live (not expired)
+    const now = Date.now();
+    if (now >= round.drawTime) {
+      // Round expired, but might be waiting for min droppers
+      const participantCount = await dbDropRounds.getParticipantCount(guildId, round.roundId);
+      if (participantCount >= round.minDroppers) {
+        // Round should be closed, don't allow removal
+        return;
+      }
+    }
+    
+    // Remove participant
+    await dbDropRounds.removeParticipant(guildId, round.roundId, user.id);
+    
+    // Update round count
+    const participantCount = await dbDropRounds.getParticipantCount(guildId, round.roundId);
+    await dbDropRounds.updateRound(guildId, round.roundId, { currentDroppers: participantCount });
+    
+    // Update embed
+    const game = await dbDropGames.getDropGame(guildId);
+    if (game) {
+      const updatedRound = await dbDropRounds.getRound(guildId, round.roundId);
+      const embed = await createDropRoundEmbed(guildId, round.roundId, game, updatedRound);
+      if (embed) {
+        await message.edit({ embeds: [embed] });
+      }
+    }
+  } catch (error) {
+    console.error('[DROP] Error handling reaction removal:', error);
+  }
+});
+
 // Ready event
 client.on('ready', async () => {
   console.log(`Multi-Server ESDT Tipping Bot with Virtual Accounts is ready with ID: ${client.user.tag}`);
