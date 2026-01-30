@@ -8899,13 +8899,24 @@ client.on('interactionCreate', async (interaction) => {
   } else if (commandName === 'balance-history') {
     try {
       // Safely get limit value with validation
-      let limit = interaction.options.getInteger('limit');
-      if (limit === null || limit === undefined) {
-        limit = 10; // Default value
-      } else if (limit < 1) {
-        limit = 1; // Minimum value
-      } else if (limit > 50) {
-        limit = 50; // Maximum value
+      let limit = 10; // Default value
+      
+      // Check if limit option exists and get it safely
+      const limitOption = interaction.options.get('limit');
+      if (limitOption) {
+        try {
+          const limitValue = limitOption.value;
+          if (typeof limitValue === 'number') {
+            limit = Math.max(1, Math.min(50, Math.floor(limitValue)));
+          } else if (typeof limitValue === 'string') {
+            const parsed = parseInt(limitValue, 10);
+            if (!isNaN(parsed)) {
+              limit = Math.max(1, Math.min(50, parsed));
+            }
+          }
+        } catch (e) {
+          console.log('[BALANCE-HISTORY] Error parsing limit value, using default:', e.message);
+        }
       }
       
       const isPublic = interaction.options.getBoolean('public') || false;
@@ -9127,13 +9138,24 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const collection = interaction.options.getString('collection');
       // Safely get limit value with validation
-      let limit = interaction.options.getInteger('limit');
-      if (limit === null || limit === undefined) {
-        limit = 10; // Default value
-      } else if (limit < 1) {
-        limit = 1; // Minimum value
-      } else if (limit > 50) {
-        limit = 50; // Maximum value
+      let limit = 10; // Default value
+      
+      // Check if limit option exists and get it safely
+      const limitOption = interaction.options.get('limit');
+      if (limitOption) {
+        try {
+          const limitValue = limitOption.value;
+          if (typeof limitValue === 'number') {
+            limit = Math.max(1, Math.min(50, Math.floor(limitValue)));
+          } else if (typeof limitValue === 'string') {
+            const parsed = parseInt(limitValue, 10);
+            if (!isNaN(parsed)) {
+              limit = Math.max(1, Math.min(50, parsed));
+            }
+          }
+        } catch (e) {
+          console.log('[BALANCE-HISTORY-NFT] Error parsing limit value, using default:', e.message);
+        }
       }
       
       const isPublic = interaction.options.getBoolean('public') || false;
@@ -23408,6 +23430,37 @@ async function createWinnerAnnouncementEmbed(guildId, round, game) {
   }
 }
 
+// Helper function to safely update or recreate a drop round message
+async function updateDropRoundMessage(channel, round, game, embed, guildId, roundId) {
+  if (!channel || !round.messageId) return false;
+  
+  try {
+    const message = await channel.messages.fetch(round.messageId);
+    await message.edit({ embeds: [embed] });
+    return true;
+  } catch (e) {
+    // If message was deleted (code 10008), create a new one
+    if (e.code === 10008 || e.status === 404) {
+      console.log(`[DROP] Message ${round.messageId} was deleted, creating new message for round ${roundId}`);
+      try {
+        const newMessage = await channel.send({ embeds: [embed] });
+        await newMessage.react('🪂');
+        await dbDropRounds.updateRound(guildId, roundId, { messageId: newMessage.id });
+        await dbDropGames.updateDropGame(guildId, { messageId: newMessage.id });
+        return true;
+      } catch (createError) {
+        console.error('[DROP] Error creating new message after deletion:', createError);
+        return false;
+      }
+    }
+    // For other errors (rate limits, etc.), just log and return false
+    if (e.code !== 50035) { // Ignore "Invalid Form Body" errors (rate limits)
+      console.error('[DROP] Error updating drop round message:', e.message);
+    }
+    return false;
+  }
+}
+
 async function processDropRound(guildId, roundId) {
   try {
     const round = await dbDropRounds.getRound(guildId, roundId);
@@ -23466,13 +23519,8 @@ async function processDropRound(guildId, roundId) {
             currentDroppers: participantCount,
             status: 'CLOSED'
           }, true);
-          if (closedEmbed && round.messageId) {
-            try {
-              const message = await channel.messages.fetch(round.messageId);
-              await message.edit({ embeds: [closedEmbed] });
-            } catch (e) {
-              console.error('[DROP] Error updating closed embed:', e);
-            }
+          if (closedEmbed) {
+            await updateDropRoundMessage(channel, round, game, closedEmbed, guildId, roundId);
           }
           
           // Create next round
@@ -23486,25 +23534,20 @@ async function processDropRound(guildId, roundId) {
       } else {
         // Update embed to show missing droppers
         const channel = await client.channels.fetch(round.channelId).catch(() => null);
-        if (channel && round.messageId) {
+        if (channel) {
           const updatedEmbed = await createDropRoundEmbed(guildId, roundId, game, {
             ...round,
             currentDroppers: participantCount
           });
           if (updatedEmbed) {
-            try {
-              const message = await channel.messages.fetch(round.messageId);
-              await message.edit({ embeds: [updatedEmbed] });
-            } catch (e) {
-              console.error('[DROP] Error updating waiting embed:', e);
-            }
+            await updateDropRoundMessage(channel, round, game, updatedEmbed, guildId, roundId);
           }
         }
       }
     } else {
       // Update countdown
       const channel = await client.channels.fetch(round.channelId).catch(() => null);
-      if (channel && round.messageId) {
+      if (channel) {
         const participantCount = await dbDropRounds.getParticipantCount(guildId, roundId);
         await dbDropRounds.updateRound(guildId, roundId, { currentDroppers: participantCount });
         
@@ -23513,12 +23556,7 @@ async function processDropRound(guildId, roundId) {
           currentDroppers: participantCount
         });
         if (updatedEmbed) {
-          try {
-            const message = await channel.messages.fetch(round.messageId);
-            await message.edit({ embeds: [updatedEmbed] });
-          } catch (e) {
-            // Ignore errors - might be rate limited
-          }
+          await updateDropRoundMessage(channel, round, game, updatedEmbed, guildId, roundId);
         }
       }
     }
@@ -24005,7 +24043,24 @@ client.on('messageReactionAdd', async (reaction, user) => {
       const updatedRound = await dbDropRounds.getRound(guildId, round.roundId);
       const embed = await createDropRoundEmbed(guildId, round.roundId, game, updatedRound);
       if (embed) {
-        await message.edit({ embeds: [embed] });
+        try {
+          await message.edit({ embeds: [embed] });
+        } catch (e) {
+          // If message was deleted, try to recreate it
+          if (e.code === 10008 || e.status === 404) {
+            const channel = message.channel;
+            try {
+              const newMessage = await channel.send({ embeds: [embed] });
+              await newMessage.react('🪂');
+              await dbDropRounds.updateRound(guildId, round.roundId, { messageId: newMessage.id });
+              await dbDropGames.updateDropGame(guildId, { messageId: newMessage.id });
+            } catch (createError) {
+              console.error('[DROP] Error recreating message after deletion in reaction handler:', createError);
+            }
+          } else {
+            console.error('[DROP] Error updating embed in reaction handler:', e.message);
+          }
+        }
       }
     }
   } catch (error) {
@@ -24056,7 +24111,24 @@ client.on('messageReactionRemove', async (reaction, user) => {
       const updatedRound = await dbDropRounds.getRound(guildId, round.roundId);
       const embed = await createDropRoundEmbed(guildId, round.roundId, game, updatedRound);
       if (embed) {
-        await message.edit({ embeds: [embed] });
+        try {
+          await message.edit({ embeds: [embed] });
+        } catch (e) {
+          // If message was deleted, try to recreate it
+          if (e.code === 10008 || e.status === 404) {
+            const channel = message.channel;
+            try {
+              const newMessage = await channel.send({ embeds: [embed] });
+              await newMessage.react('🪂');
+              await dbDropRounds.updateRound(guildId, round.roundId, { messageId: newMessage.id });
+              await dbDropGames.updateDropGame(guildId, { messageId: newMessage.id });
+            } catch (createError) {
+              console.error('[DROP] Error recreating message after deletion in reaction removal handler:', createError);
+            }
+          } else {
+            console.error('[DROP] Error updating embed in reaction removal handler:', e.message);
+          }
+        }
       }
     }
   } catch (error) {
