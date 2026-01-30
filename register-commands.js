@@ -719,11 +719,11 @@ const commands = [
         options: [
             {
                 name: 'limit',
-                description: 'Number of transactions to show (default: 10, max: 50)',
+                description: 'Max transactions to fetch (default: 100, max: 1000). Shows 25 per page with pagination.',
                 type: ApplicationCommandOptionType.Integer,
                 required: false,
-                min_value: 1,
-                max_value: 50
+                min_value: 25,
+                max_value: 1000
             },
             {
                 name: 'public',
