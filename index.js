@@ -24636,6 +24636,11 @@ client.on('ready', async () => {
   
   // Set up periodic cleanup of old Discord embeds (listings and auctions)
   // Runs once per day at 2 AM (in milliseconds: 2 hours * 60 minutes * 60 seconds * 1000)
+  // 
+  // OPTIMIZATION: When messages are deleted or found to be already deleted, we mark message_id as NULL
+  // in the database. This prevents re-checking the same deleted messages on every cleanup run,
+  // which was causing hundreds of "message already deleted" errors on each restart.
+  // The .not('message_id', 'is', null) filter ensures we only process items that still have messages.
   const cleanupOldEmbeds = async () => {
     try {
       console.log('[CLEANUP] Starting cleanup of old Discord embeds...');
@@ -24672,22 +24677,35 @@ client.on('ready', async () => {
         
         if (listings && listings.length > 0) {
           console.log(`[CLEANUP] Found ${listings.length} old listing(s) to clean up`);
+          let alreadyDeletedCount = 0;
+          
           for (const listing of listings) {
             try {
               const guild = await client.guilds.fetch(listing.guild_id).catch(() => null);
               if (!guild) {
-                console.log(`[CLEANUP] Skipping listing ${listing.listing_id}: Guild not found`);
+                // Mark as cleaned if guild not found (bot likely left)
+                await supabase
+                  .from('nft_listings')
+                  .update({ message_id: null })
+                  .eq('listing_id', listing.listing_id)
+                  .eq('guild_id', listing.guild_id);
                 continue;
               }
               
               const channel = await guild.channels.fetch(listing.channel_id).catch(() => null);
               if (!channel) {
-                console.log(`[CLEANUP] Skipping listing ${listing.listing_id}: Channel not found`);
+                // Mark as cleaned if channel not found
+                await supabase
+                  .from('nft_listings')
+                  .update({ message_id: null })
+                  .eq('listing_id', listing.listing_id)
+                  .eq('guild_id', listing.guild_id);
                 continue;
               }
               
               // Check if it's a forum channel
               const isForumChannel = channel.type === ChannelType.GuildForum;
+              let messageDeleted = false;
               
               if (isForumChannel && listing.thread_id) {
                 // For forum channels, the thread IS the post - delete the thread
@@ -24695,16 +24713,21 @@ client.on('ready', async () => {
                   const thread = await channel.threads.fetch(listing.thread_id).catch(() => null);
                   if (thread) {
                     await thread.delete();
-                    console.log(`[CLEANUP] Deleted forum post/thread: ${listing.title} (${listing.listing_id})`);
+                    console.log(`[CLEANUP] ✅ Deleted forum post/thread: ${listing.title} (${listing.listing_id})`);
                     listingsDeleted++;
+                    messageDeleted = true;
                   } else {
-                    console.log(`[CLEANUP] Thread already deleted: ${listing.title} (${listing.listing_id})`);
+                    // Thread already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   }
                 } catch (threadError) {
                   if (threadError.code === 10003) {
-                    console.log(`[CLEANUP] Thread already deleted: ${listing.title} (${listing.listing_id})`);
+                    // Thread already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   } else {
-                    console.error(`[CLEANUP] Error deleting thread ${listing.listing_id}:`, threadError.message);
+                    console.error(`[CLEANUP] ❌ Error deleting thread ${listing.listing_id}:`, threadError.message);
                     errors++;
                   }
                 }
@@ -24714,10 +24737,13 @@ client.on('ready', async () => {
                   const message = await channel.messages.fetch(listing.message_id).catch(() => null);
                   if (message) {
                     await message.delete();
-                    console.log(`[CLEANUP] Deleted listing message: ${listing.title} (${listing.listing_id})`);
+                    console.log(`[CLEANUP] ✅ Deleted listing message: ${listing.title} (${listing.listing_id})`);
                     listingsDeleted++;
+                    messageDeleted = true;
                   } else {
-                    console.log(`[CLEANUP] Message already deleted: ${listing.title} (${listing.listing_id})`);
+                    // Message already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   }
                   
                   // Also delete thread if it exists
@@ -24729,51 +24755,49 @@ client.on('ready', async () => {
                   }
                 } catch (msgError) {
                   if (msgError.code === 10008) {
-                    console.log(`[CLEANUP] Message already deleted: ${listing.title} (${listing.listing_id})`);
+                    // Message already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   } else {
-                    console.error(`[CLEANUP] Error deleting message ${listing.listing_id}:`, msgError.message);
+                    console.error(`[CLEANUP] ❌ Error deleting message ${listing.listing_id}:`, msgError.message);
                     errors++;
                   }
                 }
               }
               
+              // Mark message_id as null in database if message was deleted or already deleted
+              // This prevents re-checking the same deleted messages on next cleanup
+              if (messageDeleted) {
+                await supabase
+                  .from('nft_listings')
+                  .update({ message_id: null })
+                  .eq('listing_id', listing.listing_id)
+                  .eq('guild_id', listing.guild_id);
+              }
+              
               await new Promise(resolve => setTimeout(resolve, 500));
             } catch (error) {
-              console.error(`[CLEANUP] Error processing listing ${listing.listing_id}:`, error.message);
+              console.error(`[CLEANUP] ❌ Error processing listing ${listing.listing_id}:`, error.message);
               errors++;
             }
           }
+          
+          if (alreadyDeletedCount > 0) {
+            console.log(`[CLEANUP] ℹ️ ${alreadyDeletedCount} listing message(s) were already deleted (marked in database to prevent re-checking)`);
+          }
         } else {
-          console.log('[CLEANUP] No old listings found to clean up');
+          console.log('[CLEANUP] ℹ️ No old listings found to clean up');
         }
       } catch (error) {
-        console.error('[CLEANUP] Error cleaning up listings:', error.message);
+        console.error('[CLEANUP] ❌ Error cleaning up listings:', error.message);
       }
       
       // Clean up old auctions
       try {
         // For finished auctions, we should check end_time (when they finished), not created_at
         // For cancelled/expired, we can use created_at
-        // First, let's check what auctions exist with FINISHED status
-        const { data: allFinishedAuctions } = await supabase
-          .from('auctions')
-          .select('auction_id, guild_id, message_id, channel_id, thread_id, status, title, created_at, end_time')
-          .in('status', AUCTION_STATUSES)
-          .not('message_id', 'is', null)
-          .not('channel_id', 'is', null);
-        
-        console.log(`[CLEANUP] Found ${allFinishedAuctions?.length || 0} auction(s) with cleanup statuses (before age filter)`);
-        if (allFinishedAuctions && allFinishedAuctions.length > 0) {
-          console.log(`[CLEANUP] Sample auction data:`, allFinishedAuctions.slice(0, 3).map(a => ({ 
-            id: a.auction_id, 
-            status: a.status, 
-            created: a.created_at ? new Date(a.created_at).toISOString() : 'null',
-            ended: a.end_time ? new Date(a.end_time).toISOString() : 'null'
-          })));
-        }
-        
         // Query: For FINISHED auctions, check end_time. For others, check created_at
-        // We'll filter in JavaScript to be more flexible
+        // We filter in JavaScript because Supabase doesn't support conditional WHERE clauses easily
         const { data: allAuctions, error: auctionError } = await supabase
           .from('auctions')
           .select('auction_id, guild_id, message_id, channel_id, thread_id, status, title, created_at, end_time')
@@ -24782,75 +24806,61 @@ client.on('ready', async () => {
           .not('channel_id', 'is', null);
         
         if (auctionError) {
-          console.error('[CLEANUP] Error querying auctions:', auctionError);
+          console.error('[CLEANUP] ❌ Error querying auctions:', auctionError);
         }
         
         // Filter auctions: FINISHED ones use end_time, others use created_at
-        console.log(`[CLEANUP] Total auctions found with cleanup statuses: ${allAuctions?.length || 0}`);
-        
         const auctions = (allAuctions || []).filter(auction => {
           if (auction.status === 'FINISHED') {
             // For finished auctions, check if they ended more than 1 day ago
-            const endedDaysAgo = auction.end_time ? Math.floor((Date.now() - auction.end_time) / (24 * 60 * 60 * 1000)) : null;
-            const shouldClean = auction.end_time && auction.end_time < oneDayAgo;
-            if (!shouldClean && auction.status === 'FINISHED') {
-              console.log(`[CLEANUP] Skipping FINISHED auction ${auction.auction_id.substring(0, 20)}... - ended ${endedDaysAgo} days ago (needs to be > 1 day)`);
-            }
-            return shouldClean;
+            return auction.end_time && auction.end_time < oneDayAgo;
           } else {
             // For cancelled/expired, check if created more than 1 day ago
-            const ageDays = auction.created_at ? Math.floor((Date.now() - auction.created_at) / (24 * 60 * 60 * 1000)) : null;
-            const shouldClean = auction.created_at && auction.created_at < oneDayAgo;
-            if (!shouldClean) {
-              console.log(`[CLEANUP] Skipping ${auction.status} auction ${auction.auction_id.substring(0, 20)}... - created ${ageDays} days ago (needs to be > 1 day)`);
-            }
-            return shouldClean;
+            return auction.created_at && auction.created_at < oneDayAgo;
           }
         });
         
         if (auctions && auctions.length > 0) {
           console.log(`[CLEANUP] ✅ Found ${auctions.length} old auction(s) to clean up (older than 1 day)`);
-          console.log(`[CLEANUP] Auction details:`, auctions.map(a => ({
-            id: a.auction_id.substring(0, 30),
-            title: a.title,
-            status: a.status,
-            ended_days_ago: a.status === 'FINISHED' && a.end_time ? Math.floor((Date.now() - a.end_time) / (24 * 60 * 60 * 1000)) : 'N/A',
-            created_days_ago: a.created_at ? Math.floor((Date.now() - a.created_at) / (24 * 60 * 60 * 1000)) : 'N/A'
-          })));
+          let alreadyDeletedCount = 0;
+          
           for (const auction of auctions) {
             try {
-              console.log(`[CLEANUP] Processing auction: ${auction.title} (${auction.auction_id.substring(0, 20)}...)`);
-              console.log(`[CLEANUP]   Guild ID: ${auction.guild_id}, Channel ID: ${auction.channel_id}, Message ID: ${auction.message_id}, Thread ID: ${auction.thread_id || 'none'}`);
-              
               const guild = await client.guilds.fetch(auction.guild_id).catch((err) => {
                 console.error(`[CLEANUP] Error fetching guild ${auction.guild_id}:`, err.message, err.code);
                 return null;
               });
               if (!guild) {
-                console.log(`[CLEANUP] ❌ Skipping auction ${auction.auction_id.substring(0, 20)}...: Guild ${auction.guild_id} not found or bot not in guild`);
+                // Mark as cleaned if guild not found (bot likely left)
+                await supabase
+                  .from('auctions')
+                  .update({ message_id: null })
+                  .eq('auction_id', auction.auction_id)
+                  .eq('guild_id', auction.guild_id);
                 continue;
               }
-              console.log(`[CLEANUP] ✅ Found guild: ${guild.name} (${guild.id})`);
               
               const channel = await guild.channels.fetch(auction.channel_id).catch((err) => {
                 console.error(`[CLEANUP] Error fetching channel ${auction.channel_id}:`, err.message, err.code);
                 return null;
               });
               if (!channel) {
-                console.log(`[CLEANUP] ❌ Skipping auction ${auction.auction_id.substring(0, 20)}...: Channel ${auction.channel_id} not found in guild ${guild.name}`);
+                // Mark as cleaned if channel not found
+                await supabase
+                  .from('auctions')
+                  .update({ message_id: null })
+                  .eq('auction_id', auction.auction_id)
+                  .eq('guild_id', auction.guild_id);
                 continue;
               }
-              console.log(`[CLEANUP] ✅ Found channel: ${channel.name} (${channel.id}), Type: ${channel.type}`);
               
               // Check if it's a forum channel
               const isForumChannel = channel.type === ChannelType.GuildForum;
-              
-              console.log(`[CLEANUP] Channel type: ${channel.type}, Is Forum: ${isForumChannel}`);
+              let messageDeleted = false;
               
               if (isForumChannel && auction.thread_id) {
                 // For forum channels, the thread IS the post - delete the thread
                 try {
-                  console.log(`[CLEANUP] Attempting to fetch and delete forum thread: ${auction.thread_id}`);
                   const thread = await channel.threads.fetch(auction.thread_id).catch((err) => {
                     console.error(`[CLEANUP] Error fetching thread ${auction.thread_id}:`, err.message, err.code);
                     return null;
@@ -24859,12 +24869,17 @@ client.on('ready', async () => {
                     await thread.delete();
                     console.log(`[CLEANUP] ✅ Deleted forum post/thread: ${auction.title} (${auction.auction_id})`);
                     auctionsDeleted++;
+                    messageDeleted = true;
                   } else {
-                    console.log(`[CLEANUP] ⚠️ Thread not found (may already be deleted): ${auction.title} (${auction.auction_id})`);
+                    // Thread already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   }
                 } catch (threadError) {
                   if (threadError.code === 10003) {
-                    console.log(`[CLEANUP] ℹ️ Thread already deleted: ${auction.title} (${auction.auction_id})`);
+                    // Thread already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   } else {
                     console.error(`[CLEANUP] ❌ Error deleting thread ${auction.auction_id}:`, threadError.message, threadError.code);
                     errors++;
@@ -24873,7 +24888,6 @@ client.on('ready', async () => {
               } else {
                 // For regular channels, delete the message
                 try {
-                  console.log(`[CLEANUP] Attempting to fetch and delete message: ${auction.message_id}`);
                   const message = await channel.messages.fetch(auction.message_id).catch((err) => {
                     console.error(`[CLEANUP] Error fetching message ${auction.message_id}:`, err.message, err.code);
                     return null;
@@ -24882,13 +24896,15 @@ client.on('ready', async () => {
                     await message.delete();
                     console.log(`[CLEANUP] ✅ Deleted auction message: ${auction.title} (${auction.auction_id})`);
                     auctionsDeleted++;
+                    messageDeleted = true;
                   } else {
-                    console.log(`[CLEANUP] ⚠️ Message not found (may already be deleted): ${auction.title} (${auction.auction_id})`);
+                    // Message already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   }
                   
                   // Also delete thread if it exists
                   if (auction.thread_id) {
-                    console.log(`[CLEANUP] Attempting to delete thread: ${auction.thread_id}`);
                     const thread = await channel.threads.fetch(auction.thread_id).catch(() => null);
                     if (thread) {
                       await thread.delete().catch((err) => {
@@ -24898,7 +24914,9 @@ client.on('ready', async () => {
                   }
                 } catch (msgError) {
                   if (msgError.code === 10008) {
-                    console.log(`[CLEANUP] ℹ️ Message already deleted: ${auction.title} (${auction.auction_id})`);
+                    // Message already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   } else {
                     console.error(`[CLEANUP] ❌ Error deleting message ${auction.auction_id}:`, msgError.message, msgError.code);
                     errors++;
@@ -24906,11 +24924,25 @@ client.on('ready', async () => {
                 }
               }
               
+              // Mark message_id as null in database if message was deleted or already deleted
+              // This prevents re-checking the same deleted messages on next cleanup
+              if (messageDeleted) {
+                await supabase
+                  .from('auctions')
+                  .update({ message_id: null })
+                  .eq('auction_id', auction.auction_id)
+                  .eq('guild_id', auction.guild_id);
+              }
+              
               await new Promise(resolve => setTimeout(resolve, 500));
             } catch (error) {
-              console.error(`[CLEANUP] Error processing auction ${auction.auction_id}:`, error.message);
+              console.error(`[CLEANUP] ❌ Error processing auction ${auction.auction_id}:`, error.message);
               errors++;
             }
+          }
+          
+          if (alreadyDeletedCount > 0) {
+            console.log(`[CLEANUP] ℹ️ ${alreadyDeletedCount} auction message(s) were already deleted (marked in database to prevent re-checking)`);
           }
         } else {
           if (allAuctions && allAuctions.length > 0) {
@@ -24941,17 +24973,7 @@ client.on('ready', async () => {
           console.error('[CLEANUP] Error querying staking pools:', poolError);
         } else if (stakingPools && stakingPools.length > 0) {
           console.log(`[CLEANUP] ✅ Found ${stakingPools.length} old staking pool(s) to clean up (closed more than 1 day ago)`);
-          console.log(`[CLEANUP] Staking pool details:`, stakingPools.map(p => {
-            const updatedAt = p.updated_at ? new Date(p.updated_at).getTime() : null;
-            const closedDaysAgo = updatedAt ? Math.floor((Date.now() - updatedAt) / (24 * 60 * 60 * 1000)) : 'N/A';
-            return {
-              id: p.pool_id.substring(0, 30),
-              name: p.pool_name || 'Unnamed',
-              status: p.status,
-              closed_days_ago: closedDaysAgo,
-              updated_at: p.updated_at || 'N/A'
-            };
-          }));
+          let alreadyDeletedCount = 0;
           
           for (const pool of stakingPools) {
             try {
@@ -24980,38 +25002,41 @@ client.on('ready', async () => {
                 continue; // Don't delete if an active pool uses this message
               }
               
-              console.log(`[CLEANUP] Processing staking pool: ${pool.pool_name || pool.pool_id} (${pool.pool_id.substring(0, 20)}...)`);
-              console.log(`[CLEANUP]   Status: ${pool.status}, Guild ID: ${pool.guild_id}, Channel ID: ${pool.channel_id}, Message ID: ${pool.message_id}, Thread ID: ${pool.thread_id || 'none'}`);
-              
               const guild = await client.guilds.fetch(pool.guild_id).catch((err) => {
                 console.error(`[CLEANUP] Error fetching guild ${pool.guild_id}:`, err.message, err.code);
                 return null;
               });
               if (!guild) {
-                console.log(`[CLEANUP] ❌ Skipping staking pool ${pool.pool_id.substring(0, 20)}...: Guild ${pool.guild_id} not found or bot not in guild`);
+                // Mark as cleaned if guild not found (bot likely left)
+                await supabase
+                  .from('staking_pools')
+                  .update({ message_id: null })
+                  .eq('pool_id', pool.pool_id)
+                  .eq('guild_id', pool.guild_id);
                 continue;
               }
-              console.log(`[CLEANUP] ✅ Found guild: ${guild.name} (${guild.id})`);
               
               const channel = await guild.channels.fetch(pool.channel_id).catch((err) => {
                 console.error(`[CLEANUP] Error fetching channel ${pool.channel_id}:`, err.message, err.code);
                 return null;
               });
               if (!channel) {
-                console.log(`[CLEANUP] ❌ Skipping staking pool ${pool.pool_id.substring(0, 20)}...: Channel ${pool.channel_id} not found in guild ${guild.name}`);
+                // Mark as cleaned if channel not found
+                await supabase
+                  .from('staking_pools')
+                  .update({ message_id: null })
+                  .eq('pool_id', pool.pool_id)
+                  .eq('guild_id', pool.guild_id);
                 continue;
               }
-              console.log(`[CLEANUP] ✅ Found channel: ${channel.name} (${channel.id}), Type: ${channel.type}`);
               
               // Check if it's a forum channel
               const isForumChannel = channel.type === ChannelType.GuildForum;
-              
-              console.log(`[CLEANUP] Channel type: ${channel.type}, Is Forum: ${isForumChannel}`);
+              let messageDeleted = false;
               
               if (isForumChannel && pool.thread_id) {
                 // For forum channels, the thread IS the post - delete the thread
                 try {
-                  console.log(`[CLEANUP] Attempting to fetch and delete forum thread: ${pool.thread_id}`);
                   const thread = await channel.threads.fetch(pool.thread_id).catch((err) => {
                     console.error(`[CLEANUP] Error fetching thread ${pool.thread_id}:`, err.message, err.code);
                     return null;
@@ -25020,12 +25045,17 @@ client.on('ready', async () => {
                     await thread.delete();
                     console.log(`[CLEANUP] ✅ Deleted forum post/thread: ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
                     stakingPoolsDeleted++;
+                    messageDeleted = true;
                   } else {
-                    console.log(`[CLEANUP] ⚠️ Thread not found (may already be deleted): ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
+                    // Thread already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   }
                 } catch (threadError) {
                   if (threadError.code === 10003) {
-                    console.log(`[CLEANUP] ℹ️ Thread already deleted: ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
+                    // Thread already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   } else {
                     console.error(`[CLEANUP] ❌ Error deleting thread ${pool.pool_id}:`, threadError.message, threadError.code);
                     errors++;
@@ -25034,7 +25064,6 @@ client.on('ready', async () => {
               } else {
                 // For regular channels, delete the message
                 try {
-                  console.log(`[CLEANUP] Attempting to fetch and delete message: ${pool.message_id}`);
                   const message = await channel.messages.fetch(pool.message_id).catch((err) => {
                     console.error(`[CLEANUP] Error fetching message ${pool.message_id}:`, err.message, err.code);
                     return null;
@@ -25043,13 +25072,15 @@ client.on('ready', async () => {
                     await message.delete();
                     console.log(`[CLEANUP] ✅ Deleted staking pool message: ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
                     stakingPoolsDeleted++;
+                    messageDeleted = true;
                   } else {
-                    console.log(`[CLEANUP] ⚠️ Message not found (may already be deleted): ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
+                    // Message already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   }
                   
                   // Also delete thread if it exists
                   if (pool.thread_id) {
-                    console.log(`[CLEANUP] Attempting to delete thread: ${pool.thread_id}`);
                     const thread = await channel.threads.fetch(pool.thread_id).catch(() => null);
                     if (thread) {
                       await thread.delete().catch((err) => {
@@ -25059,7 +25090,9 @@ client.on('ready', async () => {
                   }
                 } catch (msgError) {
                   if (msgError.code === 10008) {
-                    console.log(`[CLEANUP] ℹ️ Message already deleted: ${pool.pool_name || pool.pool_id} (${pool.pool_id})`);
+                    // Message already deleted - mark in database
+                    messageDeleted = true;
+                    alreadyDeletedCount++;
                   } else {
                     console.error(`[CLEANUP] ❌ Error deleting message ${pool.pool_id}:`, msgError.message, msgError.code);
                     errors++;
@@ -25067,11 +25100,25 @@ client.on('ready', async () => {
                 }
               }
               
+              // Mark message_id as null in database if message was deleted or already deleted
+              // This prevents re-checking the same deleted messages on next cleanup
+              if (messageDeleted) {
+                await supabase
+                  .from('staking_pools')
+                  .update({ message_id: null })
+                  .eq('pool_id', pool.pool_id)
+                  .eq('guild_id', pool.guild_id);
+              }
+              
               await new Promise(resolve => setTimeout(resolve, 500));
             } catch (error) {
-              console.error(`[CLEANUP] Error processing staking pool ${pool.pool_id}:`, error.message);
+              console.error(`[CLEANUP] ❌ Error processing staking pool ${pool.pool_id}:`, error.message);
               errors++;
             }
+          }
+          
+          if (alreadyDeletedCount > 0) {
+            console.log(`[CLEANUP] ℹ️ ${alreadyDeletedCount} staking pool message(s) were already deleted (marked in database to prevent re-checking)`);
           }
         } else {
           console.log('[CLEANUP] ℹ️ No closed staking pools found older than 1 day');
