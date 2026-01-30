@@ -9174,8 +9174,8 @@ client.on('interactionCreate', async (interaction) => {
   } else if (commandName === 'balance-history-nft') {
     try {
       const collection = interaction.options.getString('collection');
-      // Safely get limit value with validation
-      let limit = 10; // Default value
+      // Safely get limit value with validation - max 1000 for pagination
+      let maxTransactions = 100; // Default: fetch 100 transactions
       
       // Check if limit option exists and get it safely
       const limitOption = interaction.options.get('limit');
@@ -9183,11 +9183,11 @@ client.on('interactionCreate', async (interaction) => {
         try {
           const limitValue = limitOption.value;
           if (typeof limitValue === 'number') {
-            limit = Math.max(1, Math.min(50, Math.floor(limitValue)));
+            maxTransactions = Math.max(25, Math.min(1000, Math.floor(limitValue)));
           } else if (typeof limitValue === 'string') {
             const parsed = parseInt(limitValue, 10);
             if (!isNaN(parsed)) {
-              limit = Math.max(1, Math.min(50, parsed));
+              maxTransactions = Math.max(25, Math.min(1000, parsed));
             }
           }
         } catch (e) {
@@ -9201,10 +9201,10 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guildId;
       const userId = interaction.user.id;
       
-      // Get user's NFT transaction history
-      const transactions = await virtualAccountsNFT.getNFTTransactionHistory(guildId, userId, collection || null, limit);
+      // Get user's NFT transaction history (fetch more for pagination)
+      const allTransactions = await virtualAccountsNFT.getNFTTransactionHistory(guildId, userId, collection || null, maxTransactions);
       
-      if (!transactions || transactions.length === 0) {
+      if (!allTransactions || allTransactions.length === 0) {
         const embed = new EmbedBuilder()
           .setTitle('📊 NFT Transaction History')
           .setDescription(collection 
@@ -9218,14 +9218,24 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      // Pagination: 25 transactions per page (Discord embed field limit)
+      const transactionsPerPage = 25;
+      const totalPages = Math.ceil(allTransactions.length / transactionsPerPage);
+      const currentPage = 1;
+      
+      // Get transactions for current page
+      const startIndex = (currentPage - 1) * transactionsPerPage;
+      const endIndex = startIndex + transactionsPerPage;
+      const pageTransactions = allTransactions.slice(startIndex, endIndex);
+      
       const embed = new EmbedBuilder()
         .setTitle('📊 NFT Transaction History')
-        .setDescription(`Last ${transactions.length} NFT transactions for ${interaction.user.tag}`)
+        .setDescription(`Showing ${pageTransactions.length} of ${allTransactions.length} NFT transactions for ${interaction.user.tag}${collection ? ` (Collection: ${collection})` : ''}`)
         .setColor('#0099FF')
         .setTimestamp()
-        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        .setFooter({ text: `Page ${currentPage}/${totalPages} • Powered by MakeX`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
       
-      for (const tx of transactions) {
+      for (const tx of pageTransactions) {
         const emoji = tx.type === 'deposit' ? '💰' : 
                      tx.type === 'transfer_in' || tx.type === 'purchase' ? '✅' :
                      tx.type === 'transfer_out' || tx.type === 'sale' ? '📤' :
@@ -9254,7 +9264,37 @@ client.on('interactionCreate', async (interaction) => {
         });
       }
       
-      await interaction.editReply({ embeds: [embed] });
+      // Add pagination buttons if more than one page
+      const components = [];
+      if (totalPages > 1) {
+        const buttonRow = new ActionRowBuilder();
+        
+        // Encode collection in customId (use empty string if null)
+        const collectionParam = collection || '';
+        
+        const prevButton = new ButtonBuilder()
+          .setCustomId(`balance-history-nft:${userId}:${currentPage - 1}:${maxTransactions}:${collectionParam}`)
+          .setLabel('◀ Previous')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === 1);
+        
+        const pageButton = new ButtonBuilder()
+          .setCustomId(`balance-history-nft-page:${userId}:${currentPage}`)
+          .setLabel(`Page ${currentPage}/${totalPages}`)
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+        
+        const nextButton = new ButtonBuilder()
+          .setCustomId(`balance-history-nft:${userId}:${currentPage + 1}:${maxTransactions}:${collectionParam}`)
+          .setLabel('Next ▶')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === totalPages);
+        
+        buttonRow.addComponents(prevButton, pageButton, nextButton);
+        components.push(buttonRow);
+      }
+      
+      await interaction.editReply({ embeds: [embed], components });
       
     } catch (error) {
       console.error('Error in balance-history-nft command:', error.message);
@@ -19225,6 +19265,120 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.editReply({ embeds: [embed], components });
     } catch (error) {
       console.error('[BALANCE-HISTORY] Error in pagination:', error.message);
+      await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+    }
+  } else if (customId.startsWith('balance-history-nft:')) {
+    // Balance history NFT pagination handler
+    try {
+      await interaction.deferUpdate();
+      
+      const parts = customId.split(':');
+      const targetUserId = parts[1];
+      const page = parseInt(parts[2], 10) || 1;
+      const maxTransactions = parseInt(parts[3], 10) || 100;
+      const collection = parts[4] || null; // Collection filter (empty string becomes null)
+      
+      // Verify the user is viewing their own history
+      if (interaction.user.id !== targetUserId) {
+        await interaction.editReply({ content: '❌ You can only view your own transaction history.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      
+      // Get user's NFT transaction history
+      const allTransactions = await virtualAccountsNFT.getNFTTransactionHistory(guildId, userId, collection || null, maxTransactions);
+      
+      if (!allTransactions || allTransactions.length === 0) {
+        await interaction.editReply({ 
+          content: collection 
+            ? `📊 No NFT transactions found for collection "${collection}".`
+            : '📊 No NFT transactions found for your account.',
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Pagination: 25 transactions per page (Discord embed field limit)
+      const transactionsPerPage = 25;
+      const totalPages = Math.ceil(allTransactions.length / transactionsPerPage);
+      const currentPage = Math.max(1, Math.min(page, totalPages));
+      
+      // Get transactions for current page
+      const startIndex = (currentPage - 1) * transactionsPerPage;
+      const endIndex = startIndex + transactionsPerPage;
+      const pageTransactions = allTransactions.slice(startIndex, endIndex);
+      
+      const embed = new EmbedBuilder()
+        .setTitle('📊 NFT Transaction History')
+        .setDescription(`Showing ${pageTransactions.length} of ${allTransactions.length} NFT transactions for ${interaction.user.tag}${collection ? ` (Collection: ${collection})` : ''}`)
+        .setColor('#0099FF')
+        .setTimestamp()
+        .setFooter({ text: `Page ${currentPage}/${totalPages} • Powered by MakeX`, iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      
+      for (const tx of pageTransactions) {
+        const emoji = tx.type === 'deposit' ? '💰' : 
+                     tx.type === 'transfer_in' || tx.type === 'purchase' ? '✅' :
+                     tx.type === 'transfer_out' || tx.type === 'sale' ? '📤' :
+                     tx.type === 'offer' ? '💼' : '🔄';
+        
+        const timestamp = `<t:${Math.floor(tx.timestamp / 1000)}:R>`;
+        const nftDisplay = tx.nftName || `${tx.collection}#${tx.nonce}`;
+        
+        let value = `**NFT:** ${nftDisplay}\n**Collection:** ${tx.collection}\n**Type:** ${tx.type}`;
+        
+        if (tx.priceAmount && tx.priceTokenIdentifier) {
+          value += `\n**Price:** ${tx.priceAmount} ${tx.priceTokenIdentifier}`;
+        }
+        
+        if (tx.fromUserId || tx.toUserId) {
+          const otherParty = tx.fromUserId ? `from <@${tx.fromUserId}>` : `to <@${tx.toUserId}>`;
+          value += `\n**${tx.fromUserId ? 'From' : 'To'}:** ${otherParty}`;
+        }
+        
+        value += `\n**Time:** ${timestamp}`;
+        
+        embed.addFields({
+          name: `${emoji} ${tx.description || tx.type}`,
+          value: value,
+          inline: false
+        });
+      }
+      
+      // Add pagination buttons if more than one page
+      const components = [];
+      if (totalPages > 1) {
+        const buttonRow = new ActionRowBuilder();
+        
+        // Encode collection in customId (use empty string if null)
+        const collectionParam = collection || '';
+        
+        const prevButton = new ButtonBuilder()
+          .setCustomId(`balance-history-nft:${userId}:${currentPage - 1}:${maxTransactions}:${collectionParam}`)
+          .setLabel('◀ Previous')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === 1);
+        
+        const pageButton = new ButtonBuilder()
+          .setCustomId(`balance-history-nft-page:${userId}:${currentPage}`)
+          .setLabel(`Page ${currentPage}/${totalPages}`)
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true);
+        
+        const nextButton = new ButtonBuilder()
+          .setCustomId(`balance-history-nft:${userId}:${currentPage + 1}:${maxTransactions}:${collectionParam}`)
+          .setLabel('Next ▶')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(currentPage === totalPages);
+        
+        buttonRow.addComponents(prevButton, pageButton, nextButton);
+        components.push(buttonRow);
+      }
+      
+      await interaction.editReply({ embeds: [embed], components });
+    } catch (error) {
+      console.error('[BALANCE-HISTORY-NFT] Error in pagination:', error.message);
       await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
     }
   }
