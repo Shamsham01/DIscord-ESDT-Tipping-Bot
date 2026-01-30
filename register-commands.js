@@ -721,7 +721,9 @@ const commands = [
                 name: 'limit',
                 description: 'Number of transactions to show (default: 10, max: 50)',
                 type: ApplicationCommandOptionType.Integer,
-                required: false
+                required: false,
+                min_value: 1,
+                max_value: 50
             },
             {
                 name: 'public',
@@ -767,7 +769,9 @@ const commands = [
                 name: 'limit',
                 description: 'Number of transactions to show (default: 10, max: 50)',
                 type: ApplicationCommandOptionType.Integer,
-                required: false
+                required: false,
+                min_value: 1,
+                max_value: 50
             },
             {
                 name: 'public',

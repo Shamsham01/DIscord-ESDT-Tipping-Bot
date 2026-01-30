@@ -8898,7 +8898,16 @@ client.on('interactionCreate', async (interaction) => {
     }
   } else if (commandName === 'balance-history') {
     try {
-      const limit = Math.min(interaction.options.getInteger('limit') || 10, 50);
+      // Safely get limit value with validation
+      let limit = interaction.options.getInteger('limit');
+      if (limit === null || limit === undefined) {
+        limit = 10; // Default value
+      } else if (limit < 1) {
+        limit = 1; // Minimum value
+      } else if (limit > 50) {
+        limit = 50; // Maximum value
+      }
+      
       const isPublic = interaction.options.getBoolean('public') || false;
       await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
       
@@ -9117,7 +9126,16 @@ client.on('interactionCreate', async (interaction) => {
   } else if (commandName === 'balance-history-nft') {
     try {
       const collection = interaction.options.getString('collection');
-      const limit = Math.min(interaction.options.getInteger('limit') || 10, 50);
+      // Safely get limit value with validation
+      let limit = interaction.options.getInteger('limit');
+      if (limit === null || limit === undefined) {
+        limit = 10; // Default value
+      } else if (limit < 1) {
+        limit = 1; // Minimum value
+      } else if (limit > 50) {
+        limit = 50; // Maximum value
+      }
+      
       const isPublic = interaction.options.getBoolean('public') || false;
       await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
       
@@ -23268,7 +23286,8 @@ async function createDropRoundEmbed(guildId, roundId, game, round, isClosed = fa
     
     let color = '#00FF00'; // Green - min droppers met
     let statusText = '🟢 LIVE';
-    let countdownText = dropHelpers.formatCountdown(Math.max(0, timeRemaining));
+    // Use Discord's dynamic timestamp for real-time updates
+    let countdownText = `<t:${Math.floor(round.drawTime / 1000)}:R>`;
     
     if (round.currentDroppers < round.minDroppers) {
       color = '#FFA500'; // Orange - waiting for min droppers
