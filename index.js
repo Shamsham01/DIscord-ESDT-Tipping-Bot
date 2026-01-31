@@ -6752,99 +6752,7 @@ client.on('interactionCreate', async (interaction) => {
   } else if (commandName === 'help') {
     try {
       await interaction.deferReply();
-
-      const embed = new EmbedBuilder()
-        .setTitle('📚 Bot Commands Library')
-        .setDescription('All available commands organized by category')
-        .setColor('#4d55dc')
-        .setThumbnail('https://i.ibb.co/60PgqNc5/checklist-logo.png')
-        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-        .setTimestamp();
-
-      // Define command categories
-      const categories = {
-        '👛 Virtual Accounts (ESDT)': [
-          '`/check-balance-esdt` - View your virtual account balance',
-          '`/balance-history` - View your transaction history',
-          '`/tip-virtual-esdt` - Tip another user with virtual balance',
-          '`/virtual-house-topup` - Transfer from Virtual Account to House Balance',
-          '`/withdraw-esdt` - Withdraw funds to your wallet'
-        ],
-        '🖼️ Virtual Accounts (NFT)': [
-          '`/check-balance-nft` - View your NFT virtual account balance',
-          '`/balance-history-nft` - View your NFT transaction history',
-          '`/show-my-nft` - View detailed information about an NFT (image, attributes, metadata)',
-          '`/tip-virtual-nft` - Tip another user an NFT from your virtual account',
-          '`/sell-nft` - List an NFT for sale on the marketplace',
-          '`/withdraw-nft` - Withdraw an NFT to your registered wallet'
-        ],
-        '⚽ Football Betting': [
-          '`/create-fixtures` 🔴 Admin - Create football matches for betting',
-          '`/football-leaderboard-all` - View betting leaderboard',
-          '`/football-leaderboard-filtered` - View leaderboard for date range',
-          '`/my-football-stats` - View your betting statistics & PNL'
-        ],
-        '🎮 Rock Paper Scissors': [
-          '`/challenge-rps` - Challenge someone to RPS',
-          '`/list-rps-challenges` - List active challenges'
-        ],
-        '🎰 Lottery & Auctions': [
-          '`/create-lottery` 🔴 Admin - Create a new lottery game',
-          '`/create-auction` 🔴 Admin - Create an NFT auction'
-        ],
-        '💼 Wallet & Project Management': [
-          '`/set-wallet` - Register your MultiversX wallet',
-          '`/register-project` 🔴 Admin - Register a new project',
-          '`/update-project` 🔴 Admin - Update project settings',
-          '`/list-projects` 🔴 Admin - View all projects',
-          '`/delete-project` 🔴 Admin - Delete a project',
-          '`/set-community-fund` 🔴 Admin - Set community fund project'
-        ],
-        '💰 Token & NFT Transfers': [
-          '`/send-esdt` 🔴 Admin - Send tokens to a user',
-          '`/send-nft` 🔴 Admin - Send NFT to a user',
-          '`/house-tip` 🔴 Admin - Tip from house balance',
-          '`/list-wallets` - List registered wallets (verify your registration)',
-          '`/show-community-fund-address` - View community fund address'
-        ],
-        '🔧 Utilities & Debug': [
-          '`/update-token-metadata` 🔴 Admin - Update token info',
-          '`/blockchain-status` 🔴 Admin - Check blockchain listener',
-          '`/server-balances` 🔴 Admin - View server balances',
-          '`/house-balance` 🔴 Admin - View house balance (no-winner matches)',
-          '`/update-usernames` 🔴 Admin - Update Discord usernames',
-          '`/get-competition` - View last used competition',
-          '`/test-football-api` 🔴 Admin - Test API connectivity',
-          '`/debug-server-config` 🔴 Admin - Debug server config',
-          '`/debug-user` 🔴 Admin - Debug user info'
-        ]
-      };
-
-      // Add each category as a field
-      for (const [category, commands] of Object.entries(categories)) {
-        let commandsText = commands.map(cmd => cmd.replace('🔴 Admin', '**🔴 Admin Only**')).join('\n');
-        embed.addFields({
-          name: category,
-          value: commandsText,
-          inline: false
-        });
-      }
-
-      // Add help note
-      embed.addFields({
-        name: 'ℹ️ How to Use',
-        value: 'Type `/` in Discord to see all commands. Commands marked **🔴 Admin Only** require administrator permissions. Most commands support both private and public responses.',
-        inline: false
-      });
-
-      // Add documentation link
-      embed.addFields({
-        name: '📖 Documentation',
-        value: 'For detailed guides and more information, visit our [GitBook Documentation](https://hodltokenclub.gitbook.io/esdt-tipping-bot/)',
-        inline: false
-      });
-
-      await interaction.editReply({ embeds: [embed] });
+      await handleHelpCommand(interaction, 1);
     } catch (error) {
       console.error('[HELP] Error in help command:', error.message);
       if (interaction.deferred) {
@@ -19180,6 +19088,19 @@ client.on('interactionCreate', async (interaction) => {
       console.error('[DROP] Error in drop-leaderboard pagination:', error.message);
       await interaction.editReply({ content: `❌ Error: ${error.message}` });
     }
+  } else if (customId.startsWith('help:')) {
+    // Help command pagination handler
+    try {
+      await interaction.deferUpdate();
+      
+      const parts = customId.split(':');
+      const page = parseInt(parts[1], 10) || 1;
+      
+      await handleHelpCommand(interaction, page);
+    } catch (error) {
+      console.error('[HELP] Error in help pagination:', error.message);
+      await interaction.editReply({ content: `❌ Error: ${error.message}` });
+    }
   } else if (customId.startsWith('balance-history:')) {
     // Balance history pagination handler
     try {
@@ -23845,6 +23766,13 @@ async function processDropRound(guildId, roundId) {
 
 async function createNextDropRound(guildId, game) {
   try {
+    // Check if game is still active before creating next round
+    const currentGame = await dbDropGames.getDropGame(guildId);
+    if (!currentGame || currentGame.status !== 'ACTIVE') {
+      console.log(`[DROP] Skipping next round creation for guild ${guildId} - game status is ${currentGame?.status || 'not found'}`);
+      return;
+    }
+    
     const now = Date.now();
     const oneHour = 60 * 60 * 1000;
     const drawTime = now + oneHour;
@@ -23889,75 +23817,95 @@ async function distributeWeeklyAirdrops() {
       try {
         const leaderboardEntries = await dbDropRounds.getLeaderboardForAirdrop(game.guildId);
         
-        if (leaderboardEntries.length === 0) continue;
-        
         const { weekStart, weekEnd } = dropHelpers.getPreviousWeekBoundaries();
         
-        for (const entry of leaderboardEntries) {
-          try {
-            // Get user wallet
-            const userWallets = await getUserWallets(game.guildId);
-            const walletAddress = userWallets[entry.userId];
-            
-            if (!walletAddress) {
-              console.log(`[DROP] Skipping ${entry.userTag} - no wallet registered`);
-              continue;
-            }
-            
-            // Get NFT count if multiplier enabled
-            let multiplier = 1;
-            if (game.nftCollectionMultiplier && game.collectionIdentifier) {
-              const nftResult = await dropHelpers.getUserNFTCount(walletAddress, game.collectionIdentifier);
-              if (nftResult.success) {
-                const supporterStatus = dropHelpers.calculateSupporterStatus(nftResult.count);
-                multiplier = supporterStatus.multiplier;
-              }
-            }
-            
-            // Calculate airdrop for the reward token
-            if (game.tokenTicker) {
-              const airdropAmountWei = dropHelpers.calculateWeeklyAirdrop(entry.points, game.baseAmountWei, multiplier);
+        // Get channel for announcements
+        const channel = await client.channels.fetch(game.channelId).catch(() => null);
+        
+        // Process airdrops if there are entries
+        if (leaderboardEntries.length > 0) {
+          for (const entry of leaderboardEntries) {
+            try {
+              // Get user wallet
+              const userWallets = await getUserWallets(game.guildId);
+              const walletAddress = userWallets[entry.userId];
               
-              if (new BigNumber(airdropAmountWei).isGreaterThan(0)) {
-                // Credit virtual account
-                const tokenDecimals = await getStoredTokenDecimals(game.guildId, game.tokenTicker);
-                const airdropAmountHuman = new BigNumber(airdropAmountWei).dividedBy(new BigNumber(10).pow(tokenDecimals || 8)).toString();
-                await virtualAccounts.addFundsToAccount(
-                  game.guildId,
-                  entry.userId,
-                  game.tokenTicker,
-                  airdropAmountHuman,
-                  null,
-                  `Weekly DROP game airdrop (${entry.points} points × ${multiplier}x multiplier)`
-                );
-                
-                // Track house spending
-                await trackHouseSpending(game.guildId, airdropAmountWei, game.tokenTicker, 'weekly_airdrop', 'drop');
+              if (!walletAddress) {
+                console.log(`[DROP] Skipping ${entry.userTag} - no wallet registered`);
+                continue;
               }
+              
+              // Get NFT count if multiplier enabled
+              let multiplier = 1;
+              if (game.nftCollectionMultiplier && game.collectionIdentifier) {
+                const nftResult = await dropHelpers.getUserNFTCount(walletAddress, game.collectionIdentifier);
+                if (nftResult.success) {
+                  const supporterStatus = dropHelpers.calculateSupporterStatus(nftResult.count);
+                  multiplier = supporterStatus.multiplier;
+                }
+              }
+              
+              // Calculate airdrop for the reward token
+              if (game.tokenTicker) {
+                const airdropAmountWei = dropHelpers.calculateWeeklyAirdrop(entry.points, game.baseAmountWei, multiplier);
+                
+                if (new BigNumber(airdropAmountWei).isGreaterThan(0)) {
+                  // Credit virtual account
+                  const tokenDecimals = await getStoredTokenDecimals(game.guildId, game.tokenTicker);
+                  const airdropAmountHuman = new BigNumber(airdropAmountWei).dividedBy(new BigNumber(10).pow(tokenDecimals || 8)).toString();
+                  await virtualAccounts.addFundsToAccount(
+                    game.guildId,
+                    entry.userId,
+                    game.tokenTicker,
+                    airdropAmountHuman,
+                    null,
+                    `Weekly DROP game airdrop (${entry.points} points × ${multiplier}x multiplier)`
+                  );
+                  
+                  // Track house spending
+                  await trackHouseSpending(game.guildId, airdropAmountWei, game.tokenTicker, 'weekly_airdrop', 'drop');
+                }
+              }
+              
+              // Update airdrop status
+              await dbDropRounds.updateLeaderboardEntry(game.guildId, entry.userId, entry.userTag, weekStart, weekEnd, {
+                airdropStatus: true
+              });
+              
+              console.log(`[DROP] Distributed airdrop to ${entry.userTag}: ${entry.points} points × ${multiplier}x = ${entry.points * multiplier} multiplier`);
+            } catch (error) {
+              console.error(`[DROP] Error distributing airdrop to ${entry.userTag}:`, error);
             }
+          }
+          
+          // Create announcement if there were entries
+          if (channel) {
+            const embed = new EmbedBuilder()
+              .setTitle('🎁 Weekly DROP Airdrop Distributed!')
+              .setDescription(`**${leaderboardEntries.length}** winner(s) received their weekly airdrops!`)
+              .setColor('#00FF00')
+              .setFooter({ text: 'Check your virtual account balance!', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+              .setTimestamp();
             
-            // Update airdrop status
-            await dbDropRounds.updateLeaderboardEntry(game.guildId, entry.userId, entry.userTag, weekStart, weekEnd, {
-              airdropStatus: true
-            });
-            
-            console.log(`[DROP] Distributed airdrop to ${entry.userTag}: ${entry.points} points × ${multiplier}x = ${entry.points * multiplier} multiplier`);
-          } catch (error) {
-            console.error(`[DROP] Error distributing airdrop to ${entry.userTag}:`, error);
+            await channel.send({ embeds: [embed] });
           }
         }
         
-        // Create announcement
-        const channel = await client.channels.fetch(game.channelId).catch(() => null);
-        if (channel && leaderboardEntries.length > 0) {
-          const embed = new EmbedBuilder()
-            .setTitle('🎁 Weekly DROP Airdrop Distributed!')
-            .setDescription(`**${leaderboardEntries.length}** winner(s) received their weekly airdrops!`)
-            .setColor('#00FF00')
-            .setFooter({ text: 'Check your virtual account balance!', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+        // Stop the game after weekly airdrop distribution - admins must restart with /start-drop-game-automation
+        // This gives admins a chance to change the ESDT token and NFT collection for the next week
+        await dbDropGames.stopDropGame(game.guildId);
+        console.log(`[DROP] Game stopped for guild ${game.guildId} after weekly airdrop distribution. Use /start-drop-game-automation to restart.`);
+        
+        // Send notification about game stopping
+        if (channel) {
+          const stopEmbed = new EmbedBuilder()
+            .setTitle('⏸️ DROP Game Paused')
+            .setDescription('The DROP game has been paused after the weekly airdrop distribution.\n\nAdmins can restart it with `/start-drop-game-automation` to configure a new week with different tokens or NFT collections.')
+            .setColor('#FFA500')
+            .setFooter({ text: 'Game will resume when restarted by an admin', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
             .setTimestamp();
           
-          await channel.send({ embeds: [embed] });
+          await channel.send({ embeds: [stopEmbed] });
         }
       } catch (error) {
         console.error(`[DROP] Error processing weekly airdrops for guild ${game.guildId}:`, error);
@@ -24015,17 +23963,31 @@ async function handleStartDropGame(interaction) {
     // Get token ticker for display
     const tokenTickerDisplay = tokenMetadata[tokenTicker]?.ticker || tokenTicker.split('-')[0];
     
-    // Create drop game
+    // Create or update drop game
     const channelId = interaction.channelId;
-    await dbDropGames.createDropGame(guildId, {
-      channelId,
-      status: 'ACTIVE',
-      tokenTicker,
-      baseAmountWei,
-      minDroppers,
-      collectionIdentifier: collectionIdentifier || null,
-      nftCollectionMultiplier
-    });
+    if (existingGame && existingGame.status === 'STOPPED') {
+      // Update existing stopped game to restart it
+      await dbDropGames.updateDropGame(guildId, {
+        channelId,
+        status: 'ACTIVE',
+        tokenTicker,
+        baseAmountWei,
+        minDroppers,
+        collectionIdentifier: collectionIdentifier || null,
+        nftCollectionMultiplier
+      });
+    } else {
+      // Create new drop game
+      await dbDropGames.createDropGame(guildId, {
+        channelId,
+        status: 'ACTIVE',
+        tokenTicker,
+        baseAmountWei,
+        minDroppers,
+        collectionIdentifier: collectionIdentifier || null,
+        nftCollectionMultiplier
+      });
+    }
     
     // Create first round
     await createNextDropRound(guildId, {
@@ -24048,6 +24010,187 @@ async function handleStartDropGame(interaction) {
     } else {
       await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
     }
+  }
+}
+
+// Command: /help
+async function handleHelpCommand(interaction, page = 1) {
+  try {
+    // Define command categories organized into pages
+    // Each page should have max 8-10 fields to stay within Discord limits
+    const pages = [
+      {
+        title: '📚 Bot Commands Library - Page 1/4',
+        description: 'Virtual Accounts & Wallet Management',
+        categories: {
+          '👛 Virtual Accounts (ESDT)': [
+            '`/check-balance-esdt` - View your virtual account balance',
+            '`/balance-history` - View your transaction history',
+            '`/tip-virtual-esdt` - Tip another user with virtual balance',
+            '`/virtual-house-topup` - Transfer from Virtual Account to House Balance',
+            '`/withdraw-esdt` - Withdraw funds to your wallet'
+          ],
+          '🖼️ Virtual Accounts (NFT)': [
+            '`/check-balance-nft` - View your NFT virtual account balance',
+            '`/balance-history-nft` - View your NFT transaction history',
+            '`/show-my-nft` - View detailed information about an NFT',
+            '`/tip-virtual-nft` - Tip another user an NFT from your virtual account',
+            '`/sell-nft` - List an NFT for sale on the marketplace',
+            '`/withdraw-nft` - Withdraw an NFT to your registered wallet',
+            '`/withdraw-nft-bulk` - Withdraw multiple NFTs at once'
+          ],
+          '💼 Wallet & Project Management': [
+            '`/set-wallet` - Register your MultiversX wallet',
+            '`/register-project` 🔴 Admin - Register a new project',
+            '`/update-project` 🔴 Admin - Update project settings',
+            '`/list-projects` - View all projects',
+            '`/delete-project` 🔴 Admin - Delete a project',
+            '`/set-community-fund` 🔴 Admin - Set community fund project',
+            '`/list-wallets` - List registered wallets',
+            '`/show-community-fund-address` - View community fund address',
+            '`/check-community-fund-balance` - Check community fund balance'
+          ]
+        }
+      },
+      {
+        title: '📚 Bot Commands Library - Page 2/4',
+        description: 'Games & Betting',
+        categories: {
+          '⚽ Football Betting': [
+            '`/create-fixtures` 🔴 Admin - Create football matches for betting',
+            '`/update-football-match` 🔴 Admin - Update match pot size',
+            '`/football-leaderboard-all` - View betting leaderboard',
+            '`/football-leaderboard-filtered` - View leaderboard for date range',
+            '`/my-football-stats` - View your betting statistics & PNL',
+            '`/get-competition` - View last used competition'
+          ],
+          '🎮 Rock Paper Scissors': [
+            '`/challenge-rps` - Challenge someone to RPS',
+            '`/list-rps-challenges` - List active challenges'
+          ],
+          '🎰 Lottery': [
+            '`/create-lottery` 🔴 Admin - Create a new lottery game',
+            '`/update-lottery` 🔴 Admin - Update lottery settings',
+            '`/my-active-lottery-tickets` - View your active tickets',
+            '`/my-expired-tickets` - View your expired tickets',
+            '`/my-lottery-stats` - View your lottery statistics'
+          ],
+          '🪂 DROP Game': [
+            '`/start-drop-game-automation` 🔴 Admin - Start automated DROP game',
+            '`/stop-drop-game-automation` 🔴 Admin - Stop DROP game',
+            '`/drop-leaderboard` - View weekly leaderboard'
+          ],
+          '🎨 NFT Staking': [
+            '`/create-staking-pool` 🔴 Admin - Create a staking pool',
+            '`/update-staking-pool` 🔴 Admin - Update staking pool',
+            '`/close-staking-pool` 🔴 Admin - Close a staking pool'
+          ]
+        }
+      },
+      {
+        title: '📚 Bot Commands Library - Page 3/4',
+        description: 'Transfers & Auctions',
+        categories: {
+          '💰 Token & NFT Transfers': [
+            '`/send-esdt` 🔴 Admin - Send tokens to a user',
+            '`/send-nft` 🔴 Admin - Send NFT to a user',
+            '`/house-tip` 🔴 Admin - Tip from house balance',
+            '`/house-withdraw` 🔴 Admin - Withdraw from house balance'
+          ],
+          '🎨 Auctions & Marketplace': [
+            '`/create-auction` 🔴 Admin - Create an NFT auction'
+          ]
+        }
+      },
+      {
+        title: '📚 Bot Commands Library - Page 4/4',
+        description: 'Utilities & Information',
+        categories: {
+          '🔧 Utilities & Debug': [
+            '`/update-token-metadata` 🔴 Admin - Update token info',
+            '`/blockchain-status` 🔴 Admin - Check blockchain listener',
+            '`/server-balances` 🔴 Admin - View server balances',
+            '`/house-balance` 🔴 Admin - View house balance',
+            '`/update-usernames` 🔴 Admin - Update Discord usernames',
+            '`/test-football-api` 🔴 Admin - Test API connectivity',
+            '`/debug-server-config` 🔴 Admin - Debug server config',
+            '`/debug-user` 🔴 Admin - Debug user info',
+            '`/delete-all-server-data` 🔴 Admin - Delete all server data'
+          ],
+          'ℹ️ How to Use': [
+            'Type `/` in Discord to see all commands.',
+            'Commands marked **🔴 Admin Only** require administrator permissions.',
+            'Most commands support both private and public responses.'
+          ],
+          '📖 Documentation': [
+            'For detailed guides and more information, visit our [GitBook Documentation](https://hodltokenclub.gitbook.io/esdt-tipping-bot/)'
+          ]
+        }
+      }
+    ];
+
+    const totalPages = pages.length;
+    const currentPage = Math.max(1, Math.min(page, totalPages));
+    const pageData = pages[currentPage - 1];
+
+    const embed = new EmbedBuilder()
+      .setTitle(pageData.title)
+      .setDescription(pageData.description)
+      .setColor('#4d55dc')
+      .setThumbnail('https://i.ibb.co/60PgqNc5/checklist-logo.png')
+      .setFooter({ 
+        text: `Page ${currentPage}/${totalPages} • Powered by MakeX`, 
+        iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' 
+      })
+      .setTimestamp();
+
+    // Add each category as a field
+    for (const [category, commands] of Object.entries(pageData.categories)) {
+      let commandsText = Array.isArray(commands) 
+        ? commands.map(cmd => cmd.replace('🔴 Admin', '**🔴 Admin Only**')).join('\n')
+        : commands;
+      embed.addFields({
+        name: category,
+        value: commandsText,
+        inline: false
+      });
+    }
+
+    // Create pagination buttons
+    const components = [];
+    if (totalPages > 1) {
+      const buttonRow = new ActionRowBuilder();
+      
+      const prevButton = new ButtonBuilder()
+        .setCustomId(`help:${currentPage - 1}`)
+        .setLabel('◀ Previous')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(currentPage === 1);
+      
+      const pageButton = new ButtonBuilder()
+        .setCustomId(`help-page:${currentPage}`)
+        .setLabel(`Page ${currentPage}/${totalPages}`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true);
+      
+      const nextButton = new ButtonBuilder()
+        .setCustomId(`help:${currentPage + 1}`)
+        .setLabel('Next ▶')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(currentPage === totalPages);
+      
+      buttonRow.addComponents(prevButton, pageButton, nextButton);
+      components.push(buttonRow);
+    }
+
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ embeds: [embed], components });
+    } else {
+      await interaction.reply({ embeds: [embed], components });
+    }
+  } catch (error) {
+    console.error('[HELP] Error in help command:', error.message);
+    throw error;
   }
 }
 
