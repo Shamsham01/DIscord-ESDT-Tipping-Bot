@@ -494,6 +494,48 @@ async function getAllTimeLeaderboard(guildId) {
   }
 }
 
+// Get monthly leaderboard (aggregate all weeks within a month)
+async function getMonthlyLeaderboard(guildId, monthStart, monthEnd) {
+  try {
+    // Get all leaderboard entries where week_end falls within the month
+    const { data, error } = await supabase
+      .from('drop_leaderboard')
+      .select('*')
+      .eq('guild_id', guildId)
+      .gte('week_end', monthStart)
+      .lt('week_end', monthEnd)
+      .order('week_end', { ascending: true });
+    
+    if (error) throw error;
+    
+    // Aggregate points and wins by user for the month
+    const userTotals = {};
+    (data || []).forEach(row => {
+      const userId = row.user_id;
+      if (!userTotals[userId]) {
+        userTotals[userId] = {
+          userId,
+          userTag: row.user_tag,
+          points: 0,
+          wins: 0
+        };
+      }
+      userTotals[userId].points += (row.points || 0);
+      userTotals[userId].wins += (row.wins || 0);
+    });
+    
+    // Convert to array and sort by points (desc), then wins (desc)
+    return Object.values(userTotals)
+      .sort((a, b) => {
+        if (b.points !== a.points) return b.points - a.points;
+        return b.wins - a.wins;
+      });
+  } catch (error) {
+    console.error('[DB] Error getting monthly leaderboard:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   createRound,
   getRound,
@@ -509,5 +551,6 @@ module.exports = {
   getWeeklyLeaderboard,
   updateLeaderboardEntry,
   getLeaderboardForAirdrop,
-  getAllTimeLeaderboard
+  getAllTimeLeaderboard,
+  getMonthlyLeaderboard
 };

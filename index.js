@@ -23809,15 +23809,145 @@ async function createNextDropRound(guildId, game) {
   }
 }
 
+// Finalize all active rounds for a specific week (close expired rounds and add winners to leaderboard)
+async function finalizeActiveRoundsForWeek(guildId, weekStart, weekEnd) {
+  try {
+    const activeRounds = await dbDropRounds.getActiveRounds(guildId);
+    const now = Date.now();
+    let finalizedCount = 0;
+    
+    for (const round of activeRounds) {
+      // Only process rounds that belong to the week we're finalizing
+      // Round belongs to this week if its week_end is within the week boundaries
+      if (round.weekEnd < weekStart || round.weekEnd > weekEnd) {
+        continue;
+      }
+      
+      // Check if round expired or should be closed
+      if (now >= round.drawTime) {
+        const participantCount = await dbDropRounds.getParticipantCount(guildId, round.roundId);
+        
+        if (participantCount >= round.minDroppers) {
+          // Round expired and has enough participants - select winner
+          const participants = await dbDropRounds.getParticipants(guildId, round.roundId);
+          
+          if (participants.length > 0) {
+            const winner = participants[Math.floor(Math.random() * participants.length)];
+            
+            // Update round status
+            await dbDropRounds.updateRound(guildId, round.roundId, {
+              status: 'COMPLETED',
+              closedAt: now,
+              currentDroppers: participantCount,
+              winnerId: winner.userId,
+              winnerTag: winner.userTag
+            });
+            
+            // Add winner to leaderboard for the week this round belongs to
+            await dbDropRounds.updateLeaderboardEntry(guildId, winner.userId, winner.userTag, round.weekStart, round.weekEnd, {
+              points: 1,
+              wins: 1
+            });
+            
+            // Create winner announcement
+            const channel = await client.channels.fetch(round.channelId).catch(() => null);
+            if (channel) {
+              const game = await dbDropGames.getDropGame(guildId);
+              if (game) {
+                const winnerEmbed = await createWinnerAnnouncementEmbed(guildId, {
+                  ...round,
+                  winnerId: winner.userId,
+                  winnerTag: winner.userTag
+                }, game);
+                if (winnerEmbed) {
+                  await channel.send({ embeds: [winnerEmbed] });
+                }
+                
+                // Update closed round embed
+                const closedEmbed = await createDropRoundEmbed(guildId, round.roundId, game, {
+                  ...round,
+                  currentDroppers: participantCount,
+                  status: 'CLOSED',
+                  winnerId: winner.userId,
+                  winnerTag: winner.userTag
+                }, true);
+                if (closedEmbed) {
+                  await updateDropRoundMessage(channel, round, game, closedEmbed, guildId, round.roundId);
+                }
+              }
+            }
+            
+            // Clean up participants
+            await dbDropRounds.deleteParticipantsForRound(guildId, round.roundId);
+            
+            console.log(`[DROP] Finalized round ${round.roundId} for week ending ${new Date(round.weekEnd).toISOString()}, winner: ${winner.userTag}`);
+            finalizedCount++;
+          } else {
+            // No participants, just close the round
+            await dbDropRounds.updateRound(guildId, round.roundId, {
+              status: 'CLOSED',
+              closedAt: now,
+              currentDroppers: 0
+            });
+            console.log(`[DROP] Closed round ${round.roundId} with no participants`);
+            finalizedCount++;
+          }
+        } else {
+          // Not enough participants, close without winner
+          await dbDropRounds.updateRound(guildId, round.roundId, {
+            status: 'CLOSED',
+            closedAt: now,
+            currentDroppers: participantCount
+          });
+          
+          // Update embed to show it's closed
+          const channel = await client.channels.fetch(round.channelId).catch(() => null);
+          if (channel) {
+            const game = await dbDropGames.getDropGame(guildId);
+            if (game) {
+              const closedEmbed = await createDropRoundEmbed(guildId, round.roundId, game, {
+                ...round,
+                currentDroppers: participantCount,
+                status: 'CLOSED'
+              }, true);
+              if (closedEmbed) {
+                await updateDropRoundMessage(channel, round, game, closedEmbed, guildId, round.roundId);
+              }
+            }
+          }
+          
+          console.log(`[DROP] Closed round ${round.roundId} - insufficient participants (${participantCount}/${round.minDroppers})`);
+          finalizedCount++;
+        }
+      }
+    }
+    
+    if (finalizedCount > 0) {
+      console.log(`[DROP] Finalized ${finalizedCount} active round(s) for week ending ${new Date(weekEnd).toISOString()}`);
+    }
+    
+    return finalizedCount;
+  } catch (error) {
+    console.error(`[DROP] Error finalizing active rounds for week:`, error);
+    throw error;
+  }
+}
+
 async function distributeWeeklyAirdrops() {
   try {
     const activeGames = await dbDropGames.getActiveDropGames();
     
     for (const game of activeGames) {
       try {
-        const leaderboardEntries = await dbDropRounds.getLeaderboardForAirdrop(game.guildId);
-        
         const { weekStart, weekEnd } = dropHelpers.getPreviousWeekBoundaries();
+        
+        // CRITICAL: Finalize all active rounds for the previous week before distributing airdrops
+        // This ensures all winners are added to the leaderboard before we calculate airdrops
+        console.log(`[DROP] Finalizing active rounds for week ending ${new Date(weekEnd).toISOString()}...`);
+        await finalizeActiveRoundsForWeek(game.guildId, weekStart, weekEnd);
+        
+        // Now get the leaderboard entries (which now includes any newly finalized rounds)
+        const leaderboardEntries = await dbDropRounds.getLeaderboardForAirdrop(game.guildId);
         
         // Get channel for announcements
         const channel = await client.channels.fetch(game.channelId).catch(() => null);
@@ -23888,6 +24018,40 @@ async function distributeWeeklyAirdrops() {
               .setTimestamp();
             
             await channel.send({ embeds: [embed] });
+          }
+        }
+        
+        // Close any remaining active rounds (belonging to current or future weeks)
+        // These rounds won't be finalized since they're not part of the previous week
+        const remainingActiveRounds = await dbDropRounds.getActiveRounds(game.guildId);
+        if (remainingActiveRounds.length > 0) {
+          console.log(`[DROP] Closing ${remainingActiveRounds.length} remaining active round(s) before stopping game...`);
+          for (const round of remainingActiveRounds) {
+            try {
+              const participantCount = await dbDropRounds.getParticipantCount(game.guildId, round.roundId);
+              await dbDropRounds.updateRound(game.guildId, round.roundId, {
+                status: 'CLOSED',
+                closedAt: Date.now(),
+                currentDroppers: participantCount
+              });
+              
+              // Update embed to show it's closed
+              const roundChannel = await client.channels.fetch(round.channelId).catch(() => null);
+              if (roundChannel) {
+                const closedEmbed = await createDropRoundEmbed(game.guildId, round.roundId, game, {
+                  ...round,
+                  currentDroppers: participantCount,
+                  status: 'CLOSED'
+                }, true);
+                if (closedEmbed) {
+                  await updateDropRoundMessage(roundChannel, round, game, closedEmbed, game.guildId, round.roundId);
+                }
+              }
+              
+              console.log(`[DROP] Closed remaining round ${round.roundId}`);
+            } catch (error) {
+              console.error(`[DROP] Error closing round ${round.roundId}:`, error);
+            }
           }
         }
         
@@ -23962,6 +24126,23 @@ async function handleStartDropGame(interaction) {
     
     // Get token ticker for display
     const tokenTickerDisplay = tokenMetadata[tokenTicker]?.ticker || tokenTicker.split('-')[0];
+    
+    // Safety check: Close any remaining active rounds from previous game (shouldn't happen, but just in case)
+    const remainingActiveRounds = await dbDropRounds.getActiveRounds(guildId);
+    if (remainingActiveRounds.length > 0) {
+      console.log(`[DROP] Warning: Found ${remainingActiveRounds.length} active round(s) when starting new game. Closing them...`);
+      for (const round of remainingActiveRounds) {
+        try {
+          await dbDropRounds.updateRound(guildId, round.roundId, {
+            status: 'CLOSED',
+            closedAt: Date.now()
+          });
+          console.log(`[DROP] Closed leftover round ${round.roundId}`);
+        } catch (error) {
+          console.error(`[DROP] Error closing leftover round ${round.roundId}:`, error);
+        }
+      }
+    }
     
     // Create or update drop game
     const channelId = interaction.channelId;
@@ -24240,14 +24421,61 @@ async function handleShowDropLeaderboard(interaction) {
     await interaction.deferReply(); // Public reply (no ephemeral flag)
     
     const guildId = interaction.guildId;
-    const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
+    const monthOption = interaction.options.getString('month');
+    let leaderboard = [];
+    let isMonthly = false;
+    let periodDescription = '';
     
-    // Get current week leaderboard
-    const leaderboard = await dbDropRounds.getWeeklyLeaderboard(guildId, weekStart, weekEnd);
-    
-    if (leaderboard.length === 0) {
-      await interaction.editReply({ content: '📊 No entries in the current week leaderboard yet.' });
-      return;
+    if (monthOption) {
+      // Monthly leaderboard requested
+      isMonthly = true;
+      
+      // Parse month name and get current year
+      const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 
+                          'july', 'august', 'september', 'october', 'november', 'december'];
+      const monthIndex = monthNames.indexOf(monthOption.toLowerCase());
+      
+      if (monthIndex === -1) {
+        await interaction.editReply({ content: '❌ Invalid month selected.' });
+        return;
+      }
+      
+      // Get current date to determine year
+      const now = new Date();
+      const currentYear = now.getFullYear();
+      
+      // Calculate month boundaries (start of month to start of next month)
+      const monthStart = new Date(currentYear, monthIndex, 1);
+      const monthEnd = new Date(currentYear, monthIndex + 1, 1);
+      
+      // Convert to timestamps
+      const monthStartTs = monthStart.getTime();
+      const monthEndTs = monthEnd.getTime();
+      
+      // Get monthly leaderboard (aggregates all weeks within the month)
+      leaderboard = await dbDropRounds.getMonthlyLeaderboard(guildId, monthStartTs, monthEndTs);
+      
+      const monthName = monthOption.charAt(0).toUpperCase() + monthOption.slice(1);
+      periodDescription = `${monthName} ${currentYear}`;
+      
+      if (leaderboard.length === 0) {
+        await interaction.editReply({ content: `📊 No entries in the ${periodDescription} leaderboard yet.` });
+        return;
+      }
+    } else {
+      // Current week leaderboard (default behavior)
+      const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
+      leaderboard = await dbDropRounds.getWeeklyLeaderboard(guildId, weekStart, weekEnd);
+      
+      if (leaderboard.length === 0) {
+        await interaction.editReply({ content: '📊 No entries in the current week leaderboard yet.' });
+        return;
+      }
+      
+      // Format week description
+      const weekStartDate = new Date(weekStart);
+      const weekEndDate = new Date(weekEnd);
+      periodDescription = `${weekStartDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${weekEndDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
     }
     
     // Get game settings for TDA calculation
@@ -24301,8 +24529,11 @@ async function handleShowDropLeaderboard(interaction) {
         }
       }
       
+      // For monthly view, use monthly points; for weekly view, use entry points
+      const pointsForTDA = isMonthly ? entry.points : totalPoints;
+      
       // Calculate TDA (To Date Airdrop) in wei for sorting
-      const tdaWei = dropHelpers.calculateWeeklyAirdrop(totalPoints, game.baseAmountWei, multiplier);
+      const tdaWei = dropHelpers.calculateWeeklyAirdrop(pointsForTDA, game.baseAmountWei, multiplier);
       
       return {
         ...entry,
@@ -24326,9 +24557,13 @@ async function handleShowDropLeaderboard(interaction) {
     const endIndex = startIndex + entriesPerPage;
     const topEntries = entriesWithTDA.slice(startIndex, endIndex);
     
+    const embedTitle = isMonthly 
+      ? `🏆 DROP Game Monthly Leaderboard - ${periodDescription}`
+      : `🏆 DROP Game Weekly Leaderboard - ${periodDescription}`;
+    
     const embed = new EmbedBuilder()
-      .setTitle('🏆 DROP Game Weekly Leaderboard')
-      .setDescription(`**Top ${entriesWithTDA.length} players** based on points and TDA (To Date Airdrop)`)
+      .setTitle(embedTitle)
+      .setDescription(`**Top ${entriesWithTDA.length} players** based on points${isMonthly ? ' (aggregated for the month)' : ''} and TDA (To Date Airdrop)`)
       .setColor('#4d55dc')
       .setFooter({ 
         text: totalPages > 1 ? `Page ${page}/${totalPages} • Powered by MakeX` : `Total: ${entriesWithTDA.length} players • Powered by MakeX`, 

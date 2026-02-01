@@ -1484,13 +1484,27 @@ const commands = [
     },
     {
         name: 'drop-leaderboard',
-        description: 'Show DROP game weekly leaderboard',
+        description: 'Show DROP game leaderboard (current week or by month)',
         options: [
             {
-                name: 'week',
-                description: 'Show specific week (leave empty for current week)',
+                name: 'month',
+                description: 'Select a month to view monthly leaderboard (leave empty for current week)',
                 type: ApplicationCommandOptionType.String,
-                required: false
+                required: false,
+                choices: [
+                    { name: 'January', value: 'january' },
+                    { name: 'February', value: 'february' },
+                    { name: 'March', value: 'march' },
+                    { name: 'April', value: 'april' },
+                    { name: 'May', value: 'may' },
+                    { name: 'June', value: 'june' },
+                    { name: 'July', value: 'july' },
+                    { name: 'August', value: 'august' },
+                    { name: 'September', value: 'september' },
+                    { name: 'October', value: 'october' },
+                    { name: 'November', value: 'november' },
+                    { name: 'December', value: 'december' }
+                ]
             }
         ],
         default_member_permissions: null
