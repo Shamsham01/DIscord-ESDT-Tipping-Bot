@@ -12892,13 +12892,98 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      // Get destination guild's Community Fund wallet address
+      const destinationProjects = await getProjects(destinationGuildId);
+      const communityFundProjectName = getCommunityFundProjectName();
+      const destinationCommunityFund = destinationProjects[communityFundProjectName];
+      
+      if (!destinationCommunityFund || !destinationCommunityFund.walletAddress) {
+        const destinationGuildName = await getGuildName(destinationGuildId);
+        await interaction.editReply({
+          content: `❌ **Destination server Community Fund not configured!**\n\n**${destinationGuildName}** does not have a Community Fund wallet configured. Please contact an administrator.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      const destinationWalletAddress = destinationCommunityFund.walletAddress;
+      
       // Perform transfer
       try {
-        // Deduct from source
-        await virtualAccounts.updateAccountBalance(sourceGuildId, userId, tokenIdentifier, `-${transferAmount}`);
+        // Step 1: Deduct from source user's VA
+        const deductResult = await virtualAccounts.deductFundsFromAccount(
+          sourceGuildId,
+          userId,
+          tokenIdentifier,
+          transferAmount,
+          `Cross-guild transfer to ${await getGuildName(destinationGuildId)}`,
+          'cross_guild_transfer'
+        );
         
-        // Add to destination
-        await virtualAccounts.updateAccountBalance(destinationGuildId, userId, tokenIdentifier, transferAmount);
+        if (!deductResult.success) {
+          await interaction.editReply({
+            content: `❌ **Failed to deduct balance!**\n\n${deductResult.error}`,
+            flags: [MessageFlags.Ephemeral]
+          });
+          return;
+        }
+        
+        // Step 2: Make on-chain transaction from source Community Fund to destination Community Fund
+        await interaction.editReply({
+          content: `🔄 **Processing transfer...**\n\nTransferring **${transferAmount}** ${tokenIdentifier.split('-')[0]} from source Community Fund to destination Community Fund...\n\n⏳ Blockchain transaction in progress...`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        
+        const sourceCommunityFundProjectName = getCommunityFundProjectName();
+        const transferResult = await transferESDTFromCommunityFund(
+          destinationWalletAddress,
+          tokenIdentifier,
+          transferAmount,
+          sourceCommunityFundProjectName,
+          sourceGuildId
+        );
+        
+        if (!transferResult.success || !transferResult.txHash) {
+          // Refund the deduction if transaction failed
+          await virtualAccounts.addFundsToAccount(
+            sourceGuildId,
+            userId,
+            tokenIdentifier,
+            transferAmount,
+            null,
+            'cross_guild_transfer_refund',
+            null
+          );
+          
+          await interaction.editReply({
+            content: `❌ **Transfer failed!**\n\n${transferResult.error || 'Blockchain transaction failed'}\n\nYour balance has been refunded.`,
+            flags: [MessageFlags.Ephemeral]
+          });
+          return;
+        }
+        
+        // Step 3: Add to destination user's VA after successful transaction
+        const addResult = await virtualAccounts.addFundsToAccount(
+          destinationGuildId,
+          userId,
+          tokenIdentifier,
+          transferAmount,
+          transferResult.txHash,
+          'cross_guild_transfer',
+          interaction.user.tag
+        );
+        
+        if (!addResult.success) {
+          console.error('[TRANSFER-CROSS-GUILD-ESDT] Failed to add funds to destination VA:', addResult.error);
+          // Transaction succeeded but VA update failed - this is a critical error
+          // The tokens are now in destination Community Fund, but user's VA wasn't updated
+          // We should log this and notify admin
+          await interaction.editReply({
+            content: `⚠️ **Transfer completed on-chain but VA update failed!**\n\nTransaction hash: \`${transferResult.txHash}\`\n\nPlease contact an administrator. Your tokens are safe in the destination Community Fund wallet.`,
+            flags: [MessageFlags.Ephemeral]
+          });
+          return;
+        }
         
         // Get guild names for success message
         const sourceGuildName = await getGuildName(sourceGuildId);
@@ -12906,14 +12991,30 @@ client.on('interactionCreate', async (interaction) => {
         const tokenTicker = tokenIdentifier.split('-')[0];
         
         await interaction.editReply({
-          content: `✅ **Transfer successful!**\n\nTransferred ${transferAmount} ${tokenTicker} from **${sourceGuildName}** to **${destinationGuildName}**.`,
+          content: `✅ **Transfer successful!**\n\nTransferred **${transferAmount}** ${tokenTicker} from **${sourceGuildName}** to **${destinationGuildName}**.\n\n**Transaction:** \`${transferResult.txHash}\``,
           flags: [MessageFlags.Ephemeral]
         });
         
       } catch (transferError) {
         console.error('[TRANSFER-CROSS-GUILD-ESDT] Transfer error:', transferError);
+        
+        // Try to refund if deduction happened but transaction failed
+        try {
+          await virtualAccounts.addFundsToAccount(
+            sourceGuildId,
+            userId,
+            tokenIdentifier,
+            transferAmount,
+            null,
+            'cross_guild_transfer_refund',
+            null
+          );
+        } catch (refundError) {
+          console.error('[TRANSFER-CROSS-GUILD-ESDT] Refund failed:', refundError);
+        }
+        
         await interaction.editReply({
-          content: `❌ **Transfer failed!**\n\n${transferError.message}`,
+          content: `❌ **Transfer failed!**\n\n${transferError.message}\n\nIf your balance was deducted, it has been refunded.`,
           flags: [MessageFlags.Ephemeral]
         });
         return;
