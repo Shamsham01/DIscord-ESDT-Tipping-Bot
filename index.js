@@ -13148,43 +13148,134 @@ client.on('interactionCreate', async (interaction) => {
         await virtualAccounts.getUserAccount(destinationGuildId, userId, interaction.user.tag);
       }
       
+      // Get destination guild's Community Fund wallet address
+      const destinationProjects = await getProjects(destinationGuildId);
+      const communityFundProjectName = getCommunityFundProjectName();
+      const destinationCommunityFund = destinationProjects[communityFundProjectName];
+      
+      if (!destinationCommunityFund || !destinationCommunityFund.walletAddress) {
+        const destinationGuildName = await getGuildName(destinationGuildId);
+        await interaction.editReply({
+          content: `❌ **Destination server Community Fund not configured!**\n\n**${destinationGuildName}** does not have a Community Fund wallet configured. Please contact an administrator.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      const destinationWalletAddress = destinationCommunityFund.walletAddress;
+      
+      // Construct full token identifier (includes nonce)
+      const fullTokenIdentifier = verifyNFT.identifier || `${collection}-${nft.nonce.toString().padStart(4, '0')}`;
+      const tokenType = verifyNFT.token_type || 'NFT';
+      
       // Perform transfer
       try {
-        // Remove from source guild
+        // Step 1: Remove from source user's VA
         await virtualAccountsNFT.removeNFTFromAccount(sourceGuildId, userId, collection, nft.nonce, amount);
         
-        // Add to destination guild
-        await virtualAccountsNFT.addNFTToAccount(
-          destinationGuildId,
-          userId,
-          collection,
-          verifyNFT.identifier,
-          nft.nonce,
-          {
-            nft_name: verifyNFT.nft_name,
-            nft_image_url: verifyNFT.nft_image_url,
-            metadata: verifyNFT.metadata
-          },
+        // Step 2: Make on-chain transaction from source Community Fund to destination Community Fund
+        await interaction.editReply({
+          content: `🔄 **Processing transfer...**\n\nTransferring ${tokenType} "${nftName}"${amount > 1 ? ` (${amount}x)` : ''} from source Community Fund to destination Community Fund...\n\n⏳ Blockchain transaction in progress...`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        
+        const sourceCommunityFundProjectName = getCommunityFundProjectName();
+        const transferResult = await transferNFTFromCommunityFund(
+          destinationWalletAddress,
+          fullTokenIdentifier,
+          sourceCommunityFundProjectName,
+          sourceGuildId,
           amount,
-          verifyNFT.token_type || 'NFT'
+          tokenType
         );
+        
+        if (!transferResult.success || !transferResult.txHash) {
+          // Refund the removal if transaction failed
+          await virtualAccountsNFT.addNFTToAccount(
+            sourceGuildId,
+            userId,
+            collection,
+            verifyNFT.identifier,
+            nft.nonce,
+            {
+              nft_name: verifyNFT.nft_name,
+              nft_image_url: verifyNFT.nft_image_url,
+              metadata: verifyNFT.metadata
+            },
+            amount,
+            tokenType
+          );
+          
+          await interaction.editReply({
+            content: `❌ **Transfer failed!**\n\n${transferResult.error || 'Blockchain transaction failed'}\n\nYour NFT has been restored to your source account.`,
+            flags: [MessageFlags.Ephemeral]
+          });
+          return;
+        }
+        
+        // Step 3: Add to destination user's VA after successful transaction
+        try {
+          await virtualAccountsNFT.addNFTToAccount(
+            destinationGuildId,
+            userId,
+            collection,
+            verifyNFT.identifier,
+            nft.nonce,
+            {
+              nft_name: verifyNFT.nft_name,
+              nft_image_url: verifyNFT.nft_image_url,
+              metadata: verifyNFT.metadata
+            },
+            amount,
+            tokenType
+          );
+        } catch (addError) {
+          console.error('[TRANSFER-CROSS-GUILD-NFT] Failed to add NFT to destination VA:', addError);
+          // Transaction succeeded but VA update failed - this is a critical error
+          // The NFT is now in destination Community Fund, but user's VA wasn't updated
+          // We should log this and notify admin
+          await interaction.editReply({
+            content: `⚠️ **Transfer completed on-chain but VA update failed!**\n\nTransaction hash: \`${transferResult.txHash}\`\n\nError: ${addError.message}\n\nPlease contact an administrator. Your NFT is safe in the destination Community Fund wallet.`,
+            flags: [MessageFlags.Ephemeral]
+          });
+          return;
+        }
         
         // Get guild names for success message
         const sourceGuildName = await getGuildName(sourceGuildId);
         const destinationGuildName = await getGuildName(destinationGuildId);
-        
-        const tokenType = verifyNFT.token_type || 'NFT';
         const amountText = amount > 1 ? ` (${amount}x)` : '';
         
         await interaction.editReply({
-          content: `✅ **Transfer successful!**\n\nTransferred ${tokenType} "${nftName}"${amountText} from **${sourceGuildName}** to **${destinationGuildName}**.`,
+          content: `✅ **Transfer successful!**\n\nTransferred ${tokenType} "${nftName}"${amountText} from **${sourceGuildName}** to **${destinationGuildName}**.\n\n**Transaction:** \`${transferResult.txHash}\``,
           flags: [MessageFlags.Ephemeral]
         });
         
       } catch (transferError) {
         console.error('[TRANSFER-CROSS-GUILD-NFT] Transfer error:', transferError);
+        
+        // Try to refund if removal happened but transaction failed
+        try {
+          await virtualAccountsNFT.addNFTToAccount(
+            sourceGuildId,
+            userId,
+            collection,
+            verifyNFT.identifier,
+            nft.nonce,
+            {
+              nft_name: verifyNFT.nft_name,
+              nft_image_url: verifyNFT.nft_image_url,
+              metadata: verifyNFT.metadata
+            },
+            amount,
+            tokenType
+          );
+        } catch (refundError) {
+          console.error('[TRANSFER-CROSS-GUILD-NFT] Refund failed:', refundError);
+        }
+        
         await interaction.editReply({
-          content: `❌ **Transfer failed!**\n\n${transferError.message}`,
+          content: `❌ **Transfer failed!**\n\n${transferError.message}\n\nIf your NFT was removed, it has been restored.`,
           flags: [MessageFlags.Ephemeral]
         });
         return;
