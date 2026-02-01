@@ -1509,6 +1509,82 @@ const commands = [
         ],
         default_member_permissions: null
     },
+    {
+        name: 'transfer-cross-guild-esdt',
+        description: 'Transfer ESDT tokens between your Virtual Accounts across different guilds',
+        options: [
+            {
+                name: 'source-guild',
+                description: 'Source server (where tokens are currently)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'destination-guild',
+                description: 'Destination server (where tokens will be transferred)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'token',
+                description: 'Token to transfer',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'amount',
+                description: 'Amount to transfer (enter a number or "MAX" for full balance)',
+                type: ApplicationCommandOptionType.String,
+                required: true
+            }
+        ],
+        default_member_permissions: null
+    },
+    {
+        name: 'transfer-cross-guild-nft',
+        description: 'Transfer NFT/SFT between your Virtual Accounts across different guilds',
+        options: [
+            {
+                name: 'source-guild',
+                description: 'Source server (where NFT/SFT is currently)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'destination-guild',
+                description: 'Destination server (where NFT/SFT will be transferred)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'collection',
+                description: 'NFT/SFT collection',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'nft-name',
+                description: 'NFT/SFT name or identifier',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'amount',
+                description: 'Amount to transfer (default: 1, required for SFTs)',
+                type: ApplicationCommandOptionType.Number,
+                required: false,
+                min_value: 1
+            }
+        ],
+        default_member_permissions: null
+    },
 ];
 
 // Export commands for use in other scripts

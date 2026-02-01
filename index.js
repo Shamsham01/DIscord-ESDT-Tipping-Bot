@@ -1014,6 +1014,102 @@ async function getProjects(guildId) {
   return await dbServerData.getAllProjects(guildId);
 }
 
+// ============================================
+// CROSS-GUILD TRANSFER HELPER FUNCTIONS
+// ============================================
+
+// Get Discord guild name from guild ID
+async function getGuildName(guildId) {
+  try {
+    const guild = client.guilds.cache.get(guildId);
+    if (guild) {
+      return guild.name;
+    }
+    // Try fetching if not in cache
+    const fetchedGuild = await client.guilds.fetch(guildId).catch(() => null);
+    return fetchedGuild?.name || `Server ${guildId}`;
+  } catch (error) {
+    console.error(`[HELPER] Error getting guild name for ${guildId}:`, error.message);
+    return `Server ${guildId}`;
+  }
+}
+
+// Check if a token is supported in a destination guild
+async function isTokenSupportedInGuild(guildId, tokenIdentifier) {
+  try {
+    const projects = await getProjects(guildId);
+    const communityFundProjectName = getCommunityFundProjectName();
+    const communityFundProject = projects[communityFundProjectName];
+
+    if (!communityFundProject) {
+      return false;
+    }
+
+    const supportedTokensRaw = communityFundProject.supportedTokens || [];
+    const supportedTokens = Array.isArray(supportedTokensRaw)
+      ? supportedTokensRaw
+      : (supportedTokensRaw || '').split(',').map(t => t.trim()).filter(t => t.length > 0);
+
+    // Check both full identifier and ticker
+    const tokenTicker = tokenIdentifier.split('-')[0];
+    const isSupported = supportedTokens.some(token => {
+      const tokenLower = token.toLowerCase();
+      const identifierLower = tokenIdentifier.toLowerCase();
+      const tickerLower = tokenTicker.toLowerCase();
+      return tokenLower === identifierLower || tokenLower === tickerLower;
+    });
+
+    return isSupported;
+  } catch (error) {
+    console.error(`[HELPER] Error checking token support in guild ${guildId}:`, error.message);
+    return false;
+  }
+}
+
+// Get user's guilds with names
+async function getUserGuildsWithNames(userId) {
+  try {
+    const guildIds = await virtualAccounts.getUserGuilds(userId);
+    const guildsWithNames = [];
+
+    for (const guildId of guildIds) {
+      const guildName = await getGuildName(guildId);
+      guildsWithNames.push({
+        guildId: guildId,
+        guildName: guildName
+      });
+    }
+
+    return guildsWithNames;
+  } catch (error) {
+    console.error(`[HELPER] Error getting user guilds with names:`, error.message);
+    return [];
+  }
+}
+
+// Check if user has virtual account in destination guild
+async function checkUserAccountExists(guildId, userId) {
+  try {
+    const supabase = require('./supabase-client');
+    const { data, error } = await supabase
+      .from('virtual_accounts')
+      .select('guild_id')
+      .eq('guild_id', guildId)
+      .eq('user_id', userId)
+      .maybeSingle();
+    
+    if (error && error.code !== 'PGRST116') {
+      console.error(`[HELPER] Error checking account existence:`, error.message);
+      return false;
+    }
+    
+    return !!data;
+  } catch (error) {
+    console.error(`[HELPER] Error checking user account existence:`, error.message);
+    return false;
+  }
+}
+
 // Get RPS challenges for a specific server (using database)
 async function getRPSChallenges(guildId) {
   return await dbRpsGames.getRpsGames(guildId);
@@ -12700,6 +12796,306 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (commandName === 'transfer-cross-guild-esdt') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const userId = interaction.user.id;
+      const sourceGuildId = interaction.options.getString('source-guild');
+      const destinationGuildId = interaction.options.getString('destination-guild');
+      const tokenIdentifier = interaction.options.getString('token');
+      const amountStr = interaction.options.getString('amount');
+      
+      // Validate guild IDs are different
+      if (sourceGuildId === destinationGuildId) {
+        await interaction.editReply({
+          content: '❌ **Source and destination servers must be different!**',
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Check if destination account exists
+      const destinationAccountExists = await checkUserAccountExists(destinationGuildId, userId);
+      if (!destinationAccountExists) {
+        // Create account automatically
+        await virtualAccounts.getUserAccount(destinationGuildId, userId, interaction.user.tag);
+      }
+      
+      // Parse amount - handle "MAX" option
+      let transferAmount;
+      const BigNumber = require('bignumber.js');
+      const auctionReservations = require('./db/auction-reservations');
+      
+      // Get source balance and check auction reservations
+      const totalBalance = await virtualAccounts.getUserBalance(sourceGuildId, userId, tokenIdentifier);
+      const reservedAmount = await auctionReservations.getTotalReservedAmount(sourceGuildId, userId, tokenIdentifier);
+      
+      if (typeof amountStr === 'string' && amountStr.toUpperCase() === 'MAX') {
+        // Calculate available balance
+        const totalBalanceBN = new BigNumber(totalBalance || '0');
+        const reservedAmountBN = new BigNumber(reservedAmount || '0');
+        const availableBalanceBN = totalBalanceBN.minus(reservedAmountBN);
+        
+        if (availableBalanceBN.isLessThanOrEqualTo(0)) {
+          await interaction.editReply({
+            content: `❌ **No available balance!**\n\n**Total Balance:** ${totalBalance}\n**Locked in Auctions:** ${reservedAmount}\n**Available:** ${availableBalanceBN.toString()}`,
+            flags: [MessageFlags.Ephemeral]
+          });
+          return;
+        }
+        
+        transferAmount = availableBalanceBN.toString();
+      } else {
+        const parsedAmount = parseFloat(amountStr);
+        if (isNaN(parsedAmount) || parsedAmount <= 0) {
+          await interaction.editReply({
+            content: '❌ **Invalid amount!**\n\nAmount must be a positive number or "MAX" for full balance.',
+            flags: [MessageFlags.Ephemeral]
+          });
+          return;
+        }
+        transferAmount = parsedAmount.toString();
+      }
+      
+      const totalBalanceBN = new BigNumber(totalBalance || '0');
+      const reservedAmountBN = new BigNumber(reservedAmount || '0');
+      const availableBalanceBN = totalBalanceBN.minus(reservedAmountBN);
+      const transferAmountBN = new BigNumber(transferAmount);
+      
+      // Validate sufficient available balance
+      if (transferAmountBN.isGreaterThan(availableBalanceBN)) {
+        await interaction.editReply({
+          content: `❌ **Insufficient available balance!**\n\n**Total Balance:** ${totalBalance}\n**Locked in Auctions:** ${reservedAmount}\n**Available:** ${availableBalanceBN.toString()}\n\nYou're trying to transfer ${transferAmount}, but only ${availableBalanceBN.toString()} is available.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Validate token is supported in destination guild
+      const isSupported = await isTokenSupportedInGuild(destinationGuildId, tokenIdentifier);
+      if (!isSupported) {
+        // Get supported tokens list for error message
+        const projects = await getProjects(destinationGuildId);
+        const communityFundProjectName = getCommunityFundProjectName();
+        const communityFundProject = projects[communityFundProjectName];
+        const supportedTokens = communityFundProject?.supportedTokens || [];
+        const supportedTokensDisplay = Array.isArray(supportedTokens) 
+          ? supportedTokens.join(', ')
+          : (supportedTokens || 'None configured');
+        
+        const destinationGuildName = await getGuildName(destinationGuildId);
+        await interaction.editReply({
+          content: `❌ **Token not supported in destination server!**\n\nToken "${tokenIdentifier.split('-')[0]}" is not supported in **${destinationGuildName}**.\n\n**Supported tokens:** ${supportedTokensDisplay}`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Perform transfer
+      try {
+        // Deduct from source
+        await virtualAccounts.updateAccountBalance(sourceGuildId, userId, tokenIdentifier, `-${transferAmount}`);
+        
+        // Add to destination
+        await virtualAccounts.updateAccountBalance(destinationGuildId, userId, tokenIdentifier, transferAmount);
+        
+        // Get guild names for success message
+        const sourceGuildName = await getGuildName(sourceGuildId);
+        const destinationGuildName = await getGuildName(destinationGuildId);
+        const tokenTicker = tokenIdentifier.split('-')[0];
+        
+        await interaction.editReply({
+          content: `✅ **Transfer successful!**\n\nTransferred ${transferAmount} ${tokenTicker} from **${sourceGuildName}** to **${destinationGuildName}**.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        
+      } catch (transferError) {
+        console.error('[TRANSFER-CROSS-GUILD-ESDT] Transfer error:', transferError);
+        await interaction.editReply({
+          content: `❌ **Transfer failed!**\n\n${transferError.message}`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+    } catch (error) {
+      console.error('Error in transfer-cross-guild-esdt command:', error.message);
+      await interaction.editReply({
+        content: `❌ **Error:** ${error.message}`,
+        flags: [MessageFlags.Ephemeral]
+      });
+    }
+  } else if (commandName === 'transfer-cross-guild-nft') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      const userId = interaction.user.id;
+      const sourceGuildId = interaction.options.getString('source-guild');
+      const destinationGuildId = interaction.options.getString('destination-guild');
+      const collection = interaction.options.getString('collection');
+      const nftName = interaction.options.getString('nft-name');
+      const amountOption = interaction.options.getNumber('amount');
+      const amount = amountOption && amountOption > 0 ? amountOption : 1;
+      
+      // Validate guild IDs are different
+      if (sourceGuildId === destinationGuildId) {
+        await interaction.editReply({
+          content: '❌ **Source and destination servers must be different!**',
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Validate amount
+      if (amount <= 0 || !Number.isInteger(amount)) {
+        await interaction.editReply({
+          content: '❌ **Invalid amount!**\n\nAmount must be a positive integer.',
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Find NFT by name/identifier in source guild
+      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(sourceGuildId, userId, collection, false); // Exclude staked NFTs
+      const nft = userNFTs.find(n => 
+        n.nft_name?.toLowerCase() === nftName.toLowerCase() || 
+        n.identifier?.toLowerCase() === nftName.toLowerCase() ||
+        `${n.collection}-${n.nonce}`.toLowerCase() === nftName.toLowerCase()
+      );
+      
+      if (!nft) {
+        await interaction.editReply({
+          content: `❌ NFT "${nftName}" not found in your collection "${collection}" in the source server.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Verify NFT still exists and check if it's staked
+      const verifyNFT = await virtualAccountsNFT.getUserNFTBalance(sourceGuildId, userId, collection, nft.nonce);
+      if (!verifyNFT) {
+        await interaction.editReply({
+          content: `❌ NFT "${nftName}" is no longer in your balance. It may have been transferred.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Check if NFT is staked
+      if (verifyNFT.staked === true) {
+        const poolId = verifyNFT.staking_pool_id;
+        let errorMessage = `❌ **Cannot transfer staked NFT!**\n\n`;
+        errorMessage += `This NFT "${nftName}" (${collection}#${nft.nonce}) is currently staked`;
+        if (poolId) {
+          errorMessage += ` in pool \`${poolId}\``;
+        }
+        errorMessage += `.\n\nPlease unstake it first before transferring.`;
+        
+        await interaction.editReply({
+          content: errorMessage,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Calculate available balance (total - active auctions - active listings)
+      const totalBalance = verifyNFT.amount || 1;
+      
+      // Get active auctions for this NFT
+      const dbAuctions = require('./db/auctions');
+      const activeAuctions = await dbAuctions.getUserActiveAuctions(sourceGuildId, userId, collection, nft.nonce);
+      const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+      
+      // Get active listings for this NFT
+      const activeListings = await virtualAccountsNFT.getUserListings(sourceGuildId, userId, 'ACTIVE');
+      const listingsForThisNFT = activeListings.filter(listing => 
+        listing.collection === collection && listing.nonce === nft.nonce
+      );
+      const lockedInListings = listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
+      
+      // Calculate available balance
+      const availableBalance = totalBalance - lockedInAuctions - lockedInListings;
+      
+      // Check if user has sufficient available balance
+      if (amount > availableBalance) {
+        const balanceTokenType = verifyNFT.token_type || 'NFT';
+        const lockedTotal = lockedInAuctions + lockedInListings;
+        
+        let errorMessage = `❌ **Insufficient available balance!**\n\n`;
+        errorMessage += `**Total Balance:** ${totalBalance} ${balanceTokenType}(s)\n`;
+        if (lockedInAuctions > 0) {
+          errorMessage += `**Locked in Auctions:** ${lockedInAuctions} ${balanceTokenType}(s)\n`;
+        }
+        if (lockedInListings > 0) {
+          errorMessage += `**Locked in Listings:** ${lockedInListings} ${balanceTokenType}(s)\n`;
+        }
+        errorMessage += `**Available:** ${availableBalance} ${balanceTokenType}(s)\n\n`;
+        errorMessage += `You're trying to transfer ${amount} ${balanceTokenType}(s), but only ${availableBalance} are available.`;
+        
+        await interaction.editReply({
+          content: errorMessage,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Check if destination account exists
+      const destinationAccountExists = await checkUserAccountExists(destinationGuildId, userId);
+      if (!destinationAccountExists) {
+        // Create account automatically
+        await virtualAccounts.getUserAccount(destinationGuildId, userId, interaction.user.tag);
+      }
+      
+      // Perform transfer
+      try {
+        // Remove from source guild
+        await virtualAccountsNFT.removeNFTFromAccount(sourceGuildId, userId, collection, nft.nonce, amount);
+        
+        // Add to destination guild
+        await virtualAccountsNFT.addNFTToAccount(
+          destinationGuildId,
+          userId,
+          collection,
+          verifyNFT.identifier,
+          nft.nonce,
+          {
+            nft_name: verifyNFT.nft_name,
+            nft_image_url: verifyNFT.nft_image_url,
+            metadata: verifyNFT.metadata
+          },
+          amount,
+          verifyNFT.token_type || 'NFT'
+        );
+        
+        // Get guild names for success message
+        const sourceGuildName = await getGuildName(sourceGuildId);
+        const destinationGuildName = await getGuildName(destinationGuildId);
+        
+        const tokenType = verifyNFT.token_type || 'NFT';
+        const amountText = amount > 1 ? ` (${amount}x)` : '';
+        
+        await interaction.editReply({
+          content: `✅ **Transfer successful!**\n\nTransferred ${tokenType} "${nftName}"${amountText} from **${sourceGuildName}** to **${destinationGuildName}**.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        
+      } catch (transferError) {
+        console.error('[TRANSFER-CROSS-GUILD-NFT] Transfer error:', transferError);
+        await interaction.editReply({
+          content: `❌ **Transfer failed!**\n\n${transferError.message}`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+    } catch (error) {
+      console.error('Error in transfer-cross-guild-nft command:', error.message);
+      await interaction.editReply({
+        content: `❌ **Error:** ${error.message}`,
+        flags: [MessageFlags.Ephemeral]
+      });
+    }
   } else if (commandName === 'create-staking-pool') {
     try {
       // Don't defer - we need to show modal immediately
@@ -15876,6 +16272,197 @@ client.on('interactionCreate', async (interaction) => {
       );
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in withdraw-nft nft-name autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // ============================================
+  // CROSS-GUILD TRANSFER AUTOCOMPLETE HANDLERS
+  // ============================================
+
+  // SOURCE/DESTINATION GUILD AUTOCOMPLETE FOR BOTH COMMANDS
+  if ((interaction.commandName === 'transfer-cross-guild-esdt' || interaction.commandName === 'transfer-cross-guild-nft') &&
+      (interaction.options.getFocused(true).name === 'source-guild' || interaction.options.getFocused(true).name === 'destination-guild')) {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const userId = interaction.user.id;
+      
+      const guildsWithNames = await getUserGuildsWithNames(userId);
+      
+      const filtered = guildsWithNames.filter(guild =>
+        guild.guildName.toLowerCase().includes(focusedValue.toLowerCase()) ||
+        guild.guildId.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(guild => ({
+          name: `${guild.guildName} (${guild.guildId})`,
+          value: guild.guildId
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in cross-guild guild autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // TOKEN AUTOCOMPLETE FOR TRANSFER-CROSS-GUILD-ESDT
+  if (interaction.commandName === 'transfer-cross-guild-esdt' && interaction.options.getFocused(true).name === 'token') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const userId = interaction.user.id;
+      const sourceGuildId = interaction.options.getString('source-guild');
+      
+      if (!sourceGuildId) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Get user balances
+      const userBalances = await virtualAccounts.getAllUserBalances(sourceGuildId, userId);
+      
+      // Get auction reservations to filter out locked tokens
+      const auctionReservations = require('./db/auction-reservations');
+      const BigNumber = require('bignumber.js');
+      
+      // Filter tokens with available balance > 0 (total - reserved)
+      const availableTokens = [];
+      for (const [tokenIdentifier, totalBalance] of Object.entries(userBalances || {})) {
+        try {
+          const reservedAmount = await auctionReservations.getTotalReservedAmount(sourceGuildId, userId, tokenIdentifier);
+          const totalBalanceBN = new BigNumber(totalBalance || '0');
+          const reservedAmountBN = new BigNumber(reservedAmount || '0');
+          const availableBalanceBN = totalBalanceBN.minus(reservedAmountBN);
+          
+          if (availableBalanceBN.isGreaterThan(0)) {
+            const tokenTicker = tokenIdentifier.split('-')[0];
+            if (tokenTicker.toLowerCase().includes(focusedValue.toLowerCase()) ||
+                tokenIdentifier.toLowerCase().includes(focusedValue.toLowerCase())) {
+              availableTokens.push({
+                identifier: tokenIdentifier,
+                ticker: tokenTicker,
+                available: availableBalanceBN.toString()
+              });
+            }
+          }
+        } catch (error) {
+          console.error(`[AUTOCOMPLETE] Error checking reservations for ${tokenIdentifier}:`, error.message);
+          // Continue with other tokens
+        }
+      }
+      
+      await safeRespond(interaction,
+        availableTokens.slice(0, 25).map(token => ({
+          name: `${token.ticker} (${token.identifier}) - Available: ${token.available}`,
+          value: token.identifier
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in transfer-cross-guild-esdt token autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // COLLECTION AUTOCOMPLETE FOR TRANSFER-CROSS-GUILD-NFT
+  if (interaction.commandName === 'transfer-cross-guild-nft' && interaction.options.getFocused(true).name === 'collection') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const userId = interaction.user.id;
+      const sourceGuildId = interaction.options.getString('source-guild');
+      
+      if (!sourceGuildId) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      const collections = await virtualAccountsNFT.getUserCollections(sourceGuildId, userId);
+      
+      const filtered = collections.filter(collection =>
+        collection.toLowerCase().includes(focusedValue.toLowerCase())
+      );
+      
+      await safeRespond(interaction,
+        filtered.slice(0, 25).map(collection => ({
+          name: collection,
+          value: collection
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in transfer-cross-guild-nft collection autocomplete:', error);
+      await safeRespond(interaction, []);
+    }
+    return;
+  }
+
+  // NFT NAME AUTOCOMPLETE FOR TRANSFER-CROSS-GUILD-NFT
+  if (interaction.commandName === 'transfer-cross-guild-nft' && interaction.options.getFocused(true).name === 'nft-name') {
+    try {
+      const focusedValue = interaction.options.getFocused();
+      const userId = interaction.user.id;
+      const sourceGuildId = interaction.options.getString('source-guild');
+      const selectedCollection = interaction.options.getString('collection');
+      
+      if (!sourceGuildId || !selectedCollection) {
+        await safeRespond(interaction, []);
+        return;
+      }
+      
+      // Get user NFTs (exclude staked)
+      const nfts = await virtualAccountsNFT.getUserNFTBalances(sourceGuildId, userId, selectedCollection, false);
+      
+      // Get active auctions and listings to calculate available balance
+      const dbAuctions = require('./db/auctions');
+      const activeListings = await virtualAccountsNFT.getUserListings(sourceGuildId, userId, 'ACTIVE');
+      
+      // Filter NFTs with available balance > 0
+      const availableNFTs = [];
+      for (const nft of nfts) {
+        try {
+          // Get active auctions for this NFT
+          const activeAuctions = await dbAuctions.getUserActiveAuctions(sourceGuildId, userId, selectedCollection, nft.nonce);
+          const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+          
+          // Get active listings for this NFT
+          const listingsForThisNFT = activeListings.filter(listing =>
+            listing.collection === selectedCollection && listing.nonce === nft.nonce
+          );
+          const lockedInListings = listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
+          
+          // Calculate available balance
+          const totalBalance = nft.amount || 1;
+          const availableBalance = totalBalance - lockedInAuctions - lockedInListings;
+          
+          if (availableBalance > 0) {
+            const nftName = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
+            const identifier = `${selectedCollection}#${nft.nonce}`;
+            
+            if (nftName.toLowerCase().includes(focusedValue.toLowerCase()) ||
+                identifier.toLowerCase().includes(focusedValue.toLowerCase())) {
+              availableNFTs.push({
+                nft: nft,
+                name: nftName,
+                identifier: identifier,
+                available: availableBalance
+              });
+            }
+          }
+        } catch (error) {
+          console.error(`[AUTOCOMPLETE] Error checking availability for NFT ${nft.nonce}:`, error.message);
+          // Continue with other NFTs
+        }
+      }
+      
+      await safeRespond(interaction,
+        availableNFTs.slice(0, 25).map(item => ({
+          name: `${item.name} (${item.identifier}) - Available: ${item.available}`,
+          value: item.name || item.identifier
+        }))
+      );
+    } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in transfer-cross-guild-nft nft-name autocomplete:', error);
       await safeRespond(interaction, []);
     }
     return;
