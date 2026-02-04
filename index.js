@@ -19930,7 +19930,8 @@ client.on('interactionCreate', async (interaction) => {
             }
           }
         }
-        const tdaWei = dropHelpers.calculateWeeklyAirdrop(totalPoints, game.baseAmountWei, multiplier);
+        // Use entry.points (weekly points) for TDA calculation, not all-time points
+        const tdaWei = dropHelpers.calculateWeeklyAirdrop(entry.points, game.baseAmountWei, multiplier);
         return {
           ...entry,
           tdaWei: new BigNumber(tdaWei),
@@ -25478,7 +25479,8 @@ async function handleShowDropLeaderboard(interaction) {
       }
       
       // For monthly view, use monthly points; for weekly view, use entry points
-      const pointsForTDA = isMonthly ? entry.points : totalPoints;
+      // Both monthly and weekly leaderboards should use entry.points (points for that period)
+      const pointsForTDA = entry.points;
       
       // Calculate TDA (To Date Airdrop) in wei for sorting
       const tdaWei = dropHelpers.calculateWeeklyAirdrop(pointsForTDA, game.baseAmountWei, multiplier);
