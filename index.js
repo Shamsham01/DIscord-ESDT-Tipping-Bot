@@ -3586,7 +3586,17 @@ client.on('interactionCreate', async (interaction) => {
 
       const projectName = interaction.options.getString('project-name');
       const userTag = interaction.options.getString('user-tag');
-      const tokenTicker = interaction.options.getString('token-ticker');
+      let tokenTicker = interaction.options.getString('token-ticker');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const amount = interaction.options.getNumber('amount');
       const memo = interaction.options.getString('memo') || 'No memo provided';
 
@@ -4206,7 +4216,17 @@ client.on('interactionCreate', async (interaction) => {
       const title = interaction.options.getString('title');
       const description = interaction.options.getString('description');
       const duration = interaction.options.getNumber('duration');
-      const tokenTicker = interaction.options.getString('token-ticker');
+      let tokenTicker = interaction.options.getString('token-ticker');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const startingAmount = interaction.options.getString('starting-amount');
       const minBidIncrease = interaction.options.getString('min-bid-increase');
       const amountOption = interaction.options.getNumber('amount');
@@ -5155,7 +5175,17 @@ client.on('interactionCreate', async (interaction) => {
       console.log('[RPS DEBUG] challenge-rps guildId:', guildId);
       
       const userTag = interaction.options.getString('user-tag');
-      const tokenTicker = interaction.options.getString('token-ticker');
+      let tokenTicker = interaction.options.getString('token-ticker');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const amount = interaction.options.getString('amount');
       const memo = interaction.options.getString('memo') || 'No memo provided';
       
@@ -6364,7 +6394,17 @@ client.on('interactionCreate', async (interaction) => {
       console.log('[FOOTBALL] User is administrator, proceeding with command');
 
       const competition = interaction.options.getString('competition');
-      const tokenTicker = interaction.options.getString('token');
+      let tokenTicker = interaction.options.getString('token');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const amount = interaction.options.getNumber('amount');
       const channel = interaction.options.getChannel('channel') || interaction.channel;
       
@@ -7642,7 +7682,17 @@ client.on('interactionCreate', async (interaction) => {
 
       const targetUser = interaction.options.getUser('user');
       const houseType = interaction.options.getString('house-type') || 'betting'; // Default to betting for backward compatibility
-      const tokenTicker = interaction.options.getString('token');
+      let tokenTicker = interaction.options.getString('token');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const amount = interaction.options.getNumber('amount');
       const memo = interaction.options.getString('memo') || 'House prize';
       const guildId = interaction.guildId;
@@ -7939,7 +7989,17 @@ client.on('interactionCreate', async (interaction) => {
 
       const source = interaction.options.getString('source') || 'betting';
       const projectName = interaction.options.getString('project-name');
-      const tokenTicker = interaction.options.getString('token');
+      let tokenTicker = interaction.options.getString('token');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const amount = interaction.options.getString('amount') || interaction.options.getNumber('amount');
       const memo = interaction.options.getString('memo') || 'House withdrawal';
       const guildId = interaction.guildId;
@@ -11083,7 +11143,17 @@ client.on('interactionCreate', async (interaction) => {
     try {
       await interaction.deferReply();
       
-      const tokenTicker = interaction.options.getString('token');
+      let tokenTicker = interaction.options.getString('token');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const amount = interaction.options.getString('amount');
       const houseType = interaction.options.getString('house-type');
       const memo = interaction.options.getString('memo') || 'House top-up';
@@ -11239,7 +11309,17 @@ client.on('interactionCreate', async (interaction) => {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       
-      const tokenTicker = interaction.options.getString('token-ticker');
+      let tokenTicker = interaction.options.getString('token-ticker');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const amountStr = interaction.options.getString('amount');
       const memo = interaction.options.getString('memo') || 'Withdrawal from virtual account';
       
@@ -11560,7 +11640,17 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply();
       
       const userTag = interaction.options.getString('user-tag');
-      const tokenTicker = interaction.options.getString('token-ticker');
+      let tokenTicker = interaction.options.getString('token-ticker');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const amount = interaction.options.getString('amount');
       const memo = interaction.options.getString('memo') || 'No memo provided';
       
@@ -11925,7 +12015,17 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guildId;
       const winningNumbersCount = interaction.options.getInteger('winning_numbers_count');
       const totalPoolNumbers = interaction.options.getInteger('total_pool_numbers');
-      const tokenTicker = interaction.options.getString('token');
+      let tokenTicker = interaction.options.getString('token');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
       const drawingFrequency = interaction.options.getString('drawing_frequency');
       const houseCommission = interaction.options.getNumber('house_commission') || 0;
       const ticketPrice = interaction.options.getNumber('ticket_price');
@@ -12555,7 +12655,16 @@ client.on('interactionCreate', async (interaction) => {
       
       const guildId = interaction.guildId;
       const userId = interaction.user.id;
-      const tokenTicker = interaction.options.getString('token');
+      let tokenTicker = interaction.options.getString('token');
+      
+      // Sanitize token ticker
+      if (tokenTicker) {
+        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+      }
+      if (!tokenTicker) {
+        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
       const page = interaction.options.getInteger('page') || 1;
       
       const limit = 20;
@@ -12803,7 +12912,27 @@ client.on('interactionCreate', async (interaction) => {
       const userId = interaction.user.id;
       const sourceGuildId = interaction.options.getString('source-guild');
       const destinationGuildId = interaction.options.getString('destination-guild');
-      const tokenIdentifier = interaction.options.getString('token');
+      let tokenIdentifier = interaction.options.getString('token');
+      
+      // Sanitize token identifier
+      if (tokenIdentifier) {
+        tokenIdentifier = sanitizeTokenIdentifier(tokenIdentifier);
+      }
+      if (!tokenIdentifier) {
+        await interaction.editReply({ content: '❌ Token identifier is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      // Validate token identifier format
+      const identifierFormatRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+      if (!identifierFormatRegex.test(tokenIdentifier)) {
+        await interaction.editReply({ 
+          content: `❌ **Invalid token identifier format!**\n\nThe token identifier must be in full format (e.g., "REWARD-cf6eac").\n\nReceived: "${tokenIdentifier}"`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
       const amountStr = interaction.options.getString('amount');
       
       // Validate guild IDs are different
@@ -13296,7 +13425,29 @@ client.on('interactionCreate', async (interaction) => {
       const userTag = interaction.user.tag;
       
       const collectionTicker = interaction.options.getString('collection_ticker');
-      const rewardTokenIdentifier = interaction.options.getString('reward_token_identifier');
+      let rewardTokenIdentifier = interaction.options.getString('reward_token_identifier');
+      
+      // Sanitize token identifier: trim whitespace and remove surrounding quotes
+      if (rewardTokenIdentifier) {
+        rewardTokenIdentifier = rewardTokenIdentifier.trim();
+        rewardTokenIdentifier = rewardTokenIdentifier.replace(/^["']+|["']+$/g, ''); // Remove surrounding quotes
+      }
+      
+      // Validate token identifier format
+      if (!rewardTokenIdentifier) {
+        await interaction.reply({ content: '❌ Reward token identifier is required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const identifierFormatRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+      if (!identifierFormatRegex.test(rewardTokenIdentifier)) {
+        await interaction.reply({ 
+          content: `❌ **Invalid token identifier format!**\n\nThe token identifier must be in full format (e.g., "REWARD-cf6eac"), not just the ticker ("REWARD").\n\nReceived: "${rewardTokenIdentifier}"`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
       const initialSupply = interaction.options.getString('initial_supply');
       const rewardPerNftPerDay = interaction.options.getString('reward_per_nft_per_day');
       const poolName = interaction.options.getString('pool_name');
@@ -19749,11 +19900,15 @@ client.on('interactionCreate', async (interaction) => {
       const tokenDecimals = tokenMetadata[game.tokenTicker]?.decimals || 8;
       const tokenTickerDisplay = tokenMetadata[game.tokenTicker]?.ticker || game.tokenTicker.split('-')[0];
       
+      // Log guild and token info for debugging
+      console.log(`[DROP] Leaderboard pagination for guild ${guildId}: tokenTicker=${game.tokenTicker}, tokenTickerDisplay=${tokenTickerDisplay}`);
+      
       let tokenPriceUsd = 0;
       try {
         tokenPriceUsd = await getTokenPriceUsd(game.tokenTicker);
+        console.log(`[DROP] Leaderboard pagination for guild ${guildId}: Retrieved USD price ${tokenPriceUsd} for token ${game.tokenTicker}`);
       } catch (error) {
-        console.error('[DROP] Error fetching token price:', error.message);
+        console.error(`[DROP] Error fetching token price for guild ${guildId}, token ${game.tokenTicker}:`, error.message);
       }
       
       const userWallets = await getUserWallets(guildId);
@@ -24885,16 +25040,26 @@ async function handleStartDropGame(interaction) {
     }
     
     // Get parameters
-    const tokenTicker = interaction.options.getString('token-ticker');
+    let tokenTicker = interaction.options.getString('token-ticker');
+    
+    // Sanitize token identifier
+    if (tokenTicker) {
+      tokenTicker = sanitizeTokenIdentifier(tokenTicker);
+    }
+    if (!tokenTicker) {
+      await interaction.editReply({ content: '❌ Token identifier is required.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+    
     const baseAmount = interaction.options.getNumber('base-amount');
     const minDroppers = interaction.options.getInteger('min-droppers');
     const collectionIdentifier = interaction.options.getString('collection-identifier');
     const nftCollectionMultiplier = interaction.options.getBoolean('nft-collection-multiplier') || false;
     
-    // Validate token identifier
+    // Validate token identifier format
     const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
-    if (!tokenTicker || !esdtIdentifierRegex.test(tokenTicker)) {
-      await interaction.editReply({ content: `❌ Invalid token identifier: ${tokenTicker || 'empty'}. Must be in format TICKER-6hexchars (e.g., REWARD-cf6eac)`, flags: [MessageFlags.Ephemeral] });
+    if (!esdtIdentifierRegex.test(tokenTicker)) {
+      await interaction.editReply({ content: `❌ Invalid token identifier: "${tokenTicker}". Must be in format TICKER-6hexchars (e.g., REWARD-cf6eac)`, flags: [MessageFlags.Ephemeral] });
       return;
     }
     
@@ -25276,11 +25441,15 @@ async function handleShowDropLeaderboard(interaction) {
     const tokenDecimals = tokenMetadata[game.tokenTicker]?.decimals || 8;
     const tokenTickerDisplay = tokenMetadata[game.tokenTicker]?.ticker || game.tokenTicker.split('-')[0];
     
+    // Log guild and token info for debugging
+    console.log(`[DROP] Leaderboard for guild ${guildId}: tokenTicker=${game.tokenTicker}, tokenTickerDisplay=${tokenTickerDisplay}`);
+    
     let tokenPriceUsd = 0;
     try {
       tokenPriceUsd = await getTokenPriceUsd(game.tokenTicker);
+      console.log(`[DROP] Leaderboard for guild ${guildId}: Retrieved USD price ${tokenPriceUsd} for token ${game.tokenTicker}`);
     } catch (error) {
-      console.error('[DROP] Error fetching token price:', error.message);
+      console.error(`[DROP] Error fetching token price for guild ${guildId}, token ${game.tokenTicker}:`, error.message);
     }
     
     // Get user wallets for NFT count lookup
@@ -26702,23 +26871,78 @@ const tokenDecimalsCache = {};
 // Value: Promise that resolves when withdrawal completes
 const withdrawalLocks = new Map();
 
-async function getTokenDecimals(tokenIdentifier) {
-  if (tokenDecimalsCache[tokenIdentifier] !== undefined) {
-    return tokenDecimalsCache[tokenIdentifier];
+async function getTokenDecimals(tokenIdentifier, retryCount = 0, maxRetries = 3) {
+  // Sanitize token identifier: trim whitespace and remove surrounding quotes
+  let cleanIdentifier = typeof tokenIdentifier === 'string' ? tokenIdentifier.trim() : String(tokenIdentifier).trim();
+  cleanIdentifier = cleanIdentifier.replace(/^["']+|["']+$/g, ''); // Remove surrounding quotes
+  
+  // Use normalized identifier for cache lookup
+  const cacheKey = cleanIdentifier.toUpperCase();
+  if (tokenDecimalsCache[cacheKey] !== undefined) {
+    return tokenDecimalsCache[cacheKey];
   }
-  const apiUrl = `https://api.multiversx.com/tokens/${tokenIdentifier}`;
-  const response = await fetch(apiUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch token info: ${response.statusText}`);
+  
+  try {
+    // URL encode the identifier to handle any special characters
+    const encodedIdentifier = encodeURIComponent(cleanIdentifier);
+    const apiUrl = `https://api.multiversx.com/tokens/${encodedIdentifier}`;
+    
+    console.log(`[TOKEN-DECIMALS] Fetching decimals for token: ${cleanIdentifier} (attempt ${retryCount + 1}/${maxRetries + 1})`);
+    const response = await fetch(apiUrl);
+    
+    if (response.ok) {
+      const tokenInfo = await response.json();
+      const decimals = tokenInfo.decimals || 0;
+      tokenDecimalsCache[cacheKey] = decimals;
+      console.log(`[TOKEN-DECIMALS] Successfully fetched decimals for ${cleanIdentifier}: ${decimals}`);
+      return decimals;
+    } else if (response.status === 429) {
+      // Rate limited - retry with exponential backoff
+      if (retryCount < maxRetries) {
+        const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
+        console.log(`[TOKEN-DECIMALS] Rate limited for ${cleanIdentifier}, retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return await getTokenDecimals(cleanIdentifier, retryCount + 1, maxRetries);
+      } else {
+        console.error(`[TOKEN-DECIMALS] Max retries exceeded for ${cleanIdentifier}: ${response.status} ${response.statusText}`);
+        throw new Error(`Failed to fetch token info: ${response.statusText} (rate limited)`);
+      }
+    } else if (response.status === 400) {
+      // Bad Request - likely invalid identifier format
+      console.error(`[TOKEN-DECIMALS] Bad Request for ${cleanIdentifier}: ${response.status} ${response.statusText}`);
+      throw new Error(`Failed to fetch token info: Bad Request - Invalid token identifier "${cleanIdentifier}"`);
+    } else {
+      // Other errors - retry if possible
+      if (retryCount < maxRetries && response.status >= 500) {
+        // Retry on server errors
+        const delay = Math.pow(2, retryCount) * 1000;
+        console.log(`[TOKEN-DECIMALS] Server error ${response.status} for ${cleanIdentifier}, retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return await getTokenDecimals(cleanIdentifier, retryCount + 1, maxRetries);
+      } else {
+        console.error(`[TOKEN-DECIMALS] Failed to fetch decimals for ${cleanIdentifier}: ${response.status} ${response.statusText}`);
+        throw new Error(`Failed to fetch token info: ${response.statusText}`);
+      }
+    }
+  } catch (error) {
+    // Network errors - retry if possible
+    if (retryCount < maxRetries && (error.message.includes('fetch') || error.message.includes('network'))) {
+      const delay = Math.pow(2, retryCount) * 1000;
+      console.log(`[TOKEN-DECIMALS] Network error for ${cleanIdentifier}, retrying in ${delay}ms: ${error.message}`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return await getTokenDecimals(cleanIdentifier, retryCount + 1, maxRetries);
+    } else {
+      console.error(`[TOKEN-DECIMALS] Error fetching decimals for ${cleanIdentifier}:`, error.message);
+      throw error;
+    }
   }
-  const tokenInfo = await response.json();
-  const decimals = tokenInfo.decimals || 0;
-  tokenDecimalsCache[tokenIdentifier] = decimals;
-  return decimals;
 }
 
 // Function to get token USD price with MultiversX API fallback to DexScreener
 async function getTokenPriceUsd(tokenIdentifier) {
+  // Log the token identifier being queried for debugging
+  console.log(`[TOKEN-PRICE] Fetching USD price for token: ${tokenIdentifier}`);
+  
   try {
     // Try MultiversX API first
     const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
@@ -26727,40 +26951,119 @@ async function getTokenPriceUsd(tokenIdentifier) {
       const price = priceData.price || 0;
       // If we got a valid price, return it
       if (price > 0) {
+        console.log(`[TOKEN-PRICE] Using MultiversX API price for ${tokenIdentifier}: $${price}`);
         return price;
+      } else {
+        console.log(`[TOKEN-PRICE] MultiversX API returned price 0 for ${tokenIdentifier}, trying DexScreener...`);
       }
+    } else {
+      console.log(`[TOKEN-PRICE] MultiversX API returned status ${priceResponse.status} for ${tokenIdentifier}, trying DexScreener...`);
     }
   } catch (error) {
     console.error(`[TOKEN-PRICE] Error fetching price from MultiversX for ${tokenIdentifier}:`, error.message);
   }
   
   // Fallback to DexScreener API
+  // DexScreener for MultiversX requires the token contract address (erd1...), not the identifier
+  // First, try to get token metadata to find the owner/issuer address
+  let tokenContractAddress = null;
+  let tokenTicker = null;
   try {
-    const dexscreenerResponse = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenIdentifier}`);
-    if (dexscreenerResponse.ok) {
-      const dexscreenerData = await dexscreenerResponse.json();
-      // Check if we have pairs and extract priceUsd from the first pair
-      if (dexscreenerData.pairs && dexscreenerData.pairs.length > 0 && dexscreenerData.pairs[0].priceUsd) {
-        const priceUsd = parseFloat(dexscreenerData.pairs[0].priceUsd);
-        if (priceUsd > 0) {
-          console.log(`[TOKEN-PRICE] Using DexScreener price for ${tokenIdentifier}: $${priceUsd}`);
-          return priceUsd;
-        }
+    const tokenMetadataResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
+    if (tokenMetadataResponse.ok) {
+      const tokenMetadata = await tokenMetadataResponse.json();
+      // MultiversX token metadata includes 'owner' or 'issuer' field which is the contract address
+      tokenContractAddress = tokenMetadata.owner || tokenMetadata.issuer || null;
+      tokenTicker = tokenMetadata.ticker || null;
+      if (tokenContractAddress) {
+        console.log(`[TOKEN-PRICE] Found contract address for ${tokenIdentifier}: ${tokenContractAddress}`);
+      }
+      if (tokenTicker) {
+        console.log(`[TOKEN-PRICE] Found ticker for ${tokenIdentifier}: ${tokenTicker}`);
       }
     }
   } catch (error) {
-    console.error(`[TOKEN-PRICE] Error fetching price from DexScreener for ${tokenIdentifier}:`, error.message);
+    console.error(`[TOKEN-PRICE] Error fetching token metadata for ${tokenIdentifier}:`, error.message);
+  }
+  
+  // Try DexScreener with contract address first (most reliable), then identifier, then ticker
+  const dexscreenerQueries = [];
+  if (tokenContractAddress) {
+    dexscreenerQueries.push(tokenContractAddress);
+  }
+  // Also try with the identifier in case DexScreener accepts it
+  if (tokenIdentifier && tokenIdentifier !== tokenContractAddress) {
+    dexscreenerQueries.push(tokenIdentifier);
+  }
+  // Try with ticker as last resort (for search)
+  if (tokenTicker && tokenTicker !== tokenIdentifier) {
+    dexscreenerQueries.push(tokenTicker);
+  }
+  
+  for (const dexscreenerQuery of dexscreenerQueries) {
+    try {
+      const dexscreenerResponse = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${dexscreenerQuery}`);
+      if (dexscreenerResponse.ok) {
+        const dexscreenerData = await dexscreenerResponse.json();
+        // Check if we have pairs and extract priceUsd from the first pair
+        if (dexscreenerData.pairs && dexscreenerData.pairs.length > 0) {
+          // Find the best pair (prefer pairs with higher liquidity or volume)
+          let bestPair = dexscreenerData.pairs[0];
+          for (const pair of dexscreenerData.pairs) {
+            // Prefer pairs with higher liquidity
+            const liquidity = parseFloat(pair.liquidity?.usd || 0);
+            const bestLiquidity = parseFloat(bestPair.liquidity?.usd || 0);
+            if (liquidity > bestLiquidity) {
+              bestPair = pair;
+            }
+          }
+          
+          if (bestPair.priceUsd) {
+            const priceUsd = parseFloat(bestPair.priceUsd);
+            if (priceUsd > 0) {
+              console.log(`[TOKEN-PRICE] Using DexScreener price for ${tokenIdentifier} (query: ${dexscreenerQuery}): $${priceUsd}`);
+              return priceUsd;
+            }
+          }
+        } else {
+          console.log(`[TOKEN-PRICE] DexScreener returned no pairs for ${tokenIdentifier} (query: ${dexscreenerQuery})`);
+        }
+      } else {
+        console.log(`[TOKEN-PRICE] DexScreener returned status ${dexscreenerResponse.status} for ${tokenIdentifier} (query: ${dexscreenerQuery})`);
+      }
+    } catch (error) {
+      console.error(`[TOKEN-PRICE] Error fetching price from DexScreener for ${tokenIdentifier} (query: ${dexscreenerQuery}):`, error.message);
+      // Continue to next query method
+    }
   }
   
   // Return 0 if both APIs failed
+  console.log(`[TOKEN-PRICE] Failed to fetch USD price for ${tokenIdentifier} from both APIs`);
   return 0;
+}
+
+// Helper function to sanitize token identifier
+function sanitizeTokenIdentifier(tokenIdentifier) {
+  if (!tokenIdentifier) return null;
+  let cleanIdentifier = typeof tokenIdentifier === 'string' ? tokenIdentifier.trim() : String(tokenIdentifier).trim();
+  cleanIdentifier = cleanIdentifier.replace(/^["']+|["']+$/g, ''); // Remove surrounding quotes
+  return cleanIdentifier;
 }
 
 // Function to get full token metadata from MultiversX API with retry logic
 async function getTokenMetadata(tokenIdentifier, retryCount = 0, maxRetries = 3) {
+  // Sanitize token identifier
+  const cleanIdentifier = sanitizeTokenIdentifier(tokenIdentifier);
+  if (!cleanIdentifier) {
+    console.error(`[TOKEN] Invalid token identifier: ${tokenIdentifier}`);
+    return null;
+  }
+  
   try {
-    console.log(`[TOKEN] Fetching metadata for token: ${tokenIdentifier} (attempt ${retryCount + 1}/${maxRetries + 1})`);
-    const response = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
+    console.log(`[TOKEN] Fetching metadata for token: ${cleanIdentifier} (attempt ${retryCount + 1}/${maxRetries + 1})`);
+    // URL encode the identifier to handle any special characters
+    const encodedIdentifier = encodeURIComponent(cleanIdentifier);
+    const response = await fetch(`https://api.multiversx.com/tokens/${encodedIdentifier}`);
     
     if (response.ok) {
       const tokenData = await response.json();
@@ -26777,25 +27080,38 @@ async function getTokenMetadata(tokenIdentifier, retryCount = 0, maxRetries = 3)
       // Rate limited - retry with exponential backoff
       if (retryCount < maxRetries) {
         const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
-        console.log(`[TOKEN] Rate limited for ${tokenIdentifier}, retrying in ${delay}ms...`);
+        console.log(`[TOKEN] Rate limited for ${cleanIdentifier}, retrying in ${delay}ms...`);
         await new Promise(resolve => setTimeout(resolve, delay));
-        return await getTokenMetadata(tokenIdentifier, retryCount + 1, maxRetries);
+        return await getTokenMetadata(cleanIdentifier, retryCount + 1, maxRetries);
       } else {
-        console.error(`[TOKEN] Max retries exceeded for ${tokenIdentifier}: ${response.status} ${response.statusText}`);
+        console.error(`[TOKEN] Max retries exceeded for ${cleanIdentifier}: ${response.status} ${response.statusText}`);
         return null;
       }
-    } else {
-      console.error(`[TOKEN] Failed to fetch metadata for ${tokenIdentifier}: ${response.status} ${response.statusText}`);
+    } else if (response.status === 400) {
+      // Bad Request - likely invalid identifier format
+      console.error(`[TOKEN] Bad Request for ${cleanIdentifier}: ${response.status} ${response.statusText}`);
       return null;
+    } else {
+      // Other errors - retry if server error
+      if (retryCount < maxRetries && response.status >= 500) {
+        const delay = Math.pow(2, retryCount) * 1000;
+        console.log(`[TOKEN] Server error ${response.status} for ${cleanIdentifier}, retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return await getTokenMetadata(cleanIdentifier, retryCount + 1, maxRetries);
+      } else {
+        console.error(`[TOKEN] Failed to fetch metadata for ${cleanIdentifier}: ${response.status} ${response.statusText}`);
+        return null;
+      }
     }
   } catch (error) {
-    if (retryCount < maxRetries) {
-      const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
-      console.log(`[TOKEN] Error fetching ${tokenIdentifier}, retrying in ${delay}ms: ${error.message}`);
+    // Network errors - retry if possible
+    if (retryCount < maxRetries && (error.message.includes('fetch') || error.message.includes('network'))) {
+      const delay = Math.pow(2, retryCount) * 1000;
+      console.log(`[TOKEN] Network error for ${cleanIdentifier}, retrying in ${delay}ms: ${error.message}`);
       await new Promise(resolve => setTimeout(resolve, delay));
-      return await getTokenMetadata(tokenIdentifier, retryCount + 1, maxRetries);
+      return await getTokenMetadata(cleanIdentifier, retryCount + 1, maxRetries);
     } else {
-      console.error(`[TOKEN] Max retries exceeded for ${tokenIdentifier}:`, error.message);
+      console.error(`[TOKEN] Error fetching metadata for ${cleanIdentifier}:`, error.message);
       return null;
     }
   }
@@ -26804,10 +27120,17 @@ async function getTokenMetadata(tokenIdentifier, retryCount = 0, maxRetries = 3)
 // Function to update token metadata in server-data.json
 async function updateTokenMetadata(guildId, tokenIdentifier) {
   try {
-    console.log(`[TOKEN] Updating metadata for token ${tokenIdentifier} in guild ${guildId}`);
+    // Sanitize token identifier
+    const cleanIdentifier = sanitizeTokenIdentifier(tokenIdentifier);
+    if (!cleanIdentifier) {
+      console.error(`[TOKEN] Invalid token identifier: ${tokenIdentifier}`);
+      return false;
+    }
+    
+    console.log(`[TOKEN] Updating metadata for token ${cleanIdentifier} in guild ${guildId}`);
     
     // Fetch token metadata
-    const tokenMetadata = await getTokenMetadata(tokenIdentifier);
+    const tokenMetadata = await getTokenMetadata(cleanIdentifier);
     if (!tokenMetadata) {
       console.error(`[TOKEN] Failed to fetch metadata for ${tokenIdentifier}`);
       return false;
@@ -26849,26 +27172,34 @@ function fromBlockchainAmount(blockchainAmount, decimals) {
 // Get token identifier from ticker or full identifier
 async function getTokenIdentifier(tokenTicker) {
   try {
-    // Check if input is already a full ESDT identifier (format: TICKER-6hexchars)
-    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
-    if (esdtIdentifierRegex.test(tokenTicker)) {
-      console.log(`[TOKEN] Input "${tokenTicker}" recognized as a full ESDT identifier.`);
-      return tokenTicker;
+    // Sanitize input first
+    const cleanTicker = sanitizeTokenIdentifier(tokenTicker);
+    if (!cleanTicker) {
+      console.error(`[TOKEN] Invalid token ticker: ${tokenTicker}`);
+      return null;
     }
     
-    console.log(`[TOKEN] Input "${tokenTicker}" treated as a ticker, searching for identifier.`);
-    // This is a simplified version - you might want to implement a proper token registry
-    const response = await fetch(`https://api.multiversx.com/tokens?search=${tokenTicker}`);
+    // Check if input is already a full ESDT identifier (format: TICKER-6hexchars)
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (esdtIdentifierRegex.test(cleanTicker)) {
+      console.log(`[TOKEN] Input "${cleanTicker}" recognized as a full ESDT identifier.`);
+      return cleanTicker;
+    }
+    
+    console.log(`[TOKEN] Input "${cleanTicker}" treated as a ticker, searching for identifier.`);
+    // URL encode the ticker for the API call
+    const encodedTicker = encodeURIComponent(cleanTicker);
+    const response = await fetch(`https://api.multiversx.com/tokens?search=${encodedTicker}`);
     if (!response.ok) {
-      throw new Error(`Failed to fetch token info for ticker "${tokenTicker}": ${response.statusText}`);
+      throw new Error(`Failed to fetch token info for ticker "${cleanTicker}": ${response.statusText}`);
     }
     const tokens = await response.json();
-    const token = tokens.find(t => t.ticker === tokenTicker);
+    const token = tokens.find(t => t.ticker === cleanTicker);
     if (token) {
-      console.log(`[TOKEN] Found identifier "${token.identifier}" for ticker "${tokenTicker}".`);
+      console.log(`[TOKEN] Found identifier "${token.identifier}" for ticker "${cleanTicker}".`);
       return token.identifier;
     } else {
-      console.log(`[TOKEN] No identifier found for ticker "${tokenTicker}".`);
+      console.log(`[TOKEN] No identifier found for ticker "${cleanTicker}".`);
       return null;
     }
   } catch (error) {
