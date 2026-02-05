@@ -12344,6 +12344,10 @@ client.on('interactionCreate', async (interaction) => {
       const ticketPriceUsdValue = tokenPriceUsd > 0 ? new BigNumber(ticketPrice).multipliedBy(tokenPriceUsd).toFixed(2) : '0.00';
       const ticketPriceDisplay = `${ticketPrice} ${actualTicker} (≈ $${ticketPriceUsdValue})`;
       
+      // Fetch token logo URL
+      const tokenLogoUrl = await getTokenLogoUrl(tokenIdentifier);
+      const thumbnailUrl = tokenLogoUrl || 'https://i.ibb.co/20MLJZNH/lottery-logo.png';
+      
       // Create embed
       const lotteryEmbed = new EmbedBuilder()
         .setTitle('🎰 Lottery')
@@ -12357,7 +12361,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '👥 Participants', value: '0', inline: true }
         ])
         .setColor(0x00FF00)
-        .setThumbnail('https://i.ibb.co/20MLJZNH/lottery-logo.png')
+        .setThumbnail(thumbnailUrl)
         .setTimestamp(new Date(endTime))
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
       
@@ -22443,6 +22447,10 @@ async function updateLotteryEmbed(guildId, lotteryId) {
     const statusText = isExpired ? '🔴 Ended' : '🟢 Live';
     const endTimeText = isExpired ? 'Ended' : `<t:${Math.floor(lottery.endTime / 1000)}:R>`;
     
+    // Fetch token logo URL
+    const tokenLogoUrl = await getTokenLogoUrl(lottery.tokenIdentifier);
+    const thumbnailUrl = tokenLogoUrl || 'https://i.ibb.co/20MLJZNH/lottery-logo.png';
+    
     const lotteryEmbed = new EmbedBuilder()
       .setTitle(lottery.isRollover ? '🎰 Lottery (Rollover)' : '🎰 Lottery')
       .setDescription(`${lottery.isRollover ? `**Rollover #${lottery.rolloverCount}** - No winners in previous draw!\n\n` : ''}**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers}`)
@@ -22455,7 +22463,7 @@ async function updateLotteryEmbed(guildId, lotteryId) {
         { name: '👥 Participants', value: lottery.uniqueParticipants.toString(), inline: true }
       ])
       .setColor(color)
-      .setThumbnail('https://i.ibb.co/20MLJZNH/lottery-logo.png')
+      .setThumbnail(thumbnailUrl)
       .setTimestamp(new Date(lottery.endTime))
       .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
     
@@ -23026,6 +23034,10 @@ async function processLotteryDraw(guildId, lotteryId) {
           const prizePoolUsdValue = new BigNumber(prizePoolHuman).multipliedBy(tokenPriceUsd).toFixed(2);
           const ticketPriceUsdValue = new BigNumber(ticketPriceHuman).multipliedBy(tokenPriceUsd).toFixed(2);
           
+          // Fetch token logo URL
+          const tokenLogoUrl = await getTokenLogoUrl(lottery.tokenIdentifier);
+          const thumbnailUrl = tokenLogoUrl || 'https://i.ibb.co/20MLJZNH/lottery-logo.png';
+          
           const rolloverEmbed = new EmbedBuilder()
             .setTitle('🎰 Lottery (Rollover)')
             .setDescription(`**Lottery ID:** \`${rolloverLotteryId}\`\n\n**Rollover #${lottery.rolloverCount + 1}** - No winners in previous draw!\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers}`)
@@ -23038,7 +23050,7 @@ async function processLotteryDraw(guildId, lotteryId) {
               { name: '👥 Participants', value: '0', inline: true }
             ])
             .setColor(0x00FF00)
-            .setThumbnail('https://i.ibb.co/20MLJZNH/lottery-logo.png')
+            .setThumbnail(thumbnailUrl)
             .setTimestamp(new Date(newEndTime))
             .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
           
@@ -26212,6 +26224,10 @@ async function forwardLotteryToSubscribers(sourceGuildId, lotteryId) {
     const prizePoolHuman = new BigNumber(lottery.prizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
     const ticketPriceHuman = new BigNumber(lottery.ticketPriceWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
     
+    // Fetch token logo URL
+    const tokenLogoUrl = await getTokenLogoUrl(lottery.tokenIdentifier);
+    const thumbnailUrl = tokenLogoUrl || 'https://i.ibb.co/20MLJZNH/lottery-logo.png';
+    
     // Create forward embed
     const forwardEmbed = new EmbedBuilder()
       .setTitle(`🎰 ESDT Lottery`)
@@ -26226,7 +26242,7 @@ async function forwardLotteryToSubscribers(sourceGuildId, lotteryId) {
         { name: '📡 Source', value: sourceLink ? `[${sourceGuildName}](${sourceLink})` : sourceGuildName, inline: false }
       ])
       .setColor(0x9B59B6)
-      .setThumbnail('https://i.ibb.co/20MLJZNH/lottery-logo.png')
+      .setThumbnail(thumbnailUrl)
       .setTimestamp()
       .setFooter({ text: 'Aggregated Activity • Click to view original', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
     
@@ -27688,6 +27704,31 @@ async function getTokenMetadata(tokenIdentifier, retryCount = 0, maxRetries = 3)
       console.error(`[TOKEN] Error fetching metadata for ${cleanIdentifier}:`, error.message);
       return null;
     }
+  }
+}
+
+// Function to get token logo URL (pngUrl) from MultiversX API
+async function getTokenLogoUrl(tokenIdentifier) {
+  try {
+    const cleanIdentifier = sanitizeTokenIdentifier(tokenIdentifier);
+    if (!cleanIdentifier) {
+      return null;
+    }
+    
+    const encodedIdentifier = encodeURIComponent(cleanIdentifier);
+    const response = await fetch(`https://api.multiversx.com/tokens/${encodedIdentifier}`);
+    
+    if (response.ok) {
+      const tokenData = await response.json();
+      // Return pngUrl from assets if available
+      if (tokenData.assets && tokenData.assets.pngUrl) {
+        return tokenData.assets.pngUrl;
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error(`[TOKEN] Error fetching logo for ${tokenIdentifier}:`, error.message);
+    return null;
   }
 }
 
