@@ -25384,7 +25384,9 @@ async function handleHelpCommand(interaction, page = 1) {
             '`/send-esdt` 🔴 Admin - Send tokens to a user',
             '`/send-nft` 🔴 Admin - Send NFT to a user',
             '`/house-tip` 🔴 Admin - Tip from house balance',
-            '`/house-withdraw` 🔴 Admin - Withdraw from house balance'
+            '`/house-withdraw` 🔴 Admin - Withdraw from house balance',
+            '`/transfer-cross-guild-esdt` - Transfer tokens between servers',
+            '`/transfer-cross-guild-nft` - Transfer NFTs between servers'
           ],
           '🎨 Auctions & Marketplace': [
             '`/create-auction` 🔴 Admin - Create an NFT auction'
@@ -25395,6 +25397,10 @@ async function handleHelpCommand(interaction, page = 1) {
         title: '📚 Bot Commands Library - Page 4/4',
         description: 'Utilities & Information',
         categories: {
+          '🔔 Activity Subscriptions': [
+            '`/subscribe-activity` 🔴 Admin - Subscribe to activities from other servers',
+            '`/unsubscribe-activity` 🔴 Admin - Unsubscribe from activity feeds'
+          ],
           '🔧 Utilities & Debug': [
             '`/update-token-metadata` 🔴 Admin - Update token info',
             '`/blockchain-status` 🔴 Admin - Check blockchain listener',

@@ -445,6 +445,116 @@ This creates a lottery with:
 
 ***
 
+## Activity Subscriptions
+
+The bot allows your server to subscribe to activities from all other servers where the bot is active. This creates a cross-server network where activities like Auctions, Listings, and Lotteries are automatically forwarded to your designated channels.
+
+### What Are Activity Subscriptions?
+
+Activity subscriptions enable your server to receive:
+* **NFT Auctions** - When auctions are created in other servers
+* **NFT Listings** - When NFTs are listed for sale in other servers
+* **ESDT Lotteries** - When lotteries are created in other servers
+
+These activities are automatically forwarded to channels you specify, allowing your community to discover and participate in activities across the entire bot network.
+
+### Setting Up Activity Subscriptions
+
+#### Step 1: Subscribe to Activities
+
+Use the `/subscribe-activity` command:
+
+```
+/subscribe-activity activity-type channel
+```
+
+**Parameters**:
+* **`activity-type`**: Choose one of:
+  * `NFT Auctions` - Receive auction notifications
+  * `NFT Listings` - Receive marketplace listing notifications
+  * `ESDT Lotteries` - Receive lottery notifications
+* **`channel`**: The channel where forwarded activities will appear
+
+**Example**:
+```
+/subscribe-activity NFT Auctions #auctions
+```
+
+This subscribes your server to receive NFT Auctions from all other servers in the `#auctions` channel.
+
+#### Step 2: Multiple Subscriptions
+
+You can subscribe to multiple activity types, each in different channels:
+
+```
+/subscribe-activity NFT Auctions #auctions
+/subscribe-activity NFT Listings #marketplace
+/subscribe-activity ESDT Lotteries #lotteries
+```
+
+You can also subscribe to the same activity type in multiple channels:
+
+```
+/subscribe-activity NFT Auctions #auctions
+/subscribe-activity NFT Auctions #announcements
+```
+
+#### Step 3: Verify Subscriptions
+
+After subscribing, activities from other servers will automatically appear in your designated channels. The bot will:
+* ✅ Forward activity embeds to your channel
+* ✅ Include all relevant information (prices, deadlines, etc.)
+* ✅ Allow users to interact with activities directly
+
+### Managing Subscriptions
+
+#### Unsubscribing from Activities
+
+To stop receiving activities, use `/unsubscribe-activity`:
+
+```
+/unsubscribe-activity activity-type [channel]
+```
+
+**Parameters**:
+* **`activity-type`**: The activity type to unsubscribe from
+* **`channel`** (Optional): Specific channel to unsubscribe. If omitted, unsubscribes from all channels for that activity type
+
+**Examples**:
+
+Unsubscribe from a specific channel:
+```
+/unsubscribe-activity NFT Auctions #auctions
+```
+
+Unsubscribe from all channels for an activity type:
+```
+/unsubscribe-activity NFT Auctions
+```
+
+### How It Works
+
+1. **Activity Creation**: When an activity (Auction, Listing, or Lottery) is created in any server
+2. **Network Broadcast**: The bot checks all servers subscribed to that activity type
+3. **Automatic Forwarding**: The activity embed is forwarded to all subscribed channels
+4. **User Interaction**: Users in your server can interact with forwarded activities just like local activities
+
+### Best Practices
+
+* **Dedicated Channels**: Create dedicated channels for each activity type (e.g., `#cross-server-auctions`, `#network-lotteries`)
+* **Channel Permissions**: Ensure the bot has proper permissions in subscription channels
+* **Moderation**: Monitor forwarded activities to ensure they align with your server's guidelines
+* **Selective Subscriptions**: Only subscribe to activity types relevant to your community
+
+### Benefits
+
+* ✅ **Discover New Opportunities**: Your community can discover auctions, listings, and lotteries from across the network
+* ✅ **Increased Engagement**: More activities mean more opportunities for user participation
+* ✅ **Network Effects**: Your server's activities are also shared with other servers, increasing visibility
+* ✅ **Easy Management**: Simple subscribe/unsubscribe commands for admins
+
+***
+
 ## Next Steps
 
 Now that you've set up your projects and Community Fund, you can:
@@ -453,5 +563,6 @@ Now that you've set up your projects and Community Fund, you can:
 2. **Run Activities**: Set up lotteries, football betting, auctions, and RPS games
 3. **Manage Users**: Help users register wallets and top up their accounts
 4. **Monitor Activity**: Use admin commands to track balances and activity
+5. **Set Up Subscriptions**: Subscribe to activities from other servers to expand your community's opportunities
 
 See the [Running Activities](running-activities.md) guide for details on setting up games and activities.

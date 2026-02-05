@@ -232,6 +232,60 @@ You can fund House Balance for activities:
 
 This transfers tokens from your Virtual Account to the specified House Balance pool.
 
+### Cross-Guild Transfers
+
+You can transfer tokens and NFTs between your Virtual Accounts across different Discord servers! This allows you to move your assets seamlessly between servers where the bot is active.
+
+#### Transferring ESDT Tokens Between Servers
+
+```
+/transfer-cross-guild-esdt source-guild destination-guild token amount
+```
+
+**Example**:
+```
+/transfer-cross-guild-esdt ServerA ServerB REWARD-cf6eac 1000
+```
+
+**How it works**:
+1. Select the source server (where your tokens currently are)
+2. Select the destination server (where you want to transfer them)
+3. Choose the token to transfer
+4. Enter the amount (or "MAX" for full balance)
+5. The bot deducts from your source Virtual Account
+6. Transfers tokens on-chain between Community Fund wallets
+7. Credits your destination Virtual Account
+
+**Requirements**:
+* ✅ You must have a Virtual Account in both servers
+* ✅ Both servers must have Community Fund configured
+* ✅ Sufficient balance in source Virtual Account
+* ✅ Community Fund wallets must have sufficient tokens
+
+#### Transferring NFTs/SFTs Between Servers
+
+```
+/transfer-cross-guild-nft source-guild destination-guild collection nft-name [amount]
+```
+
+**Example**:
+```
+/transfer-cross-guild-nft ServerA ServerB COLLECTION-abc123 NFT-NAME-1
+```
+
+For SFTs with quantity:
+```
+/transfer-cross-guild-nft ServerA ServerB COLLECTION-abc123 SFT-NAME-1 amount:5
+```
+
+**Benefits**:
+* ✅ Seamless asset management across multiple servers
+* ✅ No need to withdraw and re-deposit
+* ✅ Maintains your Virtual Account balances across servers
+* ✅ Works for both tokens and NFTs/SFTs
+
+**Note**: Cross-guild transfers require on-chain transactions, so they may take a few moments to complete.
+
 ***
 
 ## NFT and SFT Virtual Accounts

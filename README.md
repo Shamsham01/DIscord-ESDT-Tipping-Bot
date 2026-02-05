@@ -58,6 +58,7 @@ Multiple ways to move value:
 * **Admin Transfers** - Admins send tokens and NFTs from project wallets
 * **Community Fund** - Centralized fund for community activities and games
 * **House Balance** - Track earnings from betting, auctions, and lotteries
+* **Cross-Guild Transfers** - Transfer tokens and NFTs between your Virtual Accounts across different Discord servers seamlessly
 
 ### 🔐 **Enterprise-Grade Security**
 
@@ -76,6 +77,15 @@ Set it and forget it:
 * **Auto-Detection** - Instantly detects deposits and credits user accounts
 * **Multi-Server Support** - One bot instance manages unlimited Discord servers
 * **Real-Time Updates** - Balance updates happen instantly as transactions are detected
+
+### 🔔 **Activity Subscriptions**
+
+Stay connected across servers:
+
+* **Cross-Server Activity Feeds** - Subscribe to receive Auctions, Listings, and Lotteries from all other servers
+* **Automatic Forwarding** - Activities are automatically forwarded to your designated channels
+* **Multi-Activity Support** - Subscribe to NFT Auctions, NFT Listings, or ESDT Lotteries independently
+* **Easy Management** - Simple subscribe/unsubscribe commands for admins
 
 ***
 

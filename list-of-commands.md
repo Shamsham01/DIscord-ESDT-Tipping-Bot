@@ -20,6 +20,8 @@ Below is a list of all available commands for the ESDT Tipping Bot, grouped by c
 
 - **/send-esdt** — Admins: Send ESDT tokens from a project wallet to any user.
 - **/tip** — Send a random tip (from the Community Fund) to another user.
+- **/transfer-cross-guild-esdt** — Transfer ESDT tokens between your Virtual Accounts across different Discord servers.
+- **/transfer-cross-guild-nft** — Transfer NFTs/SFTs between your Virtual Accounts across different Discord servers.
 
 ---
 
@@ -39,6 +41,18 @@ Below is a list of all available commands for the ESDT Tipping Bot, grouped by c
 - **/show-drop-game-leaderboard** — View the current weekly leaderboard with points and rankings.
 
 **Note**: Users participate by reacting with 🪂 emoji on the DROP Game embed. No commands needed!
+
+---
+
+## 🔔 Activity Subscriptions
+
+- **/subscribe-activity** — Admins: Subscribe your server to receive activities (Auctions, Listings, or Lotteries) from all other servers. Activities will be automatically forwarded to the specified channel.
+- **/unsubscribe-activity** — Admins: Unsubscribe your server from receiving activities. You can unsubscribe from a specific channel or all channels for an activity type.
+
+**Supported Activity Types:**
+- NFT Auctions
+- NFT Listings
+- ESDT Lotteries
 
 ---
 
