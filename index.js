@@ -11936,6 +11936,67 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      // Check if NFT is staked
+      if (nftBalance.staked === true) {
+        const poolId = nftBalance.staking_pool_id;
+        let errorMessage = `❌ **Cannot tip staked NFT!**\n\n`;
+        errorMessage += `This NFT "${nftBalance.nft_name || `${collection}#${nonce}`}" (${collection}#${nonce}) is currently staked`;
+        if (poolId) {
+          errorMessage += ` in pool \`${poolId}\``;
+        }
+        errorMessage += `.\n\nPlease unstake it first before tipping.`;
+        
+        await interaction.editReply({
+          content: errorMessage,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Calculate available balance (total - active auctions - active listings)
+      const totalBalance = nftBalance.amount || 1;
+      
+      // Get active auctions for this NFT
+      const dbAuctions = require('./db/auctions');
+      const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, fromUserId, collection, nonce);
+      const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+      
+      // Get active listings for this NFT
+      const activeListings = await virtualAccountsNFT.getUserListings(guildId, fromUserId, 'ACTIVE');
+      const listingsForThisNFT = activeListings.filter(listing => 
+        listing.collection === collection && listing.nonce === nonce
+      );
+      const lockedInListings = listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
+      
+      // Calculate available balance
+      const availableBalance = totalBalance - lockedInAuctions - lockedInListings;
+      
+      // Check if user has sufficient available balance
+      if (amount > availableBalance) {
+        const balanceTokenType = nftBalance.token_type || 'NFT';
+        const lockedTotal = lockedInAuctions + lockedInListings;
+        
+        let errorMessage = `❌ **Insufficient available balance!**\n\n`;
+        errorMessage += `**Total Balance:** ${totalBalance} ${balanceTokenType}(s)\n`;
+        if (lockedInAuctions > 0) {
+          errorMessage += `**Locked in Auctions:** ${lockedInAuctions} ${balanceTokenType}(s)\n`;
+        }
+        if (lockedInListings > 0) {
+          errorMessage += `**Locked in Listings:** ${lockedInListings} ${balanceTokenType}(s)\n`;
+        }
+        errorMessage += `**Available:** ${availableBalance} ${balanceTokenType}(s)\n\n`;
+        errorMessage += `You're trying to tip ${amount} ${balanceTokenType}(s), but only ${availableBalance} are available.\n\n`;
+        if (lockedInListings > 0) {
+          errorMessage += `💡 **Tip:** Cancel your active listing(s) first if you want to tip this NFT.`;
+        }
+        
+        await interaction.editReply({
+          content: errorMessage,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
       // Transfer NFT/SFT between users
       const transferResult = await virtualAccountsNFT.transferNFTBetweenUsers(
         guildId,
@@ -16686,18 +16747,57 @@ client.on('interactionCreate', async (interaction) => {
       // Get user's NFTs in selected collection
       const nfts = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, selectedCollection);
       
-      // Filter by focused value (match by name or identifier)
-      const filtered = nfts.filter(nft => {
-        const name = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
-        const identifier = `${selectedCollection}#${nft.nonce}`;
-        return name.toLowerCase().includes(focusedValue.toLowerCase()) ||
-               identifier.toLowerCase().includes(focusedValue.toLowerCase());
-      });
+      // Get active auctions and listings to calculate available balance
+      const dbAuctions = require('./db/auctions');
+      const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
+      
+      // Filter NFTs with available balance > 0 and match search term
+      const availableNFTs = [];
+      for (const nft of nfts) {
+        try {
+          // Skip if staked
+          if (nft.staked === true) {
+            continue;
+          }
+          
+          // Get active auctions for this NFT
+          const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId, selectedCollection, nft.nonce);
+          const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+          
+          // Get active listings for this NFT
+          const listingsForThisNFT = activeListings.filter(listing =>
+            listing.collection === selectedCollection && listing.nonce === nft.nonce
+          );
+          const lockedInListings = listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
+          
+          // Calculate available balance
+          const totalBalance = nft.amount || 1;
+          const availableBalance = totalBalance - lockedInAuctions - lockedInListings;
+          
+          if (availableBalance > 0) {
+            const nftName = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
+            const identifier = `${selectedCollection}#${nft.nonce}`;
+            
+            if (nftName.toLowerCase().includes(focusedValue.toLowerCase()) ||
+                identifier.toLowerCase().includes(focusedValue.toLowerCase())) {
+              availableNFTs.push({
+                nft: nft,
+                name: nftName,
+                identifier: identifier,
+                available: availableBalance
+              });
+            }
+          }
+        } catch (error) {
+          console.error(`[AUTOCOMPLETE] Error checking availability for NFT ${nft.nonce}:`, error.message);
+          // Continue with other NFTs
+        }
+      }
       
       await safeRespond(interaction,
-        filtered.slice(0, 25).map(nft => ({
-          name: `${nft.nft_name || `${selectedCollection}#${nft.nonce}`} (${selectedCollection}#${nft.nonce})`,
-          value: nft.nft_name || `${selectedCollection}#${nft.nonce}`
+        availableNFTs.slice(0, 25).map(item => ({
+          name: `${item.name} (${item.identifier}) - Available: ${item.available}`,
+          value: item.name || item.identifier
         }))
       );
     } catch (error) {
@@ -19336,23 +19436,72 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      // Filter out NFTs that are staked, listed for sale, or in auctions
+      const dbAuctions = require('./db/auctions');
+      const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
+      const availableNFTs = [];
+      
+      for (const nft of userNFTs) {
+        // Skip if already staked
+        if (nft.staked === true) {
+          continue;
+        }
+        
+        // Check if listed for sale
+        const listingsForThisNFT = activeListings.filter(listing => 
+          listing.collection === nft.collection && listing.nonce === nft.nonce
+        );
+        const lockedInListings = listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
+        
+        if (lockedInListings > 0) {
+          const totalBalance = nft.amount || 1;
+          // Skip if fully locked in listings
+          if (lockedInListings >= totalBalance) {
+            continue;
+          }
+        }
+        
+        // Check if in active auctions
+        const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId, nft.collection, nft.nonce);
+        const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+        
+        if (lockedInAuctions > 0) {
+          const totalBalance = nft.amount || 1;
+          // Skip if fully locked in auctions
+          if (lockedInAuctions >= totalBalance) {
+            continue;
+          }
+        }
+        
+        // NFT is available for staking
+        availableNFTs.push(nft);
+      }
+      
+      if (availableNFTs.length === 0) {
+        await interaction.reply({ 
+          content: `❌ **No NFTs available for staking!**\n\nAll your NFTs from collection "${pool.collectionTicker}" are either:\n• Already staked\n• Listed for sale\n• In active auctions\n\n💡 **Tip:** Cancel listings or wait for auctions to end before staking.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
       // Create select menu
       const selectMenu = new StringSelectMenuBuilder()
         .setCustomId(`staking-stake-select:${poolId}`)
         .setPlaceholder('Select NFTs to stake')
         .setMinValues(1)
-        .setMaxValues(Math.min(25, userNFTs.length + 1)); // +1 for "Stake All" option
+        .setMaxValues(Math.min(25, availableNFTs.length + 1)); // +1 for "Stake All" option
       
       // Add "Stake All" option
       selectMenu.addOptions(
         new StringSelectMenuOptionBuilder()
           .setLabel('Stake All')
-          .setDescription(`Stake all ${userNFTs.length} NFT(s)`)
+          .setDescription(`Stake all ${availableNFTs.length} available NFT(s)`)
           .setValue('all')
       );
       
       // Add individual NFT options (limit to 24 to fit with "Stake All")
-      const nftsToShow = userNFTs.slice(0, 24);
+      const nftsToShow = availableNFTs.slice(0, 24);
       for (const nft of nftsToShow) {
         const displayName = nft.nft_name || `${pool.collectionTicker}#${nft.nonce}`;
         const value = `${nft.collection}-${nft.nonce}`;
@@ -20569,6 +20718,81 @@ client.on('interactionCreate', async (interaction) => {
       if (nftsToStake.length === 0) {
         await interaction.followUp({ content: '❌ No valid NFTs selected.', flags: [MessageFlags.Ephemeral] });
         return;
+      }
+      
+      // Filter out NFTs that are staked, listed for sale, or in auctions
+      const dbAuctions = require('./db/auctions');
+      const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
+      const availableNFTs = [];
+      const unavailableNFTs = [];
+      
+      for (const nft of nftsToStake) {
+        // Check if already staked
+        if (nft.staked === true) {
+          unavailableNFTs.push({
+            nft: nft,
+            reason: `Already staked${nft.staking_pool_id ? ` in pool ${nft.staking_pool_id}` : ''}`
+          });
+          continue;
+        }
+        
+        // Check if listed for sale
+        const listingsForThisNFT = activeListings.filter(listing => 
+          listing.collection === nft.collection && listing.nonce === nft.nonce
+        );
+        const lockedInListings = listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
+        
+        if (lockedInListings > 0) {
+          const totalBalance = nft.amount || 1;
+          if (lockedInListings >= totalBalance) {
+            unavailableNFTs.push({
+              nft: nft,
+              reason: `Listed for sale (${lockedInListings} locked)`
+            });
+            continue;
+          }
+        }
+        
+        // Check if in active auctions
+        const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId, nft.collection, nft.nonce);
+        const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+        
+        if (lockedInAuctions > 0) {
+          const totalBalance = nft.amount || 1;
+          if (lockedInAuctions >= totalBalance) {
+            unavailableNFTs.push({
+              nft: nft,
+              reason: `In active auction (${lockedInAuctions} locked)`
+            });
+            continue;
+          }
+        }
+        
+        // NFT is available for staking
+        availableNFTs.push(nft);
+      }
+      
+      if (availableNFTs.length === 0) {
+        const reasons = unavailableNFTs.length > 0 
+          ? unavailableNFTs.map(unav => `• ${unav.nft.collection}-${unav.nft.nonce}: ${unav.reason}`).join('\n')
+          : 'All selected NFTs are unavailable';
+        await interaction.followUp({ 
+          content: `❌ **No NFTs available for staking:**\n\n${reasons}\n\n💡 **Tip:** Unstake, cancel listings, or wait for auctions to end before staking these NFTs.`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      // Update nftsToStake to only include available NFTs
+      nftsToStake = availableNFTs;
+      
+      // Warn if some NFTs were skipped
+      if (unavailableNFTs.length > 0) {
+        const skippedReasons = unavailableNFTs.map(unav => `• ${unav.nft.collection}-${unav.nft.nonce}: ${unav.reason}`).join('\n');
+        await interaction.followUp({ 
+          content: `⚠️ **${unavailableNFTs.length} NFT(s) skipped (not available for staking):**\n\n${skippedReasons}\n\nProceeding with ${availableNFTs.length} available NFT(s)...`, 
+          flags: [MessageFlags.Ephemeral] 
+        });
       }
       
       // Check pool limits

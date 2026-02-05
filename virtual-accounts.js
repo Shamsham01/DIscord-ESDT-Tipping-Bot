@@ -268,14 +268,30 @@ async function deductFundsFromAccount(guildId, userId, tokenIdentifier, amount, 
     }
     
     // Check if user has sufficient balance (after migration)
-    const currentBalance = new BigNumber(balances[tokenIdentifier] || '0');
+    const totalBalance = new BigNumber(balances[tokenIdentifier] || '0');
     const deductionAmount = new BigNumber(amountStr);
     
+    // CRITICAL: Check available balance (total - reserved for auctions)
+    // This prevents transferring tokens that are locked in live auctions
+    const auctionReservations = require('./db/auction-reservations');
+    let reservedAmount = '0';
+    try {
+      reservedAmount = await auctionReservations.getTotalReservedAmount(guildId, userId, tokenIdentifier) || '0';
+    } catch (reservationError) {
+      console.error(`[VIRTUAL] Error checking auction reservations:`, reservationError.message);
+      // Continue with total balance check if reservation check fails (fail-safe)
+    }
+    
+    const reservedAmountBN = new BigNumber(reservedAmount || '0');
+    const availableBalanceBN = totalBalance.minus(reservedAmountBN);
+    
     // Debug logging for precision issues
-    if (currentBalance.isLessThan(deductionAmount)) {
-      const difference = deductionAmount.minus(currentBalance);
-      console.log(`[VIRTUAL] Insufficient balance check failed:`);
-      console.log(`[VIRTUAL]   Current balance: ${currentBalance.toString()} (${currentBalance.toFixed()})`);
+    if (availableBalanceBN.isLessThan(deductionAmount)) {
+      const difference = deductionAmount.minus(availableBalanceBN);
+      console.log(`[VIRTUAL] Insufficient available balance check failed:`);
+      console.log(`[VIRTUAL]   Total balance: ${totalBalance.toString()} (${totalBalance.toFixed()})`);
+      console.log(`[VIRTUAL]   Reserved in auctions: ${reservedAmountBN.toString()} (${reservedAmountBN.toFixed()})`);
+      console.log(`[VIRTUAL]   Available balance: ${availableBalanceBN.toString()} (${availableBalanceBN.toFixed()})`);
       console.log(`[VIRTUAL]   Deduction amount: ${deductionAmount.toString()} (${deductionAmount.toFixed()})`);
       console.log(`[VIRTUAL]   Difference: ${difference.toString()} (${difference.toFixed()})`);
       console.log(`[VIRTUAL]   Original amount input: ${amount}`);
@@ -283,11 +299,16 @@ async function deductFundsFromAccount(guildId, userId, tokenIdentifier, amount, 
       
       return {
         success: false,
-        error: 'Insufficient balance',
-        currentBalance: currentBalance.toString(),
+        error: reservedAmountBN.isGreaterThan(0) 
+          ? `Insufficient available balance. ${reservedAmountBN.toString()} ${tokenIdentifier.split('-')[0]} is locked in active auctions.`
+          : 'Insufficient balance',
+        currentBalance: availableBalanceBN.toString(),
         requiredAmount: amountStr
       };
     }
+    
+    // Use total balance for the actual deduction (reserved funds are still in the account)
+    const currentBalance = totalBalance;
     
     // Deduct funds (using negative amount)
     const negativeAmount = deductionAmount.negated().toString();
