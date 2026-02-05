@@ -1585,6 +1585,54 @@ const commands = [
         ],
         default_member_permissions: null
     },
+    {
+        name: 'subscribe-activity',
+        description: 'Subscribe to receive activities from all other servers',
+        options: [
+            {
+                name: 'activity-type',
+                description: 'Type of activity to subscribe to',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                choices: [
+                    { name: 'NFT Auctions', value: 'auction' },
+                    { name: 'NFT Listings', value: 'listing' },
+                    { name: 'ESDT Lotteries', value: 'lottery' }
+                ]
+            },
+            {
+                name: 'channel',
+                description: 'Channel to receive forwarded activities',
+                type: ApplicationCommandOptionType.Channel,
+                required: true
+            }
+        ],
+        default_member_permissions: '0'
+    },
+    {
+        name: 'unsubscribe-activity',
+        description: 'Unsubscribe from receiving activities',
+        options: [
+            {
+                name: 'activity-type',
+                description: 'Type of activity to unsubscribe from',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                choices: [
+                    { name: 'NFT Auctions', value: 'auction' },
+                    { name: 'NFT Listings', value: 'listing' },
+                    { name: 'ESDT Lotteries', value: 'lottery' }
+                ]
+            },
+            {
+                name: 'channel',
+                description: 'Specific channel to unsubscribe (leave empty to unsubscribe all channels)',
+                type: ApplicationCommandOptionType.Channel,
+                required: false
+            }
+        ],
+        default_member_permissions: '0'
+    },
 ];
 
 // Export commands for use in other scripts

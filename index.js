@@ -86,6 +86,7 @@ const nftMetadataCache = require('./db/nft-metadata-cache');
 const dbDropGames = require('./db/drop-games');
 const dbDropRounds = require('./db/drop-rounds');
 const dropHelpers = require('./utils/drop-helpers');
+const dbActivityAggregations = require('./db/activity-aggregations');
 
 // Validate dbFootball module is loaded correctly
 if (!dbFootball || typeof dbFootball !== 'object') {
@@ -4687,6 +4688,9 @@ client.on('interactionCreate', async (interaction) => {
       });
       
       console.log(`[AUCTIONS] Auction ${auctionId} stored successfully in database`);
+
+      // Forward to all subscribers
+      await forwardAuctionToSubscribers(guildId, auctionId);
 
       // Post initial message in thread (if thread was created)
       if (thread) {
@@ -10372,6 +10376,9 @@ client.on('interactionCreate', async (interaction) => {
         expiresAt: expiresAt
       });
       
+      // Forward to all subscribers
+      await forwardListingToSubscribers(guildId, listingId);
+      
       // Post initial message in thread
       if (thread) {
         await thread.send(`📢 **Listing created!**\n\nThis ${listingTokenType} is now available for purchase. Use the buttons above to buy or make an offer.`);
@@ -10568,6 +10575,8 @@ client.on('interactionCreate', async (interaction) => {
             console.log(`[WITHDRAW-NFT] Cancelling ${listingsForThisNFT.length} active listing(s) for withdrawn NFT ${collection}#${nft.nonce}`);
             for (const listing of listingsForThisNFT) {
               await virtualAccountsNFT.updateListing(guildId, listing.listingId, { status: 'CANCELLED' });
+              // Clean up forwarded messages
+              await cleanupForwardedMessages(guildId, 'listing', listing.listingId);
               // Update listing embed to show it's cancelled
               try {
                 await updateNFTListingEmbed(guildId, listing.listingId);
@@ -12403,6 +12412,9 @@ client.on('interactionCreate', async (interaction) => {
         threadId: threadId
       });
       
+      // Forward to all subscribers
+      await forwardLotteryToSubscribers(guildId, lotteryId);
+      
       await interaction.editReply({
         content: `✅ Lottery created successfully! Lottery ID: \`${lotteryId}\``,
         flags: [MessageFlags.Ephemeral]
@@ -13412,6 +13424,129 @@ client.on('interactionCreate', async (interaction) => {
       
     } catch (error) {
       console.error('Error in transfer-cross-guild-nft command:', error.message);
+      await interaction.editReply({
+        content: `❌ **Error:** ${error.message}`,
+        flags: [MessageFlags.Ephemeral]
+      });
+    }
+  } else if (commandName === 'subscribe-activity') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ 
+          content: '❌ Only administrators can subscribe to activities.', 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      const activityType = interaction.options.getString('activity-type');
+      const channel = interaction.options.getChannel('channel');
+      const guildId = interaction.guildId;
+      
+      if (!channel) {
+        await interaction.editReply({
+          content: '❌ **Channel is required!**',
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Validate channel is in current guild
+      if (channel.guildId !== guildId) {
+        await interaction.editReply({
+          content: '❌ **Channel must be in this server!**',
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Validate channel type (text or forum only)
+      if (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildForum) {
+        await interaction.editReply({
+          content: '❌ **Channel must be a text or forum channel!**',
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Check if subscription already exists
+      const alreadySubscribed = await dbActivityAggregations.hasSubscription(guildId, activityType, channel.id);
+      if (alreadySubscribed) {
+        const activityTypeNames = {
+          'auction': 'NFT Auctions',
+          'listing': 'NFT Listings',
+          'lottery': 'ESDT Lotteries'
+        };
+        await interaction.editReply({
+          content: `ℹ️ **Already subscribed!**\n\nThis server is already subscribed to receive **${activityTypeNames[activityType]}** in ${channel}.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
+      // Create subscription
+      await dbActivityAggregations.createSubscription(guildId, activityType, channel.id);
+      
+      const activityTypeNames = {
+        'auction': 'NFT Auctions',
+        'listing': 'NFT Listings',
+        'lottery': 'ESDT Lotteries'
+      };
+      
+      await interaction.editReply({
+        content: `✅ **Subscription created!**\n\nThis server will now receive **${activityTypeNames[activityType]}** from all other servers in ${channel}.`,
+        flags: [MessageFlags.Ephemeral]
+      });
+      
+    } catch (error) {
+      console.error('[AGGREGATION] Error in subscribe-activity command:', error);
+      await interaction.editReply({
+        content: `❌ **Error:** ${error.message}`,
+        flags: [MessageFlags.Ephemeral]
+      });
+    }
+  } else if (commandName === 'unsubscribe-activity') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+      
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ 
+          content: '❌ Only administrators can unsubscribe from activities.', 
+          flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+      
+      const activityType = interaction.options.getString('activity-type');
+      const channel = interaction.options.getChannel('channel');
+      const guildId = interaction.guildId;
+      
+      const activityTypeNames = {
+        'auction': 'NFT Auctions',
+        'listing': 'NFT Listings',
+        'lottery': 'ESDT Lotteries'
+      };
+      
+      if (channel) {
+        // Remove specific subscription
+        await dbActivityAggregations.removeSubscription(guildId, activityType, channel.id);
+        await interaction.editReply({
+          content: `✅ **Unsubscribed!**\n\nThis server will no longer receive **${activityTypeNames[activityType]}** in ${channel}.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+      } else {
+        // Remove all subscriptions for activity type
+        await dbActivityAggregations.removeAllSubscriptions(guildId, activityType);
+        await interaction.editReply({
+          content: `✅ **Unsubscribed!**\n\nThis server will no longer receive **${activityTypeNames[activityType]}** in any channel.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+      }
+      
+    } catch (error) {
+      console.error('[AGGREGATION] Error in unsubscribe-activity command:', error);
       await interaction.editReply({
         content: `❌ **Error:** ${error.message}`,
         flags: [MessageFlags.Ephemeral]
@@ -18596,6 +18731,8 @@ client.on('interactionCreate', async (interaction) => {
       // Check if listing expired
       if (listing.expiresAt && Date.now() > listing.expiresAt) {
         await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'EXPIRED' });
+        // Clean up forwarded messages
+        await cleanupForwardedMessages(guildId, 'listing', listingId);
         await interaction.editReply({ content: '❌ This listing has expired.', flags: [MessageFlags.Ephemeral] });
         return;
       }
@@ -18610,6 +18747,8 @@ client.on('interactionCreate', async (interaction) => {
       const sellerNFT = await virtualAccountsNFT.getUserNFTBalance(guildId, listing.sellerId, listing.collection, listing.nonce);
       if (!sellerNFT) {
         await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'CANCELLED' });
+        // Clean up forwarded messages
+        await cleanupForwardedMessages(guildId, 'listing', listingId);
         await interaction.editReply({ content: '❌ Seller no longer owns this NFT. Listing has been cancelled.', flags: [MessageFlags.Ephemeral] });
         return;
       }
@@ -18620,6 +18759,8 @@ client.on('interactionCreate', async (interaction) => {
         // CRITICAL: Use actual token_type from listing, don't infer from amount
         const tokenType = listing.tokenType || 'NFT';
         await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'CANCELLED' });
+        // Clean up forwarded messages
+        await cleanupForwardedMessages(guildId, 'listing', listingId);
         await interaction.editReply({ content: `❌ Seller no longer has sufficient ${tokenType} balance. Listing has been cancelled.`, flags: [MessageFlags.Ephemeral] });
         return;
       }
@@ -18688,6 +18829,8 @@ client.on('interactionCreate', async (interaction) => {
         
         // Cancel listing
         await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'CANCELLED' });
+        // Clean up forwarded messages
+        await cleanupForwardedMessages(guildId, 'listing', listingId);
         await updateNFTListingEmbed(guildId, listingId);
         
         await interaction.editReply({ 
@@ -18757,6 +18900,9 @@ client.on('interactionCreate', async (interaction) => {
         buyerId: interaction.user.id
       });
       
+      // Clean up forwarded messages
+      await cleanupForwardedMessages(guildId, 'listing', listingId);
+      
       // Update listing embed
       await updateNFTListingEmbed(guildId, listingId);
       
@@ -18809,6 +18955,8 @@ client.on('interactionCreate', async (interaction) => {
       // Check if listing expired
       if (listing.expiresAt && Date.now() > listing.expiresAt) {
         await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'EXPIRED' });
+        // Clean up forwarded messages
+        await cleanupForwardedMessages(guildId, 'listing', listingId);
         await interaction.reply({ content: '❌ This listing has expired.', flags: [MessageFlags.Ephemeral] });
         return;
       }
@@ -18887,6 +19035,9 @@ client.on('interactionCreate', async (interaction) => {
       // Update listing status
       await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'CANCELLED' });
       
+      // Clean up forwarded messages
+      await cleanupForwardedMessages(guildId, 'listing', listingId);
+      
       // Update embed
       await updateNFTListingEmbed(guildId, listingId);
       
@@ -18959,6 +19110,8 @@ client.on('interactionCreate', async (interaction) => {
       const sellerNFT = await virtualAccountsNFT.getUserNFTBalance(offerGuildId, offerListing.sellerId, offerListing.collection, offerListing.nonce);
       if (!sellerNFT) {
         await virtualAccountsNFT.updateListing(offerGuildId, offerListing.listingId, { status: 'CANCELLED' });
+        // Clean up forwarded messages
+        await cleanupForwardedMessages(offerGuildId, 'listing', offerListing.listingId);
         await interaction.editReply({ content: '❌ You no longer own this NFT. Listing has been cancelled.', flags: [MessageFlags.Ephemeral] });
         return;
       }
@@ -19037,6 +19190,9 @@ client.on('interactionCreate', async (interaction) => {
         soldAt: Date.now(),
         buyerId: offer.offererId
       });
+      
+      // Clean up forwarded messages
+      await cleanupForwardedMessages(offerGuildId, 'listing', offerListing.listingId);
       
       // Update embeds
       await updateNFTListingEmbed(offerGuildId, offerListing.listingId);
@@ -20887,6 +21043,8 @@ client.on('interactionCreate', async (interaction) => {
               
               for (const listing of listingsForThisNFT) {
                 await virtualAccountsNFT.updateListing(guildIdFromCustomId, listing.listingId, { status: 'CANCELLED' });
+                // Clean up forwarded messages
+                await cleanupForwardedMessages(guildIdFromCustomId, 'listing', listing.listingId);
                 try {
                   await updateNFTListingEmbed(guildIdFromCustomId, listing.listingId);
                 } catch (embedError) {
@@ -22492,6 +22650,9 @@ async function processLotteryDraw(guildId, lotteryId) {
       status: 'EXPIRED'
     });
     
+    // Clean up forwarded messages
+    await cleanupForwardedMessages(guildId, 'lottery', lotteryId);
+    
     const processingTime = ((Date.now() - startTime) / 1000).toFixed(2);
     console.log(`[LOTTERY] Completed processing lottery ${lotteryId} in ${processingTime}s (${ticketArray.length} tickets, ${winningTickets.length} winners)`);
     
@@ -22879,6 +23040,8 @@ async function processLotteryDraw(guildId, lotteryId) {
         } else {
           // No winning numbers yet, just mark as EXPIRED
           await dbLottery.updateLottery(guildId, lotteryId, { status: 'EXPIRED' });
+          // Clean up forwarded messages
+          await cleanupForwardedMessages(guildId, 'lottery', lotteryId);
           console.log(`[LOTTERY] Recovered lottery ${lotteryId} - marked as EXPIRED (no winning numbers)`);
         }
       }
@@ -25742,6 +25905,329 @@ client.on('messageReactionRemove', async (reaction, user) => {
   }
 });
 
+// ============================================
+// ACTIVITY AGGREGATION HELPER FUNCTIONS
+// ============================================
+
+// Helper function to get guild name safely
+async function getGuildName(guildId) {
+  try {
+    const guild = await client.guilds.fetch(guildId).catch(() => null);
+    return guild ? guild.name : `Server ${guildId}`;
+  } catch (error) {
+    return `Server ${guildId}`;
+  }
+}
+
+// Forward auction to all subscribers
+async function forwardAuctionToSubscribers(sourceGuildId, auctionId) {
+  try {
+    const subscriptions = await dbActivityAggregations.getSubscriptions('auction');
+    if (subscriptions.length === 0) return;
+    
+    const auction = await dbAuctions.getAuction(sourceGuildId, auctionId);
+    if (!auction || auction.status !== 'ACTIVE') return;
+    
+    const sourceGuild = await client.guilds.fetch(sourceGuildId).catch(() => null);
+    if (!sourceGuild) return;
+    
+    const sourceGuildName = sourceGuild.name;
+    const sourceLink = `https://discord.com/channels/${sourceGuildId}/${auction.channelId}/${auction.messageId}`;
+    
+    // Get token metadata for display
+    const tokenMetadata = await dbServerData.getTokenMetadata(sourceGuildId);
+    const tokenInfo = tokenMetadata[auction.tokenIdentifier] || {};
+    const tokenTicker = tokenInfo.ticker || auction.tokenTicker;
+    
+    // Calculate time remaining
+    const timeRemaining = auction.endTime > Date.now() 
+      ? `<t:${Math.floor(auction.endTime / 1000)}:R>`
+      : 'Ended';
+    
+    const amount = auction.amount || 1;
+    const tokenType = auction.tokenType || (amount > 1 ? 'SFT' : 'NFT');
+    const amountText = amount > 1 ? ` (${amount}x)` : '';
+    
+    // Create forward embed
+    const forwardEmbed = new EmbedBuilder()
+      .setTitle(`🔔 ${auction.title}`)
+      .setDescription(`${auction.description || ''}\n\n**${tokenType}:** ${auction.nftName || `${auction.collection}#${auction.nftNonce}`}${amountText}\n**Collection:** ${auction.collection}\n**Nonce:** ${auction.nftNonce}`)
+      .addFields([
+        { name: '📊 Status', value: '🟢 Active Auction', inline: true },
+        { name: '💰 Starting Bid', value: `${auction.startingAmount} ${tokenTicker}`, inline: true },
+        { name: '💵 Current Bid', value: auction.highestBidderTag 
+          ? `${auction.currentBid} ${tokenTicker} by ${auction.highestBidderTag}`
+          : `${auction.currentBid} ${tokenTicker} (No bids yet)`, inline: true },
+        { name: '⏰ Time Remaining', value: timeRemaining, inline: true },
+        { name: '📡 Source', value: `[${sourceGuildName}](${sourceLink})`, inline: false }
+      ])
+      .setColor(0xFFA500)
+      .setTimestamp()
+      .setFooter({ text: 'Aggregated Activity • Click to view original', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+    
+    if (auction.nftImageUrl) {
+      forwardEmbed.setThumbnail(auction.nftImageUrl);
+    }
+    
+    // Forward to each subscription (excluding source guild)
+    for (const subscription of subscriptions) {
+      // Skip self-forwarding
+      if (subscription.guildId === sourceGuildId) continue;
+      
+      try {
+        const destGuild = await client.guilds.fetch(subscription.guildId).catch(() => null);
+        if (!destGuild) {
+          console.log(`[AGGREGATION] Skipping subscription - guild ${subscription.guildId} not found`);
+          continue;
+        }
+        
+        const destChannel = await destGuild.channels.fetch(subscription.channelId).catch(() => null);
+        if (!destChannel) {
+          console.log(`[AGGREGATION] Skipping subscription - channel ${subscription.channelId} not found`);
+          continue;
+        }
+        
+        const forwardMessage = await destChannel.send({ embeds: [forwardEmbed] });
+        
+        // Record forwarded message
+        await dbActivityAggregations.recordForwardedMessage(
+          sourceGuildId,
+          subscription.guildId,
+          'auction',
+          auctionId,
+          forwardMessage.id,
+          subscription.channelId
+        );
+        
+        console.log(`[AGGREGATION] Forwarded auction ${auctionId} to ${destGuild.name}#${destChannel.name}`);
+      } catch (error) {
+        console.error(`[AGGREGATION] Error forwarding auction to ${subscription.guildId}:`, error.message);
+      }
+    }
+  } catch (error) {
+    console.error(`[AGGREGATION] Error forwarding auction ${auctionId}:`, error.message);
+  }
+}
+
+// Forward listing to all subscribers
+async function forwardListingToSubscribers(sourceGuildId, listingId) {
+  try {
+    const subscriptions = await dbActivityAggregations.getSubscriptions('listing');
+    if (subscriptions.length === 0) return;
+    
+    const listing = await virtualAccountsNFT.getListing(sourceGuildId, listingId);
+    if (!listing || listing.status !== 'ACTIVE') return;
+    
+    const sourceGuild = await client.guilds.fetch(sourceGuildId).catch(() => null);
+    if (!sourceGuild) return;
+    
+    const sourceGuildName = sourceGuild.name;
+    const sourceLink = `https://discord.com/channels/${sourceGuildId}/${listing.channelId}/${listing.messageId}`;
+    
+    // Get token metadata for display
+    const tokenMetadata = await dbServerData.getTokenMetadata(sourceGuildId);
+    const tokenInfo = tokenMetadata[listing.priceTokenIdentifier] || {};
+    const tokenTicker = tokenInfo.ticker || listing.priceTokenIdentifier.split('-')[0];
+    
+    const amount = listing.amount || 1;
+    const tokenType = listing.tokenType || (amount > 1 ? 'SFT' : 'NFT');
+    const amountText = amount > 1 ? ` (${amount}x)` : '';
+    const nftDisplayName = listing.nftName || `${listing.collection}#${listing.nonce}`;
+    
+    // Create forward embed
+    const forwardEmbed = new EmbedBuilder()
+      .setTitle(`🛒 ${listing.title}`)
+      .setDescription(`${listing.description || ''}\n\n**${tokenType}:** ${nftDisplayName}${amountText}\n**Collection:** ${listing.collection}\n**Nonce:** ${listing.nonce}`)
+      .addFields([
+        { name: '💰 Price', value: `${listing.priceAmount} ${tokenTicker}`, inline: true },
+        { name: '📋 Listing Type', value: listing.listingType === 'fixed_price' ? 'Fixed Price' : 'Accept Offers', inline: true },
+        { name: '👤 Seller', value: listing.sellerTag || 'Unknown', inline: true },
+        { name: '📊 Status', value: '🟢 Active', inline: true },
+        { name: '📡 Source', value: `[${sourceGuildName}](${sourceLink})`, inline: false }
+      ])
+      .setColor(0x00FF00)
+      .setTimestamp()
+      .setFooter({ text: 'Aggregated Activity • Click to view original', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+    
+    if (listing.expiresAt) {
+      forwardEmbed.addFields([
+        { name: '⏰ Expires', value: `<t:${Math.floor(listing.expiresAt / 1000)}:R>`, inline: true }
+      ]);
+    }
+    
+    if (listing.nftImageUrl) {
+      forwardEmbed.setThumbnail(listing.nftImageUrl);
+    }
+    
+    // Forward to each subscription (excluding source guild)
+    for (const subscription of subscriptions) {
+      // Skip self-forwarding
+      if (subscription.guildId === sourceGuildId) continue;
+      
+      try {
+        const destGuild = await client.guilds.fetch(subscription.guildId).catch(() => null);
+        if (!destGuild) {
+          console.log(`[AGGREGATION] Skipping subscription - guild ${subscription.guildId} not found`);
+          continue;
+        }
+        
+        const destChannel = await destGuild.channels.fetch(subscription.channelId).catch(() => null);
+        if (!destChannel) {
+          console.log(`[AGGREGATION] Skipping subscription - channel ${subscription.channelId} not found`);
+          continue;
+        }
+        
+        const forwardMessage = await destChannel.send({ embeds: [forwardEmbed] });
+        
+        // Record forwarded message
+        await dbActivityAggregations.recordForwardedMessage(
+          sourceGuildId,
+          subscription.guildId,
+          'listing',
+          listingId,
+          forwardMessage.id,
+          subscription.channelId
+        );
+        
+        console.log(`[AGGREGATION] Forwarded listing ${listingId} to ${destGuild.name}#${destChannel.name}`);
+      } catch (error) {
+        console.error(`[AGGREGATION] Error forwarding listing to ${subscription.guildId}:`, error.message);
+      }
+    }
+  } catch (error) {
+    console.error(`[AGGREGATION] Error forwarding listing ${listingId}:`, error.message);
+  }
+}
+
+// Forward lottery to all subscribers
+async function forwardLotteryToSubscribers(sourceGuildId, lotteryId) {
+  try {
+    const subscriptions = await dbActivityAggregations.getSubscriptions('lottery');
+    if (subscriptions.length === 0) return;
+    
+    const lottery = await dbLottery.getLottery(sourceGuildId, lotteryId);
+    if (!lottery || lottery.status !== 'LIVE') return;
+    
+    const sourceGuild = await client.guilds.fetch(sourceGuildId).catch(() => null);
+    if (!sourceGuild) return;
+    
+    const sourceGuildName = sourceGuild.name;
+    const sourceLink = lottery.channelId && lottery.messageId 
+      ? `https://discord.com/channels/${sourceGuildId}/${lottery.channelId}/${lottery.messageId}`
+      : null;
+    
+    // Get token metadata for display
+    const tokenMetadata = await dbServerData.getTokenMetadata(sourceGuildId);
+    const tokenInfo = tokenMetadata[lottery.tokenIdentifier] || {};
+    const tokenTicker = tokenInfo.ticker || lottery.tokenTicker;
+    
+    // Calculate human-readable amounts
+    const tokenDecimals = tokenInfo.decimals || 8;
+    const prizePoolHuman = new BigNumber(lottery.prizePoolWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    const ticketPriceHuman = new BigNumber(lottery.ticketPriceWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
+    
+    // Create forward embed
+    const forwardEmbed = new EmbedBuilder()
+      .setTitle(`🎰 ESDT Lottery`)
+      .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers}`)
+      .addFields([
+        { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${tokenTicker}`, inline: true },
+        { name: '💰 Prize Pool', value: `${prizePoolHuman} ${tokenTicker}`, inline: true },
+        { name: '🏦 House Commission', value: `${lottery.houseCommissionPercent}%`, inline: true },
+        { name: '⏰ Next Draw', value: `<t:${Math.floor(lottery.nextDrawTime / 1000)}:R>`, inline: true },
+        { name: '🎫 Tickets Sold', value: `${lottery.totalTickets}`, inline: true },
+        { name: '👥 Participants', value: `${lottery.uniqueParticipants}`, inline: true },
+        { name: '📡 Source', value: sourceLink ? `[${sourceGuildName}](${sourceLink})` : sourceGuildName, inline: false }
+      ])
+      .setColor(0x9B59B6)
+      .setThumbnail('https://i.ibb.co/20MLJZNH/lottery-logo.png')
+      .setTimestamp()
+      .setFooter({ text: 'Aggregated Activity • Click to view original', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+    
+    // Forward to each subscription (excluding source guild)
+    for (const subscription of subscriptions) {
+      // Skip self-forwarding
+      if (subscription.guildId === sourceGuildId) continue;
+      
+      try {
+        const destGuild = await client.guilds.fetch(subscription.guildId).catch(() => null);
+        if (!destGuild) {
+          console.log(`[AGGREGATION] Skipping subscription - guild ${subscription.guildId} not found`);
+          continue;
+        }
+        
+        const destChannel = await destGuild.channels.fetch(subscription.channelId).catch(() => null);
+        if (!destChannel) {
+          console.log(`[AGGREGATION] Skipping subscription - channel ${subscription.channelId} not found`);
+          continue;
+        }
+        
+        const forwardMessage = await destChannel.send({ embeds: [forwardEmbed] });
+        
+        // Record forwarded message
+        await dbActivityAggregations.recordForwardedMessage(
+          sourceGuildId,
+          subscription.guildId,
+          'lottery',
+          lotteryId,
+          forwardMessage.id,
+          subscription.channelId
+        );
+        
+        console.log(`[AGGREGATION] Forwarded lottery ${lotteryId} to ${destGuild.name}#${destChannel.name}`);
+      } catch (error) {
+        console.error(`[AGGREGATION] Error forwarding lottery to ${subscription.guildId}:`, error.message);
+      }
+    }
+  } catch (error) {
+    console.error(`[AGGREGATION] Error forwarding lottery ${lotteryId}:`, error.message);
+  }
+}
+
+// Clean up forwarded messages when activity closes
+async function cleanupForwardedMessages(sourceGuildId, activityType, activityId) {
+  try {
+    const forwardedMessages = await dbActivityAggregations.getForwardedMessages(sourceGuildId, activityType, activityId);
+    
+    for (const msg of forwardedMessages) {
+      try {
+        const destGuild = await client.guilds.fetch(msg.destinationGuildId).catch(() => null);
+        if (!destGuild) {
+          // Guild not found - delete record and continue
+          await dbActivityAggregations.deleteForwardedMessage(msg.destinationGuildId, msg.destinationMessageId);
+          continue;
+        }
+        
+        const destChannel = await destGuild.channels.fetch(msg.destinationChannelId).catch(() => null);
+        if (!destChannel) {
+          // Channel not found - delete record and continue
+          await dbActivityAggregations.deleteForwardedMessage(msg.destinationGuildId, msg.destinationMessageId);
+          continue;
+        }
+        
+        const message = await destChannel.messages.fetch(msg.destinationMessageId).catch(() => null);
+        if (message) {
+          await message.delete();
+          console.log(`[AGGREGATION] Deleted forwarded ${activityType} message ${msg.destinationMessageId}`);
+        }
+        
+        // Delete record (even if message was already deleted)
+        await dbActivityAggregations.deleteForwardedMessage(msg.destinationGuildId, msg.destinationMessageId);
+      } catch (error) {
+        console.error(`[AGGREGATION] Error cleaning up forwarded message:`, error.message);
+        // Still delete the record even if message deletion failed
+        try {
+          await dbActivityAggregations.deleteForwardedMessage(msg.destinationGuildId, msg.destinationMessageId);
+        } catch (deleteError) {
+          console.error(`[AGGREGATION] Error deleting forwarded message record:`, deleteError.message);
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`[AGGREGATION] Error cleaning up forwarded messages:`, error.message);
+  }
+}
+
 // Ready event
 client.on('ready', async () => {
   console.log(`Multi-Server ESDT Tipping Bot with Virtual Accounts is ready with ID: ${client.user.tag}`);
@@ -27675,6 +28161,8 @@ async function processAuctionClosure(guildId, auctionId) {
         await thread.send('⏰ **Auction ended with no bids.**');
       }
       await dbAuctions.updateAuction(guildId, auctionId, { status: 'FINISHED' });
+      // Clean up forwarded messages
+      await cleanupForwardedMessages(guildId, 'auction', auctionId);
       return;
     }
 
@@ -28055,6 +28543,8 @@ async function processAuctionClosure(guildId, auctionId) {
       
       // Successfully completed - mark as FINISHED
       await dbAuctions.updateAuction(guildId, auctionId, { status: 'FINISHED' });
+      // Clean up forwarded messages
+      await cleanupForwardedMessages(guildId, 'auction', auctionId);
     } else {
       // Refund the deduction (using identifier)
       await virtualAccounts.addFundsToAccount(
