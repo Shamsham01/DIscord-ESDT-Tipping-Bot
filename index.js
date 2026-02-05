@@ -22389,15 +22389,12 @@ async function processTicketPurchase(guildId, lotteryId, userId, userTag, number
 async function updateLotteryEmbed(guildId, lotteryId) {
   try {
     const lottery = await dbLottery.getLottery(guildId, lotteryId);
-    if (!lottery || !lottery.messageId || !lottery.channelId) {
+    if (!lottery || !lottery.channelId) {
       return;
     }
     
     const channel = await client.channels.fetch(lottery.channelId);
     if (!channel) return;
-    
-    const message = await channel.messages.fetch(lottery.messageId);
-    if (!message) return;
     
     // Get token decimals first
     const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
@@ -22526,7 +22523,90 @@ async function updateLotteryEmbed(guildId, lotteryId) {
       components.push(buttonRow);
     }
     
-    await message.edit({ embeds: [lotteryEmbed], components });
+    // If message_id is null, create a new message; otherwise edit existing
+    if (!lottery.messageId) {
+      // Create new message
+      const lotteryMessage = await channel.send({
+        embeds: [lotteryEmbed],
+        components
+      });
+      
+      // Create thread (optional)
+      let threadId = null;
+      try {
+        const thread = await lotteryMessage.startThread({
+          name: `Lottery ${lotteryId.substring(0, 8)}`,
+          autoArchiveDuration: 1440
+        });
+        threadId = thread.id;
+      } catch (threadError) {
+        console.error('[LOTTERY] Error creating thread:', threadError.message);
+      }
+      
+      // Update lottery with new message/channel/thread IDs
+      await dbLottery.updateLottery(guildId, lotteryId, {
+        messageId: lotteryMessage.id,
+        threadId: threadId
+      });
+      
+      console.log(`[LOTTERY] Recreated embed for lottery ${lotteryId} in channel ${lottery.channelId}`);
+    } else {
+      // Edit existing message
+      try {
+        const message = await channel.messages.fetch(lottery.messageId);
+        if (message) {
+          await message.edit({ embeds: [lotteryEmbed], components });
+        } else {
+          // Message not found, recreate it
+          const lotteryMessage = await channel.send({
+            embeds: [lotteryEmbed],
+            components
+          });
+          
+          let threadId = null;
+          try {
+            const thread = await lotteryMessage.startThread({
+              name: `Lottery ${lotteryId.substring(0, 8)}`,
+              autoArchiveDuration: 1440
+            });
+            threadId = thread.id;
+          } catch (threadError) {
+            console.error('[LOTTERY] Error creating thread:', threadError.message);
+          }
+          
+          await dbLottery.updateLottery(guildId, lotteryId, {
+            messageId: lotteryMessage.id,
+            threadId: threadId
+          });
+          
+          console.log(`[LOTTERY] Recreated embed for lottery ${lotteryId} (original message not found)`);
+        }
+      } catch (fetchError) {
+        // Message might have been deleted, recreate it
+        const lotteryMessage = await channel.send({
+          embeds: [lotteryEmbed],
+          components
+        });
+        
+        let threadId = null;
+        try {
+          const thread = await lotteryMessage.startThread({
+            name: `Lottery ${lotteryId.substring(0, 8)}`,
+            autoArchiveDuration: 1440
+          });
+          threadId = thread.id;
+        } catch (threadError) {
+          console.error('[LOTTERY] Error creating thread:', threadError.message);
+        }
+        
+        await dbLottery.updateLottery(guildId, lotteryId, {
+          messageId: lotteryMessage.id,
+          threadId: threadId
+        });
+        
+        console.log(`[LOTTERY] Recreated embed for lottery ${lotteryId} (fetch error: ${fetchError.message})`);
+      }
+    }
     
   } catch (error) {
     console.error(`[LOTTERY] Error updating embed for lottery ${lotteryId}:`, error.message);
