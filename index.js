@@ -24180,6 +24180,16 @@ async function updateStakingPoolEmbed(guildId, poolId) {
     const channel = await client.channels.fetch(pool.channelId);
     if (!channel) return;
     
+    // Helper: resolve the TextChannel/ThreadChannel where the pool message lives
+    // For forum channels, the message is in the thread; for regular channels with startThread(), it's in the parent
+    const resolveMessageChannel = async () => {
+      if (channel.type === ChannelType.GuildForum && pool.threadId) {
+        const thread = await channel.threads.cache.get(pool.threadId) || await channel.threads.fetch(pool.threadId).catch(() => null);
+        return thread || channel; // Fallback to channel if thread fetch fails
+      }
+      return channel;
+    };
+    
     let message = null;
     
     // If messageId is temp, try to find the actual message by searching recent messages
@@ -24187,7 +24197,8 @@ async function updateStakingPoolEmbed(guildId, poolId) {
       // Search for messages with the pool embed (look for pool ID in embed footer)
       // Check both full ID and truncated ID for backward compatibility with old embeds
       const poolIdSubstring = poolId.substring(0, 8);
-      const messages = await channel.messages.fetch({ limit: 50 });
+      const messageChannel = await resolveMessageChannel();
+      const messages = await messageChannel.messages.fetch({ limit: 50 });
       message = messages.find(msg => {
         if (!msg.embeds || msg.embeds.length === 0) return false;
         const embed = msg.embeds[0];
@@ -24209,7 +24220,8 @@ async function updateStakingPoolEmbed(guildId, poolId) {
     } else {
       // Normal case: fetch by message_id
       try {
-        message = await channel.messages.fetch(pool.messageId);
+        const messageChannel = await resolveMessageChannel();
+        message = await messageChannel.messages.fetch(pool.messageId);
         
         // CRITICAL SAFETY CHECK: Verify the message actually belongs to this pool
         // This prevents updating the wrong embed if multiple pools share the same message_id
@@ -24224,7 +24236,8 @@ async function updateStakingPoolEmbed(guildId, poolId) {
             
             // Try to find the correct message for this pool
             const poolIdSubstring2 = poolId.substring(0, 8);
-            const messages = await channel.messages.fetch({ limit: 50 });
+            const searchChannel = await resolveMessageChannel();
+            const messages = await searchChannel.messages.fetch({ limit: 50 });
             const correctMessage = messages.find(msg => {
               if (!msg.embeds || msg.embeds.length === 0) return false;
               const embed = msg.embeds[0];
@@ -24254,18 +24267,34 @@ async function updateStakingPoolEmbed(guildId, poolId) {
           }
         }
       } catch (fetchError) {
-        // Message might have been deleted, try to find it
-        console.warn(`[STAKING] Failed to fetch message ${pool.messageId} for pool ${poolId}, searching...`);
-        // Check both full ID and truncated ID for backward compatibility with old embeds
-        const poolIdSubstring = poolId.substring(0, 8);
-        const messages = await channel.messages.fetch({ limit: 50 });
-        message = messages.find(msg => {
-          if (!msg.embeds || msg.embeds.length === 0) return false;
-          const embed = msg.embeds[0];
-          if (!embed.footer || !embed.footer.text) return false;
-          // Check for full pool ID first, then fallback to truncated for old embeds
-          return embed.footer.text.includes(poolId) || embed.footer.text.includes(poolIdSubstring);
-        });
+        // Message might be in a thread (e.g. forum post) or channel - try thread fallback
+        if (pool.threadId && channel.type !== ChannelType.GuildForum) {
+          try {
+            const thread = await channel.threads.cache.get(pool.threadId) || await channel.threads.fetch(pool.threadId).catch(() => null);
+            if (thread) {
+              message = await thread.messages.fetch(pool.messageId).catch(() => null);
+              if (message) {
+                console.log(`[STAKING] Found pool ${poolId} message in thread ${pool.threadId} (fallback)`);
+              }
+            }
+          } catch (threadFetchError) {
+            // Fall through to search
+          }
+        }
+        
+        if (!message) {
+          // Message might have been deleted, try to find it by searching
+          console.warn(`[STAKING] Failed to fetch message ${pool.messageId} for pool ${poolId}, searching...`);
+          const poolIdSubstring = poolId.substring(0, 8);
+          const searchChannel = await resolveMessageChannel();
+          const messages = await searchChannel.messages.fetch({ limit: 50 });
+          message = messages.find(msg => {
+            if (!msg.embeds || msg.embeds.length === 0) return false;
+            const embed = msg.embeds[0];
+            if (!embed.footer || !embed.footer.text) return false;
+            return embed.footer.text.includes(poolId) || embed.footer.text.includes(poolIdSubstring);
+          });
+        }
         
         if (message) {
           // CRITICAL: Verify this message actually belongs to this pool
@@ -26736,10 +26765,10 @@ client.on('ready', async () => {
               continue;
             }
             
-            // Only update if pool had a distribution (to check if 24h passed)
-            if (pool.lastRewardDistributionAt) {
-              await updateStakingPoolEmbed(guildId, pool.poolId);
-            }
+            // Update ALL closed pools - ensures status shows correctly (red/Closed) even if
+            // the immediate update failed. Pools with lastRewardDistributionAt also get
+            // the "claim within 24h" message refreshed.
+            await updateStakingPoolEmbed(guildId, pool.poolId);
           }
         } catch (error) {
           console.error(`[STAKING] Error updating embeds for guild ${guildId}:`, error.message);
