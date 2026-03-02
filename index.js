@@ -17985,38 +17985,39 @@ client.on('interactionCreate', async (interaction) => {
 
     try {
       const swapResult = await ashSwapAggregator(pemToSend, fromToken, toToken, amount, slippage);
-      const data = swapResult?.data;
+      // API may return array [{ data: {...} }] or object { data: {...} }
+      const data = Array.isArray(swapResult) ? swapResult[0]?.data : swapResult?.data;
 
-      if (data?.swapDetails?.outputs?.length > 0) {
+      const outputs = data?.swapDetails?.outputs ?? data?.outputs ?? [];
+      if (outputs.length > 0) {
         const additionTxIds = [];
-        for (const output of data.swapDetails.outputs) {
-          const rawAmount = output.amount || '0';
+        for (const output of outputs) {
           const outToken = output.token || toToken;
-          // CRITICAL: Use chain decimals for output token - stored metadata may have wrong decimals (e.g. REWARD has 8, not 18)
-          let decimals = output.decimals;
-          if (decimals == null) {
-            try {
-              decimals = await getTokenDecimals(outToken);
-            } catch (e) {
-              const stored = await getStoredTokenDecimals(guildId, outToken);
-              decimals = stored !== null ? stored : 18;
-            }
+          // MakeX API: output.amount is human-readable; output.rawAmount is blockchain format (use with decimals)
+          let humanAmount;
+          if (output.amount != null && output.amount !== '') {
+            humanAmount = new BigNumber(output.amount).toString();
+          } else if (output.rawAmount != null && output.rawAmount !== '') {
+            const decimals = output.decimals ?? (await getTokenDecimals(outToken).catch(() => null)) ?? 18;
+            humanAmount = new BigNumber(output.rawAmount).dividedBy(new BigNumber(10).pow(decimals)).toString();
+          } else {
+            humanAmount = '0';
           }
-          const humanAmount = new BigNumber(rawAmount).dividedBy(new BigNumber(10).pow(decimals)).toString();
           const addResult = await virtualAccounts.addFundsToAccount(guildId, userId, outToken, humanAmount, data.transactionHash, 'swap', interaction.user.tag);
           if (addResult?.transaction?.id) additionTxIds.push(addResult.transaction.id);
         }
-        const totalReceived = await Promise.all(data.swapDetails.outputs.map(async (o) => {
-          const outToken = o.token || toToken;
-          let dec = o.decimals;
-          if (dec == null) {
-            try { dec = await getTokenDecimals(outToken); } catch (e) {
-              const s = await getStoredTokenDecimals(guildId, outToken);
-              dec = s !== null ? s : 18;
-            }
+        const totalReceived = outputs.reduce((sum, o) => {
+          let h;
+          if (o.amount != null && o.amount !== '') {
+            h = new BigNumber(o.amount);
+          } else if (o.rawAmount != null && o.rawAmount !== '') {
+            const dec = o.decimals ?? 18;
+            h = new BigNumber(o.rawAmount).dividedBy(new BigNumber(10).pow(dec));
+          } else {
+            h = new BigNumber(0);
           }
-          return new BigNumber(o.amount || '0').dividedBy(new BigNumber(10).pow(dec));
-        })).then(arr => arr.reduce((sum, n) => sum.plus(n), new BigNumber(0)));
+          return sum.plus(h);
+        }, new BigNumber(0));
         const totalHuman = totalReceived.toString();
 
         try {
@@ -18037,18 +18038,19 @@ client.on('interactionCreate', async (interaction) => {
           console.error('[SWAP] Error saving swap to DB:', dbErr.message);
         }
 
-        const outputParts = await Promise.all(data.swapDetails.outputs.map(async (o) => {
+        const outputParts = outputs.map((o) => {
           const outTok = o.token || toToken;
-          let dec = o.decimals;
-          if (dec == null) {
-            try { dec = await getTokenDecimals(outTok); } catch (e) {
-              const s = await getStoredTokenDecimals(guildId, outTok);
-              dec = s !== null ? s : 18;
-            }
+          let h;
+          if (o.amount != null && o.amount !== '') {
+            h = new BigNumber(o.amount).toString();
+          } else if (o.rawAmount != null && o.rawAmount !== '') {
+            const dec = o.decimals ?? 18;
+            h = new BigNumber(o.rawAmount).dividedBy(new BigNumber(10).pow(dec)).toString();
+          } else {
+            h = '0';
           }
-          const h = new BigNumber(o.amount || '0').dividedBy(new BigNumber(10).pow(dec)).toString();
           return `${formatNumberForDisplay(h)} ${outTok.split('-')[0]}`;
-        }));
+        });
         const outputsText = outputParts.join(', ');
 
         // Get VA balances for display
