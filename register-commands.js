@@ -1130,10 +1130,9 @@ const commands = [
             },
             {
                 name: 'amount',
-                description: 'Amount to swap',
-                type: ApplicationCommandOptionType.Number,
-                required: true,
-                min_value: 0.000001
+                description: 'Amount to swap (or ALL/MAX for full balance)',
+                type: ApplicationCommandOptionType.String,
+                required: true
             },
             {
                 name: 'slippage',

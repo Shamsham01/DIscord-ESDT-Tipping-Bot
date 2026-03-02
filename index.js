@@ -11392,7 +11392,7 @@ client.on('interactionCreate', async (interaction) => {
 
       let fromToken = interaction.options.getString('from-token');
       let toToken = interaction.options.getString('to-token');
-      const amount = interaction.options.getNumber('amount');
+      const amountInput = (interaction.options.getString('amount') || '').trim();
       const slippage = interaction.options.getString('slippage') || '1';
 
       if (fromToken) fromToken = sanitizeTokenIdentifier(fromToken);
@@ -11416,8 +11416,8 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ content: '❌ From and to tokens must be different.', flags: [MessageFlags.Ephemeral] });
         return;
       }
-      if (!amount || amount <= 0) {
-        await interaction.editReply({ content: '❌ Invalid amount. Please provide a positive number.', flags: [MessageFlags.Ephemeral] });
+      if (!amountInput) {
+        await interaction.editReply({ content: '❌ Invalid amount. Provide a positive number or ALL/MAX for full balance.', flags: [MessageFlags.Ephemeral] });
         return;
       }
 
@@ -11447,6 +11447,21 @@ client.on('interactionCreate', async (interaction) => {
       await virtualAccounts.updateUserUsername(guildId, userId, userTag);
 
       const currentBalance = await virtualAccounts.getUserBalance(guildId, userId, fromToken);
+      let amount;
+      if (/^(all|max)$/i.test(amountInput)) {
+        amount = currentBalance;
+        if (new BigNumber(amount).isLessThanOrEqualTo(0)) {
+          await interaction.editReply({ content: `❌ No balance to swap. You have 0 ${fromToken.split('-')[0]}.`, flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+      } else {
+        const parsed = parseFloat(amountInput);
+        if (isNaN(parsed) || parsed <= 0) {
+          await interaction.editReply({ content: '❌ Invalid amount. Provide a positive number or ALL/MAX for full balance.', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+        amount = parsed;
+      }
       if (new BigNumber(currentBalance).isLessThan(amount)) {
         await interaction.editReply({ content: `❌ Insufficient balance. You have ${formatNumberForDisplay(currentBalance)} ${fromToken.split('-')[0]}.`, flags: [MessageFlags.Ephemeral] });
         return;
