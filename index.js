@@ -17988,22 +17988,36 @@ client.on('interactionCreate', async (interaction) => {
       const data = swapResult?.data;
 
       if (data?.swapDetails?.outputs?.length > 0) {
+        const additionTxIds = [];
         for (const output of data.swapDetails.outputs) {
           const rawAmount = output.amount || '0';
-          let decimals = toTokenDecimals;
-          const outToken = output.token;
-          if (outToken && outToken !== toToken) {
-            const stored = await getStoredTokenDecimals(guildId, outToken);
-            if (stored !== null) decimals = stored;
-            else {
-              try { decimals = await getTokenDecimals(outToken); } catch (e) { decimals = 18; }
+          const outToken = output.token || toToken;
+          // CRITICAL: Use chain decimals for output token - stored metadata may have wrong decimals (e.g. REWARD has 8, not 18)
+          let decimals = output.decimals;
+          if (decimals == null) {
+            try {
+              decimals = await getTokenDecimals(outToken);
+            } catch (e) {
+              const stored = await getStoredTokenDecimals(guildId, outToken);
+              decimals = stored !== null ? stored : 18;
             }
           }
           const humanAmount = new BigNumber(rawAmount).dividedBy(new BigNumber(10).pow(decimals)).toString();
-          await virtualAccounts.addFundsToAccount(guildId, userId, outToken || toToken, humanAmount, data.transactionHash, 'swap', interaction.user.tag);
+          const addResult = await virtualAccounts.addFundsToAccount(guildId, userId, outToken, humanAmount, data.transactionHash, 'swap', interaction.user.tag);
+          if (addResult?.transaction?.id) additionTxIds.push(addResult.transaction.id);
         }
-        const totalReceived = data.swapDetails.outputs.reduce((sum, o) => sum.plus(new BigNumber(o.amount || '0')), new BigNumber(0));
-        const totalHuman = totalReceived.dividedBy(new BigNumber(10).pow(toTokenDecimals)).toString();
+        const totalReceived = await Promise.all(data.swapDetails.outputs.map(async (o) => {
+          const outToken = o.token || toToken;
+          let dec = o.decimals;
+          if (dec == null) {
+            try { dec = await getTokenDecimals(outToken); } catch (e) {
+              const s = await getStoredTokenDecimals(guildId, outToken);
+              dec = s !== null ? s : 18;
+            }
+          }
+          return new BigNumber(o.amount || '0').dividedBy(new BigNumber(10).pow(dec));
+        })).then(arr => arr.reduce((sum, n) => sum.plus(n), new BigNumber(0)));
+        const totalHuman = totalReceived.toString();
 
         try {
           await dbSwapTransactions.insertSwapTransaction({
@@ -18015,21 +18029,25 @@ client.on('interactionCreate', async (interaction) => {
             amountReceived: totalHuman,
             slippagePercentage: parseFloat(slippage),
             transactionHash: data.transactionHash,
-            status: 'completed'
+            status: 'completed',
+            deductionTransactionId: deductResult?.transaction?.id || null,
+            additionTransactionId: additionTxIds.length > 0 ? additionTxIds[0] : null
           });
         } catch (dbErr) {
           console.error('[SWAP] Error saving swap to DB:', dbErr.message);
         }
 
         const outputParts = await Promise.all(data.swapDetails.outputs.map(async (o) => {
-          let dec = toTokenDecimals;
-          if (o.token && o.token !== toToken) {
-            const s = await getStoredTokenDecimals(guildId, o.token);
-            if (s !== null) dec = s;
-            else try { dec = await getTokenDecimals(o.token); } catch (e) { dec = 18; }
+          const outTok = o.token || toToken;
+          let dec = o.decimals;
+          if (dec == null) {
+            try { dec = await getTokenDecimals(outTok); } catch (e) {
+              const s = await getStoredTokenDecimals(guildId, outTok);
+              dec = s !== null ? s : 18;
+            }
           }
           const h = new BigNumber(o.amount || '0').dividedBy(new BigNumber(10).pow(dec)).toString();
-          return `${formatNumberForDisplay(h)} ${(o.token || '').split('-')[0]}`;
+          return `${formatNumberForDisplay(h)} ${outTok.split('-')[0]}`;
         }));
         const outputsText = outputParts.join(', ');
 
@@ -18066,7 +18084,7 @@ client.on('interactionCreate', async (interaction) => {
         throw new Error('No outputs in swap response');
       }
     } catch (swapErr) {
-      await virtualAccounts.addFundsToAccount(guildId, userId, fromToken, amount, null, 'swap_refund', interaction.user.tag);
+      const refundResult = await virtualAccounts.addFundsToAccount(guildId, userId, fromToken, amount, null, 'swap_refund', interaction.user.tag);
 
       const txHash = swapErr.data?.transactionHash || swapErr.data?.data?.transactionHash;
       const explorerUrl = swapErr.data?.explorerUrl || swapErr.data?.data?.explorerUrl;
@@ -18082,7 +18100,9 @@ client.on('interactionCreate', async (interaction) => {
           amountReceived: '0',
           slippagePercentage: parseFloat(slippage),
           transactionHash: txHash || null,
-          status: 'refunded'
+          status: 'refunded',
+          deductionTransactionId: deductResult?.transaction?.id || null,
+          additionTransactionId: refundResult?.transaction?.id || null
         });
       } catch (dbErr) {
         console.error('[SWAP] Error saving failed swap to DB:', dbErr.message);
