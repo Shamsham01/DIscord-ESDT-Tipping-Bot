@@ -11499,15 +11499,16 @@ client.on('interactionCreate', async (interaction) => {
       function buildQuoteEmbed(expiresInSec, isExpired = false) {
         const fromVal = `${formatNumberForDisplay(amount)} ${fromTicker}${fromUsd ? ` (≈ $${fromUsd})` : ''}`;
         const toVal = `~${formatNumberForDisplay(expectedOut)} ${toTicker}${toUsd ? ` (≈ $${toUsd})` : ''}`;
+        const minVal = `${formatNumberForDisplay(minOut)} ${toTicker}`;
         const embed = new EmbedBuilder()
           .setTitle(isExpired ? 'Swap Quote (Expired)' : 'Swap Quote')
           .setColor(isExpired ? 0x666666 : 0x3498db)
           .addFields(
-            { name: 'From', value: fromVal, inline: true },
-            { name: 'To', value: toVal, inline: true },
-            { name: 'Min (slippage)', value: `${formatNumberForDisplay(minOut)} ${toTicker}`, inline: true },
+            { name: 'From Token', value: fromVal, inline: true },
             { name: 'Slippage', value: `${slippage}%`, inline: true },
-            { name: 'Expires in', value: isExpired ? 'Expired' : `${expiresInSec}s`, inline: true }
+            { name: 'To Token', value: toVal, inline: true },
+            { name: 'Min (Received)', value: minVal, inline: true },
+            { name: 'Expires in', value: isExpired ? 'Expired' : `${expiresInSec}s`, inline: false }
           )
           .setTimestamp()
           .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
