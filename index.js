@@ -26124,6 +26124,7 @@ async function handleHelpCommand(interaction, page = 1) {
             '`/check-balance-esdt` - View your virtual account balance',
             '`/balance-history` - View your transaction history',
             '`/tip-virtual-esdt` - Tip another user with virtual balance',
+            '`/swap` - Swap tokens from your virtual account (AshSwap)',
             '`/virtual-house-topup` - Transfer from Virtual Account to House Balance',
             '`/withdraw-esdt` - Withdraw funds to your wallet'
           ],
@@ -26177,10 +26178,10 @@ async function handleHelpCommand(interaction, page = 1) {
             '`/stop-drop-game-automation` 🔴 Admin - Stop DROP game',
             '`/drop-leaderboard` - View weekly leaderboard'
           ],
-          '🎨 NFT Staking': [
-            '`/create-staking-pool` 🔴 Admin - Create a staking pool',
-            '`/update-staking-pool` 🔴 Admin - Update staking pool',
-            '`/close-staking-pool` 🔴 Admin - Close a staking pool'
+          '🎨 Staking Pools': [
+            '`/create-staking-pool` 🔴 Admin - Create a new NFT staking pool',
+            '`/update-staking-pool` - Update staking pool (topup, limits, filters)',
+            '`/close-staking-pool` - Close a staking pool and return NFTs to users'
           ]
         }
       },
