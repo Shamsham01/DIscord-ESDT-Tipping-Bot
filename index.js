@@ -52,6 +52,7 @@ console.log('Environment variables:', {
   API_BASE_URL: process.env.API_BASE_URL ? 'Set' : 'Missing',
   API_TOKEN: process.env.API_TOKEN ? 'Set' : 'Missing',
   FD_TOKEN: process.env.FD_TOKEN ? 'Set' : 'Missing',
+  SWAP_API_TOKEN: (process.env.SWAP_API_TOKEN || process.env.SECURE_TOKEN) ? 'Set' : 'Missing',
   SUPABASE_URL: process.env.SUPABASE_URL ? 'Set' : 'Missing',
   SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY ? 'Set' : 'Missing',
 });
@@ -87,6 +88,7 @@ const dbDropGames = require('./db/drop-games');
 const dbDropRounds = require('./db/drop-rounds');
 const dropHelpers = require('./utils/drop-helpers');
 const dbActivityAggregations = require('./db/activity-aggregations');
+const dbSwapTransactions = require('./db/swap-transactions');
 
 // Validate dbFootball module is loaded correctly
 if (!dbFootball || typeof dbFootball !== 'object') {
@@ -131,6 +133,8 @@ const client = new Client({
 const API_BASE_URL = process.env.API_BASE_URL;
 const API_TOKEN = process.env.API_TOKEN; // For MultiversX API
 const FD_TOKEN = process.env.FD_TOKEN; // For Football-Data.org API
+const SWAP_API_BASE_URL = process.env.SWAP_API_BASE_URL || 'https://swap-esdt-makex-api.onrender.com';
+const SWAP_API_TOKEN = process.env.SWAP_API_TOKEN || process.env.SECURE_TOKEN;
 
 // All data is now stored in Supabase database
 // Wallet timestamps for blockchain listener are stored in Supabase (wallet_timestamps table)
@@ -170,6 +174,66 @@ async function getCommunityFundProject(guildId) {
 function getCommunityFundProjectName() {
   return 'Community Fund';
 }
+
+// Format number for display with thousands separators (e.g. 10,000.00)
+function formatNumberForDisplay(num) {
+  const n = Number(num);
+  return isNaN(n) ? '0.00' : n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+}
+
+// AshSwap API: Get quote (no execution)
+async function ashSwapQuote(fromToken, toToken, amount, slippage) {
+  const url = SWAP_API_BASE_URL.endsWith('/') ? `${SWAP_API_BASE_URL}ashSwapQuote` : `${SWAP_API_BASE_URL}/ashSwapQuote`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SWAP_API_TOKEN}`
+    },
+    body: JSON.stringify({
+      fromToken,
+      toToken,
+      amount: String(amount),
+      slippagePercentage: parseFloat(slippage) || 1
+    })
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.message || data.error || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+// AshSwap API: Execute swap on-chain
+async function ashSwapAggregator(walletPem, fromToken, toToken, amount, slippage) {
+  const url = SWAP_API_BASE_URL.endsWith('/') ? `${SWAP_API_BASE_URL}ashSwapAggregator` : `${SWAP_API_BASE_URL}/ashSwapAggregator`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SWAP_API_TOKEN}`
+    },
+    body: JSON.stringify({
+      walletPem,
+      fromToken,
+      toToken,
+      amount: String(amount),
+      slippagePercentage: parseFloat(slippage) || 1,
+      gasLimit: 77000000
+    })
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const err = new Error(data.message || data.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+// Pending swap quotes (key: guildId:userId:messageId)
+const pendingSwapQuotes = new Map();
 
 // Helper function to create error embed for insufficient balances
 async function createBalanceErrorEmbed(guildId, balanceCheck, commandName) {
@@ -11314,6 +11378,189 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
+  } else if (commandName === 'swap') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+      const guildId = interaction.guildId;
+      if (!guildId) {
+        await interaction.editReply({ content: '❌ This command must be used in a server.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      const userId = interaction.user.id;
+      const userTag = interaction.user.tag;
+
+      let fromToken = interaction.options.getString('from-token');
+      let toToken = interaction.options.getString('to-token');
+      const amount = interaction.options.getNumber('amount');
+      const slippage = interaction.options.getString('slippage') || '1';
+
+      if (fromToken) fromToken = sanitizeTokenIdentifier(fromToken);
+      if (toToken) toToken = sanitizeTokenIdentifier(toToken);
+
+      // Block EGLD - only WEGLD allowed
+      const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+      if (!fromToken || !toToken) {
+        await interaction.editReply({ content: '❌ Both from-token and to-token are required.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      if (fromToken.toUpperCase() === 'EGLD' || toToken.toUpperCase() === 'EGLD') {
+        await interaction.editReply({ content: '❌ EGLD swaps are not supported. Use WEGLD (WEGLD-bd4d79) instead.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      if (!esdtIdentifierRegex.test(fromToken) || !esdtIdentifierRegex.test(toToken)) {
+        await interaction.editReply({ content: '❌ Invalid token. Use full identifier (e.g. WEGLD-bd4d79, USDC-c76f1f).', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      if (fromToken.toLowerCase() === toToken.toLowerCase()) {
+        await interaction.editReply({ content: '❌ From and to tokens must be different.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      if (!amount || amount <= 0) {
+        await interaction.editReply({ content: '❌ Invalid amount. Please provide a positive number.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      if (!SWAP_API_TOKEN) {
+        await interaction.editReply({ content: '❌ Swap API not configured. Contact administrator.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      const fundProject = await getCommunityFundProject(guildId);
+      const projects = await getProjects(guildId);
+      const projectName = getCommunityFundProjectName();
+      const fundProjectData = projects?.[projectName];
+      if (!fundProject || !fundProjectData) {
+        await interaction.editReply({ content: '❌ No Community Fund configured. Ask an admin to set it up.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      const supportedTokensRaw = fundProjectData.supportedTokens || [];
+      const supportedTokens = Array.isArray(supportedTokensRaw) ? supportedTokensRaw : (supportedTokensRaw || '').split(',').map(t => t.trim()).filter(t => t.length > 0);
+      const supportedSet = new Set(supportedTokens.map(t => t.toLowerCase()));
+      if (!supportedSet.has(fromToken.toLowerCase()) || !supportedSet.has(toToken.toLowerCase())) {
+        await interaction.editReply({ content: '❌ One or both tokens are not supported by Community Fund.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      virtualAccounts.forceReloadData();
+      await virtualAccounts.updateUserUsername(guildId, userId, userTag);
+
+      const currentBalance = await virtualAccounts.getUserBalance(guildId, userId, fromToken);
+      if (new BigNumber(currentBalance).isLessThan(amount)) {
+        await interaction.editReply({ content: `❌ Insufficient balance. You have ${formatNumberForDisplay(currentBalance)} ${fromToken.split('-')[0]}.`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      let quoteData;
+      try {
+        quoteData = await ashSwapQuote(fromToken, toToken, amount, slippage);
+      } catch (err) {
+        const msg = err.message || 'Quote failed';
+        await interaction.editReply({ content: `❌ Quote failed: ${msg}`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      const quote = quoteData?.data?.quoteDetails;
+      if (!quote) {
+        await interaction.editReply({ content: '❌ Invalid quote response from API.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      let toTokenDecimals = await getStoredTokenDecimals(guildId, toToken);
+      if (toTokenDecimals === null) {
+        try {
+          toTokenDecimals = await getTokenDecimals(toToken);
+        } catch (e) {
+          toTokenDecimals = toToken.toLowerCase().includes('usdc') ? 6 : 18;
+        }
+      }
+      if (toTokenDecimals === null) toTokenDecimals = 18;
+
+      const expectedOut = new BigNumber(quote.expectedAmountOutRaw || '0').dividedBy(new BigNumber(10).pow(toTokenDecimals)).toString();
+      const minOut = new BigNumber(quote.minAmountOutRaw || '0').dividedBy(new BigNumber(10).pow(toTokenDecimals)).toString();
+      const fromTicker = fromToken.split('-')[0];
+      const toTicker = toToken.split('-')[0];
+      const expiresAt = Date.now() + 60000;
+
+      function buildQuoteEmbed(expiresInSec, isExpired = false) {
+        const embed = new EmbedBuilder()
+          .setTitle(isExpired ? 'Swap Quote (Expired)' : 'Swap Quote')
+          .setColor(isExpired ? 0x666666 : 0x3498db)
+          .addFields(
+            { name: 'From', value: `${formatNumberForDisplay(amount)} ${fromTicker}`, inline: true },
+            { name: 'To', value: `~${formatNumberForDisplay(expectedOut)} ${toTicker}`, inline: true },
+            { name: 'Min (slippage)', value: `${formatNumberForDisplay(minOut)} ${toTicker}`, inline: true },
+            { name: 'Slippage', value: `${slippage}%`, inline: true },
+            { name: 'Expires in', value: isExpired ? 'Expired' : `${expiresInSec}s`, inline: true }
+          )
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        return embed;
+      }
+
+      const approveBtn = new ButtonBuilder().setCustomId(`swap-approve:${interaction.id}`).setLabel('Approve').setStyle(ButtonStyle.Success);
+      const declineBtn = new ButtonBuilder().setCustomId(`swap-decline:${interaction.id}`).setLabel('Decline').setStyle(ButtonStyle.Secondary);
+      const row = new ActionRowBuilder().addComponents(approveBtn, declineBtn);
+
+      await interaction.editReply({
+        embeds: [buildQuoteEmbed(60)],
+        components: [row]
+      });
+
+      const message = await interaction.fetchReply();
+      const messageId = message.id;
+      const pendingKey = `${guildId}:${userId}:${messageId}`;
+
+      const quotePayload = {
+        fromToken,
+        toToken,
+        amount: String(amount),
+        slippage,
+        expectedAmountOutRaw: quote.expectedAmountOutRaw,
+        minAmountOutRaw: quote.minAmountOutRaw,
+        toTokenDecimals,
+        fromTokenTicker: fromTicker,
+        toTokenTicker: toTicker,
+        expiresAt,
+        intervalId: null
+      };
+
+      const intervalId = setInterval(async () => {
+        const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+        if (remaining <= 0) {
+          clearInterval(intervalId);
+          pendingSwapQuotes.delete(pendingKey);
+          try {
+            const expiredEmbed = buildQuoteEmbed(0, true);
+            const disabledApprove = new ButtonBuilder().setCustomId(`swap-approve:${interaction.id}`).setLabel('Approve').setStyle(ButtonStyle.Success).setDisabled(true);
+            const disabledDecline = new ButtonBuilder().setCustomId(`swap-decline:${interaction.id}`).setLabel('Decline').setStyle(ButtonStyle.Secondary).setDisabled(true);
+            const disabledRow = new ActionRowBuilder().addComponents(disabledApprove, disabledDecline);
+            await message.edit({ embeds: [expiredEmbed], components: [disabledRow] });
+          } catch (e) {
+            console.error('[SWAP] Error updating expired embed:', e.message);
+          }
+          return;
+        }
+        try {
+          const embed = buildQuoteEmbed(remaining);
+          await message.edit({ embeds: [embed], components: [row] });
+        } catch (e) {
+          console.error('[SWAP] Error updating countdown:', e.message);
+        }
+      }, 5000);
+
+      quotePayload.intervalId = intervalId;
+      pendingSwapQuotes.set(pendingKey, quotePayload);
+
+    } catch (error) {
+      console.error('[SWAP] Error in swap command:', error);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
   } else if (commandName === 'withdraw-esdt') {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
@@ -16265,6 +16512,59 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // TOKEN AUTOCOMPLETE FOR SWAP (from-token with balance, to-token)
+  if (interaction.commandName === 'swap') {
+    const focusedOption = interaction.options.getFocused(true);
+    if (focusedOption.name === 'from-token' || focusedOption.name === 'to-token') {
+      try {
+        const focusedValue = focusedOption.value || '';
+        const guildId = interaction.guildId;
+        const userId = interaction.user.id;
+
+        const fundProject = await getCommunityFundProject(guildId);
+        const projects = await getProjects(guildId);
+        const projectName = getCommunityFundProjectName();
+        if (!fundProject || !projects?.[projectName]) {
+          await safeRespond(interaction, []);
+          return;
+        }
+
+        const supportedTokensRaw = projects[projectName].supportedTokens || [];
+        const supportedTokens = Array.isArray(supportedTokensRaw) ? supportedTokensRaw : (supportedTokensRaw || '').split(',').map(t => t.trim()).filter(t => t.length > 0);
+        const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+        const filtered = supportedTokens.filter(token => {
+          if (!esdtIdentifierRegex.test(token)) return false;
+          if (token.toUpperCase() === 'EGLD') return false;
+          const ticker = token.split('-')[0];
+          if (ticker.toUpperCase() === 'EGLD') return false;
+          return token.toLowerCase().includes(focusedValue.toLowerCase());
+        });
+
+        if (focusedOption.name === 'from-token') {
+          virtualAccounts.forceReloadData();
+          const userBalances = await virtualAccounts.getAllUserBalances(guildId, userId);
+          const choices = filtered.slice(0, 25).map(token => {
+            const balance = userBalances?.[token] || '0';
+            const displayName = token.includes('-') ? token.split('-')[0] : token;
+            const name = `${displayName} (${token}) - ${formatNumberForDisplay(balance)}`;
+            return { name: name.length > 100 ? name.substring(0, 97) + '...' : name, value: token };
+          });
+          await safeRespond(interaction, choices);
+        } else {
+          const choices = filtered.slice(0, 25).map(token => {
+            const displayName = token.includes('-') ? token.split('-')[0] : token;
+            return { name: `${displayName} (${token})`, value: token };
+          });
+          await safeRespond(interaction, choices);
+        }
+      } catch (error) {
+        console.error('[AUTOCOMPLETE] Error in swap token autocomplete:', error);
+        await safeRespond(interaction, []);
+      }
+      return;
+    }
+  }
+
   // TOKEN AUTOCOMPLETE FOR WITHDRAW-ESDT (based on user's actual holdings)
   if (interaction.commandName === 'withdraw-esdt' && interaction.options.getFocused(true).name === 'token-ticker') {
     try {
@@ -17593,6 +17893,169 @@ client.on('interactionCreate', async (interaction) => {
   const guildId = interaction.guildId;
 
   console.log(`[BUTTON] Button clicked: ${customId} in guild ${guildId}`);
+
+  // Handle swap Approve/Decline buttons
+  if (customId.startsWith('swap-approve:') || customId.startsWith('swap-decline:')) {
+    const userId = interaction.user.id;
+    const messageId = interaction.message?.id;
+    const pendingKey = `${guildId}:${userId}:${messageId}`;
+    const quote = pendingSwapQuotes.get(pendingKey);
+
+    if (customId.startsWith('swap-decline:')) {
+      if (quote?.intervalId) clearInterval(quote.intervalId);
+      pendingSwapQuotes.delete(pendingKey);
+      await interaction.update({ content: 'Swap cancelled.', embeds: [], components: [] });
+      return;
+    }
+
+    if (!quote) {
+      await interaction.reply({ content: '❌ Quote expired or not found. Please run /swap again.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+
+    if (Date.now() >= quote.expiresAt) {
+      if (quote.intervalId) clearInterval(quote.intervalId);
+      pendingSwapQuotes.delete(pendingKey);
+      await interaction.reply({ content: '❌ Quote expired. Please run /swap again.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+
+    if (quote.intervalId) clearInterval(quote.intervalId);
+    pendingSwapQuotes.delete(pendingKey);
+
+    await interaction.deferUpdate();
+
+    const { fromToken, toToken, amount, slippage, toTokenDecimals, fromTokenTicker, toTokenTicker } = quote;
+    const fundProject = await getCommunityFundProject(guildId);
+    const projects = await getProjects(guildId);
+    const projectName = getCommunityFundProjectName();
+    const fundProjectData = projects?.[projectName];
+
+    if (!fundProjectData?.walletPem) {
+      await interaction.followUp({ content: '❌ Community Fund has no wallet configured.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+
+    let pemToSend = fundProjectData.walletPem;
+    if (!pemToSend.includes('\n')) {
+      pemToSend = pemToSend
+        .replace(/-----BEGIN ([A-Z ]+)-----\s*/, '-----BEGIN $1-----\n')
+        .replace(/\s*-----END ([A-Z ]+)-----/, '\n-----END $1-----')
+        .replace(/ ([A-Za-z0-9+/=]{64})/g, '\n$1')
+        .replace(/ ([A-Za-z0-9+/=]+)-----END/, '\n$1-----END');
+    }
+
+    const deductResult = await virtualAccounts.deductFundsFromAccount(guildId, userId, fromToken, amount, `Swap: selling for ${toTokenTicker}`, 'swap');
+    if (!deductResult.success) {
+      await interaction.followUp({ content: `❌ Failed to deduct: ${deductResult.error}`, flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+
+    try {
+      const swapResult = await ashSwapAggregator(pemToSend, fromToken, toToken, amount, slippage);
+      const data = swapResult?.data;
+
+      if (data?.swapDetails?.outputs?.length > 0) {
+        for (const output of data.swapDetails.outputs) {
+          const rawAmount = output.amount || '0';
+          let decimals = toTokenDecimals;
+          const outToken = output.token;
+          if (outToken && outToken !== toToken) {
+            const stored = await getStoredTokenDecimals(guildId, outToken);
+            if (stored !== null) decimals = stored;
+            else {
+              try { decimals = await getTokenDecimals(outToken); } catch (e) { decimals = 18; }
+            }
+          }
+          const humanAmount = new BigNumber(rawAmount).dividedBy(new BigNumber(10).pow(decimals)).toString();
+          await virtualAccounts.addFundsToAccount(guildId, userId, outToken || toToken, humanAmount, data.transactionHash, 'swap', interaction.user.tag);
+        }
+        const totalReceived = data.swapDetails.outputs.reduce((sum, o) => sum.plus(new BigNumber(o.amount || '0')), new BigNumber(0));
+        const totalHuman = totalReceived.dividedBy(new BigNumber(10).pow(toTokenDecimals)).toString();
+
+        try {
+          await dbSwapTransactions.insertSwapTransaction({
+            guildId,
+            userId,
+            fromToken,
+            toToken,
+            amountSold: amount,
+            amountReceived: totalHuman,
+            slippagePercentage: parseFloat(slippage),
+            transactionHash: data.transactionHash,
+            status: 'completed'
+          });
+        } catch (dbErr) {
+          console.error('[SWAP] Error saving swap to DB:', dbErr.message);
+        }
+
+        const outputParts = await Promise.all(data.swapDetails.outputs.map(async (o) => {
+          let dec = toTokenDecimals;
+          if (o.token && o.token !== toToken) {
+            const s = await getStoredTokenDecimals(guildId, o.token);
+            if (s !== null) dec = s;
+            else try { dec = await getTokenDecimals(o.token); } catch (e) { dec = 18; }
+          }
+          const h = new BigNumber(o.amount || '0').dividedBy(new BigNumber(10).pow(dec)).toString();
+          return `${formatNumberForDisplay(h)} ${(o.token || '').split('-')[0]}`;
+        }));
+        const outputsText = outputParts.join(', ');
+
+        const successEmbed = new EmbedBuilder()
+          .setTitle('Swap Completed')
+          .setColor(0x00FF00)
+          .addFields(
+            { name: 'Received', value: outputsText, inline: true },
+            { name: 'Transaction', value: data.explorerUrl ? `[View on Explorer](${data.explorerUrl})` : data.transactionHash || 'N/A', inline: false }
+          )
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+
+        await interaction.message.edit({ embeds: [successEmbed], components: [] });
+        await interaction.followUp({ content: `Swap complete. You received ${outputsText}.`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        throw new Error('No outputs in swap response');
+      }
+    } catch (swapErr) {
+      await virtualAccounts.addFundsToAccount(guildId, userId, fromToken, amount, null, 'swap_refund', interaction.user.tag);
+
+      const txHash = swapErr.data?.transactionHash || swapErr.data?.data?.transactionHash;
+      const explorerUrl = swapErr.data?.explorerUrl || swapErr.data?.data?.explorerUrl;
+      const status = swapErr.status;
+
+      try {
+        await dbSwapTransactions.insertSwapTransaction({
+          guildId,
+          userId,
+          fromToken,
+          toToken,
+          amountSold: amount,
+          amountReceived: '0',
+          slippagePercentage: parseFloat(slippage),
+          transactionHash: txHash || null,
+          status: 'refunded'
+        });
+      } catch (dbErr) {
+        console.error('[SWAP] Error saving failed swap to DB:', dbErr.message);
+      }
+
+      let errMsg = swapErr.message || 'Swap failed';
+      if (status === 401) errMsg = 'Swap API not configured. Contact administrator.';
+      else if (status === 422) errMsg = 'Swap failed on-chain.';
+      else if (status >= 500) errMsg = 'Swap temporarily unavailable. Try again later.';
+
+      const failEmbed = new EmbedBuilder()
+        .setTitle('Swap Failed')
+        .setColor(0xFF0000)
+        .setDescription(errMsg + (explorerUrl ? `\n[View on Explorer](${explorerUrl})` : ''))
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+
+      await interaction.message.edit({ embeds: [failEmbed], components: [] });
+      await interaction.followUp({ content: `❌ ${errMsg} Your ${formatNumberForDisplay(amount)} ${fromTokenTicker} has been refunded.`, flags: [MessageFlags.Ephemeral] });
+    }
+    return;
+  }
 
   // Handle wallet registration button
   if (customId === 'register-wallet') {

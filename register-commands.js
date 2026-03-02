@@ -1111,6 +1111,46 @@ const commands = [
         default_member_permissions: null,
     },
     {
+        name: 'swap',
+        description: 'Swap tokens from your virtual account using AshSwap',
+        options: [
+            {
+                name: 'from-token',
+                description: 'Token to swap from (shows balance)',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'to-token',
+                description: 'Token to swap to',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                autocomplete: true
+            },
+            {
+                name: 'amount',
+                description: 'Amount to swap',
+                type: ApplicationCommandOptionType.Number,
+                required: true,
+                min_value: 0.000001
+            },
+            {
+                name: 'slippage',
+                description: 'Slippage tolerance (default 1%)',
+                type: ApplicationCommandOptionType.String,
+                required: false,
+                choices: [
+                    { name: '0.1%', value: '0.1' },
+                    { name: '0.5%', value: '0.5' },
+                    { name: '1%', value: '1' },
+                    { name: '2%', value: '2' }
+                ]
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
         name: 'help',
         description: 'Display all available bot commands organized by category',
         options: [],
