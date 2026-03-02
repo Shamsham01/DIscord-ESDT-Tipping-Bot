@@ -11500,14 +11500,17 @@ client.on('interactionCreate', async (interaction) => {
         const fromVal = `${formatNumberForDisplay(amount)} ${fromTicker}${fromUsd ? ` (≈ $${fromUsd})` : ''}`;
         const toVal = `~${formatNumberForDisplay(expectedOut)} ${toTicker}${toUsd ? ` (≈ $${toUsd})` : ''}`;
         const minVal = `${formatNumberForDisplay(minOut)} ${toTicker}`;
+        const blank = '\u200B'; // Discord requires non-empty; use zero-width for layout
         const embed = new EmbedBuilder()
           .setTitle(isExpired ? 'Swap Quote (Expired)' : 'Swap Quote')
           .setColor(isExpired ? 0x666666 : 0x3498db)
           .addFields(
             { name: 'From Token', value: fromVal, inline: true },
             { name: 'Slippage', value: `${slippage}%`, inline: true },
+            { name: blank, value: blank, inline: true },
             { name: 'To Token', value: toVal, inline: true },
             { name: 'Min (Received)', value: minVal, inline: true },
+            { name: blank, value: blank, inline: true },
             { name: 'Expires in', value: isExpired ? 'Expired' : `${expiresInSec}s`, inline: false }
           )
           .setTimestamp()
