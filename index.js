@@ -24634,9 +24634,9 @@ async function createStakingPoolEmbed(guildId, pool) {
     embed.addFields({ name: '🎯 Trait Requirements', value: traitText, inline: false });
     
     // Next Reward Distribution - Use Discord's live timestamp for countdown
+    const now = Date.now();
     if (pool.nextRewardDistributionAt) {
       const nextDistTimestamp = Math.floor(pool.nextRewardDistributionAt / 1000);
-      const now = Date.now();
       const timeUntil = pool.nextRewardDistributionAt - now;
       
       let countdownText;
