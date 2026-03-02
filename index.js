@@ -11483,13 +11483,28 @@ client.on('interactionCreate', async (interaction) => {
       const toTicker = toToken.split('-')[0];
       const expiresAt = Date.now() + 60000;
 
+      // Fetch USD prices for quote display
+      let fromPriceUsd = 0;
+      let toPriceUsd = 0;
+      try {
+        fromPriceUsd = await getTokenPriceUsd(fromToken);
+      } catch (e) { /* ignore */ }
+      try {
+        toPriceUsd = await getTokenPriceUsd(toToken);
+      } catch (e) { /* ignore */ }
+
+      const fromUsd = fromPriceUsd > 0 ? new BigNumber(amount).multipliedBy(fromPriceUsd).toFixed(2) : null;
+      const toUsd = toPriceUsd > 0 ? new BigNumber(expectedOut).multipliedBy(toPriceUsd).toFixed(2) : null;
+
       function buildQuoteEmbed(expiresInSec, isExpired = false) {
+        const fromVal = `${formatNumberForDisplay(amount)} ${fromTicker}${fromUsd ? ` (≈ $${fromUsd})` : ''}`;
+        const toVal = `~${formatNumberForDisplay(expectedOut)} ${toTicker}${toUsd ? ` (≈ $${toUsd})` : ''}`;
         const embed = new EmbedBuilder()
           .setTitle(isExpired ? 'Swap Quote (Expired)' : 'Swap Quote')
           .setColor(isExpired ? 0x666666 : 0x3498db)
           .addFields(
-            { name: 'From', value: `${formatNumberForDisplay(amount)} ${fromTicker}`, inline: true },
-            { name: 'To', value: `~${formatNumberForDisplay(expectedOut)} ${toTicker}`, inline: true },
+            { name: 'From', value: fromVal, inline: true },
+            { name: 'To', value: toVal, inline: true },
             { name: 'Min (slippage)', value: `${formatNumberForDisplay(minOut)} ${toTicker}`, inline: true },
             { name: 'Slippage', value: `${slippage}%`, inline: true },
             { name: 'Expires in', value: isExpired ? 'Expired' : `${expiresInSec}s`, inline: true }
@@ -11499,8 +11514,10 @@ client.on('interactionCreate', async (interaction) => {
         return embed;
       }
 
-      const approveBtn = new ButtonBuilder().setCustomId(`swap-approve:${interaction.id}`).setLabel('Approve').setStyle(ButtonStyle.Success);
-      const declineBtn = new ButtonBuilder().setCustomId(`swap-decline:${interaction.id}`).setLabel('Decline').setStyle(ButtonStyle.Secondary);
+      const message = await interaction.fetchReply();
+      const messageId = message.id;
+      const approveBtn = new ButtonBuilder().setCustomId(`swap-approve:${messageId}`).setLabel('Approve').setStyle(ButtonStyle.Success);
+      const declineBtn = new ButtonBuilder().setCustomId(`swap-decline:${messageId}`).setLabel('Decline').setStyle(ButtonStyle.Secondary);
       const row = new ActionRowBuilder().addComponents(approveBtn, declineBtn);
 
       await interaction.editReply({
@@ -11508,8 +11525,6 @@ client.on('interactionCreate', async (interaction) => {
         components: [row]
       });
 
-      const message = await interaction.fetchReply();
-      const messageId = message.id;
       const pendingKey = `${guildId}:${userId}:${messageId}`;
 
       const quotePayload = {
@@ -11523,7 +11538,10 @@ client.on('interactionCreate', async (interaction) => {
         fromTokenTicker: fromTicker,
         toTokenTicker: toTicker,
         expiresAt,
-        intervalId: null
+        intervalId: null,
+        interaction,
+        buildQuoteEmbed,
+        row
       };
 
       const intervalId = setInterval(async () => {
@@ -11533,10 +11551,10 @@ client.on('interactionCreate', async (interaction) => {
           pendingSwapQuotes.delete(pendingKey);
           try {
             const expiredEmbed = buildQuoteEmbed(0, true);
-            const disabledApprove = new ButtonBuilder().setCustomId(`swap-approve:${interaction.id}`).setLabel('Approve').setStyle(ButtonStyle.Success).setDisabled(true);
-            const disabledDecline = new ButtonBuilder().setCustomId(`swap-decline:${interaction.id}`).setLabel('Decline').setStyle(ButtonStyle.Secondary).setDisabled(true);
+            const disabledApprove = new ButtonBuilder().setCustomId(`swap-approve:${messageId}`).setLabel('Approve').setStyle(ButtonStyle.Success).setDisabled(true);
+            const disabledDecline = new ButtonBuilder().setCustomId(`swap-decline:${messageId}`).setLabel('Decline').setStyle(ButtonStyle.Secondary).setDisabled(true);
             const disabledRow = new ActionRowBuilder().addComponents(disabledApprove, disabledDecline);
-            await message.edit({ embeds: [expiredEmbed], components: [disabledRow] });
+            await interaction.editReply({ embeds: [expiredEmbed], components: [disabledRow] });
           } catch (e) {
             console.error('[SWAP] Error updating expired embed:', e.message);
           }
@@ -11544,7 +11562,7 @@ client.on('interactionCreate', async (interaction) => {
         }
         try {
           const embed = buildQuoteEmbed(remaining);
-          await message.edit({ embeds: [embed], components: [row] });
+          await interaction.editReply({ embeds: [embed], components: [row] });
         } catch (e) {
           console.error('[SWAP] Error updating countdown:', e.message);
         }
@@ -17904,7 +17922,13 @@ client.on('interactionCreate', async (interaction) => {
     if (customId.startsWith('swap-decline:')) {
       if (quote?.intervalId) clearInterval(quote.intervalId);
       pendingSwapQuotes.delete(pendingKey);
-      await interaction.update({ content: 'Swap cancelled.', embeds: [], components: [] });
+      const declineEmbed = new EmbedBuilder()
+        .setTitle('Swap Cancelled')
+        .setDescription('You declined the swap.')
+        .setColor(0x666666)
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+      await interaction.update({ embeds: [declineEmbed], components: [] });
       return;
     }
 
@@ -17923,9 +17947,17 @@ client.on('interactionCreate', async (interaction) => {
     if (quote.intervalId) clearInterval(quote.intervalId);
     pendingSwapQuotes.delete(pendingKey);
 
-    await interaction.deferUpdate();
-
     const { fromToken, toToken, amount, slippage, toTokenDecimals, fromTokenTicker, toTokenTicker } = quote;
+
+    // Immediate feedback: show "Processing swap..."
+    const processingEmbed = new EmbedBuilder()
+      .setTitle('Processing Swap')
+      .setDescription('Executing swap on-chain. Please wait...')
+      .setColor(0xF59E0B)
+      .setTimestamp()
+      .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+    await interaction.update({ embeds: [processingEmbed], components: [] });
+
     const fundProject = await getCommunityFundProject(guildId);
     const projects = await getProjects(guildId);
     const projectName = getCommunityFundProjectName();
@@ -18001,18 +18033,35 @@ client.on('interactionCreate', async (interaction) => {
         }));
         const outputsText = outputParts.join(', ');
 
+        // Get VA balances for display
+        const balanceAfterFrom = deductResult.newBalance || '0';
+        const balancesAfter = await virtualAccounts.getAllUserBalances(guildId, userId);
+        const balanceAfterTo = balancesAfter?.[toToken] || totalHuman;
+
+        let toUsdSuccess = null;
+        try {
+          const toPrice = await getTokenPriceUsd(toToken);
+          if (toPrice > 0) toUsdSuccess = new BigNumber(totalHuman).multipliedBy(toPrice).toFixed(2);
+        } catch (e) { /* ignore */ }
+
         const successEmbed = new EmbedBuilder()
           .setTitle('Swap Completed')
           .setColor(0x00FF00)
           .addFields(
-            { name: 'Received', value: outputsText, inline: true },
-            { name: 'Transaction', value: data.explorerUrl ? `[View on Explorer](${data.explorerUrl})` : data.transactionHash || 'N/A', inline: false }
+            { name: 'Sold', value: `${formatNumberForDisplay(amount)} ${fromTokenTicker}`, inline: true },
+            { name: 'Received', value: `${outputsText}${toUsdSuccess ? ` (≈ $${toUsdSuccess})` : ''}`, inline: true },
+            { name: 'New VA Balance', value: `${fromTokenTicker}: ${formatNumberForDisplay(balanceAfterFrom)} | ${toTokenTicker}: ${formatNumberForDisplay(balanceAfterTo)}`, inline: false },
+            { name: 'Transaction', value: data.explorerUrl ? `[View on Explorer](${data.explorerUrl})` : (data.transactionHash || 'N/A'), inline: false }
           )
           .setTimestamp()
           .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
 
-        await interaction.message.edit({ embeds: [successEmbed], components: [] });
-        await interaction.followUp({ content: `Swap complete. You received ${outputsText}.`, flags: [MessageFlags.Ephemeral] });
+        try {
+          await interaction.message.edit({ embeds: [successEmbed], components: [] });
+        } catch (editErr) {
+          console.error('[SWAP] Error editing success message:', editErr.message);
+          await interaction.followUp({ embeds: [successEmbed], flags: [MessageFlags.Ephemeral] });
+        }
       } else {
         throw new Error('No outputs in swap response');
       }
@@ -18047,12 +18096,16 @@ client.on('interactionCreate', async (interaction) => {
       const failEmbed = new EmbedBuilder()
         .setTitle('Swap Failed')
         .setColor(0xFF0000)
-        .setDescription(errMsg + (explorerUrl ? `\n[View on Explorer](${explorerUrl})` : ''))
+        .setDescription(errMsg + (explorerUrl ? `\n[View on Explorer](${explorerUrl})` : '') + `\n\nYour ${formatNumberForDisplay(amount)} ${fromTokenTicker} has been refunded to your VA.`)
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
 
-      await interaction.message.edit({ embeds: [failEmbed], components: [] });
-      await interaction.followUp({ content: `❌ ${errMsg} Your ${formatNumberForDisplay(amount)} ${fromTokenTicker} has been refunded.`, flags: [MessageFlags.Ephemeral] });
+      try {
+        await interaction.message.edit({ embeds: [failEmbed], components: [] });
+      } catch (editErr) {
+        console.error('[SWAP] Error editing fail message:', editErr.message);
+        await interaction.followUp({ embeds: [failEmbed], flags: [MessageFlags.Ephemeral] });
+      }
     }
     return;
   }
