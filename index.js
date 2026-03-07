@@ -12694,9 +12694,10 @@ client.on('interactionCreate', async (interaction) => {
       const thumbnailUrl = tokenLogoUrl || 'https://i.ibb.co/20MLJZNH/lottery-logo.png';
       
       // Create embed
+      const oddsDisplay = lotteryHelpers.calculateLotteryOdds(winningNumbersCount, totalPoolNumbers);
       const lotteryEmbed = new EmbedBuilder()
         .setTitle('🎰 Lottery')
-        .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${winningNumbersCount} numbers from 1 to ${totalPoolNumbers}`)
+        .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${winningNumbersCount} numbers from 1 to ${totalPoolNumbers} • **Odds:** ${oddsDisplay}`)
         .addFields([
           { name: '🎫 Ticket Price', value: ticketPriceDisplay, inline: true },
           { name: '💰 Prize Pool', value: prizePoolDisplay, inline: true },
@@ -23307,9 +23308,10 @@ async function updateLotteryEmbed(guildId, lotteryId) {
     const tokenLogoUrl = await getTokenLogoUrl(lottery.tokenIdentifier);
     const thumbnailUrl = tokenLogoUrl || 'https://i.ibb.co/20MLJZNH/lottery-logo.png';
     
+    const oddsDisplay = lotteryHelpers.calculateLotteryOdds(lottery.winningNumbersCount, lottery.totalPoolNumbers);
     const lotteryEmbed = new EmbedBuilder()
       .setTitle(lottery.isRollover ? '🎰 Lottery (Rollover)' : '🎰 Lottery')
-      .setDescription(`${lottery.isRollover ? `**Rollover #${lottery.rolloverCount}** - No winners in previous draw!\n\n` : ''}**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers}`)
+      .setDescription(`${lottery.isRollover ? `**Rollover #${lottery.rolloverCount}** - No winners in previous draw!\n\n` : ''}**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers} • **Odds:** ${oddsDisplay}`)
       .addFields([
         { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${lottery.tokenTicker} (≈ $${ticketPriceUsdValue})`, inline: true },
         { name: '💰 Prize Pool', value: `${prizePoolHuman} ${lottery.tokenTicker} (≈ $${prizePoolUsdValue})`, inline: true },
@@ -27115,9 +27117,10 @@ async function forwardLotteryToSubscribers(sourceGuildId, lotteryId) {
     const thumbnailUrl = tokenLogoUrl || 'https://i.ibb.co/20MLJZNH/lottery-logo.png';
     
     // Create forward embed
+    const oddsDisplay = lotteryHelpers.calculateLotteryOdds(lottery.winningNumbersCount, lottery.totalPoolNumbers);
     const forwardEmbed = new EmbedBuilder()
       .setTitle(`🎰 ESDT Lottery`)
-      .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers}`)
+      .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers} • **Odds:** ${oddsDisplay}`)
       .addFields([
         { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${tokenTicker}`, inline: true },
         { name: '💰 Prize Pool', value: `${prizePoolHuman} ${tokenTicker}`, inline: true },
@@ -27327,7 +27330,7 @@ client.on('ready', async () => {
   }, 10 * 60 * 1000); // Update every 10 minutes
   
   console.log('RPS challenge cleanup scheduled (every 5 minutes)');
-  console.log('Football match cleanup scheduled (once a day)');
+  console.log('Football match embeds retained (no cleanup)');
   console.log('Auction expiration check scheduled (every minute)');
   console.log('Lottery draw check scheduled (every minute)');
   console.log('Lottery embed update scheduled (every 10 minutes)');
@@ -27451,7 +27454,7 @@ client.on('ready', async () => {
       console.log('[CLEANUP]   Auctions: FINISHED, CANCELLED, EXPIRED');
       console.log('[CLEANUP]   Staking Pools: CLOSED');
       console.log('[CLEANUP]   Lotteries: EXPIRED');
-      console.log('[CLEANUP]   Football Matches: FINISHED');
+      console.log('[CLEANUP]   Football Matches: SKIPPED (embeds are retained for history)');
       
       const ONE_DAY_MS = 24 * 60 * 60 * 1000;
       const oneDayAgo = Date.now() - ONE_DAY_MS;
@@ -27459,7 +27462,6 @@ client.on('ready', async () => {
       const AUCTION_STATUSES = ['FINISHED', 'CANCELLED', 'EXPIRED'];
       const STAKING_POOL_STATUSES = ['CLOSED'];
       const LOTTERY_STATUSES = ['EXPIRED'];
-      const FOOTBALL_MATCH_STATUSES = ['FINISHED'];
       
       console.log(`[CLEANUP] Cutoff time: ${new Date(oneDayAgo).toISOString()} (items created before this will be cleaned)`);
       
@@ -27467,7 +27469,6 @@ client.on('ready', async () => {
       let auctionsDeleted = 0;
       let stakingPoolsDeleted = 0;
       let lotteriesDeleted = 0;
-      let footballMatchesDeleted = 0;
       let errors = 0;
       
       // Require supabase once for both listings and auctions cleanup
@@ -28100,197 +28101,14 @@ client.on('ready', async () => {
         console.error('[CLEANUP] Error cleaning up lotteries:', error.message);
       }
       
-      // Clean up old football matches
-      // Note: Football matches use match_guilds table for message_id/thread_id per guild
-      // We need to join with football_matches to check status and updated_at
-      try {
-        // First, get all FINISHED matches that are old enough
-        const oneDayAgoISO = new Date(oneDayAgo).toISOString();
-        const { data: finishedMatches, error: matchError } = await supabase
-          .from('football_matches')
-          .select('match_id, status, updated_at, home_team, away_team')
-          .in('status', FOOTBALL_MATCH_STATUSES)
-          .lt('updated_at', oneDayAgoISO);
-        
-        if (matchError) {
-          console.error('[CLEANUP] Error querying football matches:', matchError);
-        } else if (finishedMatches && finishedMatches.length > 0) {
-          // Get all match_guilds relationships for these matches
-          const matchIds = finishedMatches.map(m => m.match_id);
-          const { data: matchGuilds, error: guildRelError } = await supabase
-            .from('match_guilds')
-            .select('match_id, guild_id, message_id, thread_id')
-            .in('match_id', matchIds)
-            .not('message_id', 'is', null);
-          
-          if (guildRelError) {
-            console.error('[CLEANUP] Error querying match_guilds:', guildRelError);
-          } else if (matchGuilds && matchGuilds.length > 0) {
-            console.log(`[CLEANUP] ✅ Found ${matchGuilds.length} old football match embed(s) to clean up (finished more than 1 day ago)`);
-            let alreadyDeletedCount = 0;
-            
-            // Create a map for quick lookup
-            const matchMap = new Map();
-            finishedMatches.forEach(m => {
-              matchMap.set(m.match_id, m);
-            });
-            
-            for (const matchGuild of matchGuilds) {
-              try {
-                const match = matchMap.get(matchGuild.match_id);
-                if (!match || match.status !== 'FINISHED') {
-                  continue; // Skip if match not found or not FINISHED
-                }
-                
-                const guild = await client.guilds.fetch(matchGuild.guild_id).catch((err) => {
-                  console.error(`[CLEANUP] Error fetching guild ${matchGuild.guild_id}:`, err.message, err.code);
-                  return null;
-                });
-                if (!guild) {
-                  // Mark as cleaned if guild not found (bot likely left)
-                  await supabase
-                    .from('match_guilds')
-                    .update({ message_id: null })
-                    .eq('match_id', matchGuild.match_id)
-                    .eq('guild_id', matchGuild.guild_id);
-                  continue;
-                }
-                
-                // Find the channel by searching for the message
-                // (channel_id is not stored in match_guilds, so we need to find it)
-                let matchChannel = null;
-                for (const channel of guild.channels.cache.values()) {
-                  if (channel.type === 0) { // Text channel
-                    try {
-                      const message = await channel.messages.fetch(matchGuild.message_id).catch(() => null);
-                      if (message) {
-                        matchChannel = channel;
-                        break;
-                      }
-                    } catch (error) {
-                      // Message not found in this channel, continue searching
-                    }
-                  }
-                }
-                
-                if (!matchChannel) {
-                  // Channel not found or message already deleted - mark in database
-                  await supabase
-                    .from('match_guilds')
-                    .update({ message_id: null })
-                    .eq('match_id', matchGuild.match_id)
-                    .eq('guild_id', matchGuild.guild_id);
-                  alreadyDeletedCount++;
-                  continue;
-                }
-                
-                // Check if it's a forum channel
-                const isForumChannel = matchChannel.type === ChannelType.GuildForum;
-                let messageDeleted = false;
-                
-                if (isForumChannel && matchGuild.thread_id) {
-                  // For forum channels, the thread IS the post - delete the thread
-                  try {
-                    const thread = await matchChannel.threads.fetch(matchGuild.thread_id).catch((err) => {
-                      console.error(`[CLEANUP] Error fetching thread ${matchGuild.thread_id}:`, err.message, err.code);
-                      return null;
-                    });
-                    if (thread) {
-                      await thread.delete();
-                      console.log(`[CLEANUP] ✅ Deleted forum post/thread: ${match.home_team} vs ${match.away_team} (${matchGuild.match_id})`);
-                      footballMatchesDeleted++;
-                      messageDeleted = true;
-                    } else {
-                      // Thread already deleted - mark in database
-                      messageDeleted = true;
-                      alreadyDeletedCount++;
-                    }
-                  } catch (threadError) {
-                    if (threadError.code === 10003) {
-                      // Thread already deleted - mark in database
-                      messageDeleted = true;
-                      alreadyDeletedCount++;
-                    } else {
-                      console.error(`[CLEANUP] ❌ Error deleting thread ${matchGuild.match_id}:`, threadError.message, threadError.code);
-                      errors++;
-                    }
-                  }
-                } else {
-                  // For regular channels, delete the message
-                  try {
-                    const message = await matchChannel.messages.fetch(matchGuild.message_id).catch((err) => {
-                      console.error(`[CLEANUP] Error fetching message ${matchGuild.message_id}:`, err.message, err.code);
-                      return null;
-                    });
-                    if (message) {
-                      await message.delete();
-                      console.log(`[CLEANUP] ✅ Deleted football match message: ${match.home_team} vs ${match.away_team} (${matchGuild.match_id})`);
-                      footballMatchesDeleted++;
-                      messageDeleted = true;
-                    } else {
-                      // Message already deleted - mark in database
-                      messageDeleted = true;
-                      alreadyDeletedCount++;
-                    }
-                    
-                    // Also delete thread if it exists
-                    if (matchGuild.thread_id) {
-                      const thread = await matchChannel.threads.fetch(matchGuild.thread_id).catch(() => null);
-                      if (thread) {
-                        await thread.delete().catch((err) => {
-                          console.error(`[CLEANUP] Error deleting thread ${matchGuild.thread_id}:`, err.message);
-                        });
-                      }
-                    }
-                  } catch (msgError) {
-                    if (msgError.code === 10008) {
-                      // Message already deleted - mark in database
-                      messageDeleted = true;
-                      alreadyDeletedCount++;
-                    } else {
-                      console.error(`[CLEANUP] ❌ Error deleting message ${matchGuild.match_id}:`, msgError.message, msgError.code);
-                      errors++;
-                    }
-                  }
-                }
-                
-                // Mark message_id as null in database if message was deleted or already deleted
-                // This prevents re-checking the same deleted messages on next cleanup
-                if (messageDeleted) {
-                  await supabase
-                    .from('match_guilds')
-                    .update({ message_id: null })
-                    .eq('match_id', matchGuild.match_id)
-                    .eq('guild_id', matchGuild.guild_id);
-                }
-                
-                await new Promise(resolve => setTimeout(resolve, 500));
-              } catch (error) {
-                console.error(`[CLEANUP] ❌ Error processing football match ${matchGuild.match_id}:`, error.message);
-                errors++;
-              }
-            }
-            
-            if (alreadyDeletedCount > 0) {
-              console.log(`[CLEANUP] ℹ️ ${alreadyDeletedCount} football match message(s) were already deleted (marked in database to prevent re-checking)`);
-            }
-          } else {
-            console.log('[CLEANUP] ℹ️ No finished football matches found with message embeds older than 1 day');
-          }
-        } else {
-          console.log('[CLEANUP] ℹ️ No finished football matches found older than 1 day');
-        }
-      } catch (error) {
-        console.error('[CLEANUP] Error cleaning up football matches:', error.message);
-      }
+      // Football match embeds are NOT cleaned up - they are retained for history
       
-      if (listingsDeleted > 0 || auctionsDeleted > 0 || stakingPoolsDeleted > 0 || lotteriesDeleted > 0 || footballMatchesDeleted > 0) {
+      if (listingsDeleted > 0 || auctionsDeleted > 0 || stakingPoolsDeleted > 0 || lotteriesDeleted > 0) {
         const parts = [];
         if (listingsDeleted > 0) parts.push(`${listingsDeleted} listing(s)`);
         if (auctionsDeleted > 0) parts.push(`${auctionsDeleted} auction(s)`);
         if (stakingPoolsDeleted > 0) parts.push(`${stakingPoolsDeleted} staking pool(s)`);
         if (lotteriesDeleted > 0) parts.push(`${lotteriesDeleted} lottery/lotteries`);
-        if (footballMatchesDeleted > 0) parts.push(`${footballMatchesDeleted} football match(es)`);
         console.log(`[CLEANUP] ✅ Cleanup complete: ${parts.join(', ')} deleted`);
       } else if (errors > 0) {
         console.log(`[CLEANUP] ⚠️ Cleanup completed with ${errors} error(s)`);

@@ -156,6 +156,31 @@ function calculatePrizeDistribution(totalPrizeWei, winnerCount, commissionPercen
 }
 
 /**
+ * Calculate lottery odds (1 in X) for matching all winning numbers
+ * Odds = C(totalPoolNumbers, winningNumbersCount) = 1 in X combinations
+ * @param {number} winningNumbersCount - Number of numbers to pick
+ * @param {number} totalPoolNumbers - Total numbers in pool (e.g., 50)
+ * @returns {string} Odds as "1/X" (e.g., "1/19600" or "1/440")
+ */
+function calculateLotteryOdds(winningNumbersCount, totalPoolNumbers) {
+  if (winningNumbersCount < 1 || totalPoolNumbers < 1 || winningNumbersCount > totalPoolNumbers) {
+    return '1/0';
+  }
+  if (winningNumbersCount === 1) {
+    return `1/${totalPoolNumbers}`;
+  }
+  // C(n,k) = n! / (k! * (n-k)!) = (n * (n-1) * ... * (n-k+1)) / (1 * 2 * ... * k)
+  let numerator = new BigNumber(1);
+  let denominator = new BigNumber(1);
+  for (let i = 0; i < winningNumbersCount; i++) {
+    numerator = numerator.multipliedBy(totalPoolNumbers - i);
+    denominator = denominator.multipliedBy(i + 1);
+  }
+  const combinations = numerator.dividedBy(denominator).integerValue(BigNumber.ROUND_DOWN);
+  return `1/${combinations.toString()}`;
+}
+
+/**
  * Format numbers array as comma-separated string for display
  * @param {number[]} numbers - Array of numbers
  * @returns {string} Comma-separated string
@@ -192,6 +217,7 @@ module.exports = {
   checkTicketMatch,
   calculatePrizePool,
   calculatePrizeDistribution,
+  calculateLotteryOdds,
   formatNumbersForDisplay,
   parseNumbersFromString
 };

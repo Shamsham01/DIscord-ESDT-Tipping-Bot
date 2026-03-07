@@ -676,7 +676,7 @@ The bot automatically cleans up old messages to keep channels tidy:
 * **Finished Listings**: NFT listings that are sold, canceled, or expired are automatically deleted
 * **Ended Auctions**: Completed auctions are automatically removed
 * **Expired Challenges**: RPS challenges that expired are cleaned up
-* **Finished Matches**: Football betting matches that ended are cleaned up
+* **Football Matches**: Football betting embeds are retained for history (not cleaned up)
 
 This helps maintain clean, organized channels and makes it easier for users to find active listings and activities.
 
