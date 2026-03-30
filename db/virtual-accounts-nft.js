@@ -634,6 +634,7 @@ async function updateListing(guildId, listingId, updates) {
     if (updates.threadId !== undefined) updateData.thread_id = updates.threadId;
     if (updates.channelId !== undefined) updateData.channel_id = updates.channelId;
     if (updates.expiresAt !== undefined) updateData.expires_at = updates.expiresAt;
+    if (updates.nftImageUrl !== undefined) updateData.nft_image_url = updates.nftImageUrl;
     
     updateData.updated_at = new Date().toISOString();
     

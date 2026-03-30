@@ -10426,7 +10426,8 @@ client.on('interactionCreate', async (interaction) => {
         amount: amount,
         tokenType: listingTokenType,
         nftName: nft.nft_name,
-        nftImageUrl: nft.nft_image_url,
+        // Persist API-resolved URL (same as embed), not only raw balance field — updates rely on this
+        nftImageUrl: nftImageUrl || nft.nft_image_url || null,
         title: title,
         description: description,
         priceTokenIdentifier: tokenIdentifier,
@@ -28711,6 +28712,7 @@ async function updateNFTListingEmbed(guildId, listingId) {
 
     const message = await channel.messages.fetch(listing.messageId);
     if (!message) return;
+    const previousThumbnailUrl = message.embeds?.[0]?.thumbnail?.url || null;
 
     const isExpired = listing.expiresAt && Date.now() > listing.expiresAt;
     const isSold = listing.status === 'SOLD';
@@ -28784,6 +28786,18 @@ async function updateNFTListingEmbed(guildId, listingId) {
         console.error(`[NFT-MARKETPLACE] Error fetching NFT details for listing update: ${error.message}`);
         // Use stored image URL as fallback
         nftImageUrl = listing.nftImageUrl;
+      }
+    }
+
+    if (!nftImageUrl && previousThumbnailUrl) {
+      nftImageUrl = previousThumbnailUrl;
+    }
+
+    if (nftImageUrl && !listing.nftImageUrl) {
+      try {
+        await virtualAccountsNFT.updateListing(guildId, listingId, { nftImageUrl });
+      } catch (e) {
+        console.error(`[NFT-MARKETPLACE] Could not backfill nft_image_url for ${listingId}:`, e.message);
       }
     }
     
