@@ -69,6 +69,7 @@ if (missingVars.length > 0) {
 const { Client, IntentsBitField, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags, ChannelType, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const BigNumber = require('bignumber.js');
+const { fetchMultiversXNftDisplayState } = require('./utils/multiversx-nft-display');
 
 // Import virtual accounts and blockchain listener
 const virtualAccounts = require('./virtual-accounts.js');
@@ -9472,435 +9473,19 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Fetch full NFT details from MultiversX API
-      let nftDetails = null;
-      let nftImageUrl = nft.nft_image_url;
-      let attributes = [];
-      let metadata = nft.metadata || {};
-      
-      // Helper function to convert IPFS URL to HTTP gateway URL
-      const convertIPFSToGateway = (ipfsUrl) => {
-        if (!ipfsUrl) return ipfsUrl;
-        if (ipfsUrl.startsWith('ipfs://')) {
-          const ipfsHash = ipfsUrl.replace('ipfs://', '');
-          return `https://ipfs.io/ipfs/${ipfsHash}`;
+      const displayState = await fetchMultiversXNftDisplayState(nft, collection, {
+        onProgress: async (message) => {
+          await interaction.editReply({
+            content: message,
+            flags: isPublic ? [] : [MessageFlags.Ephemeral]
+          });
         }
-        return ipfsUrl;
-      };
-      
-      // Convert stored image URL if it's IPFS
-      if (nftImageUrl && nftImageUrl.startsWith('ipfs://')) {
-        nftImageUrl = convertIPFSToGateway(nftImageUrl);
-      }
-      
-      try {
-        await interaction.editReply({ content: '🔄 Fetching NFT details from MultiversX...', flags: [MessageFlags.Ephemeral] });
-        
-        const nftUrl = `https://api.multiversx.com/nfts/${nft.identifier}`;
-        const nftResponse = await fetch(nftUrl);
-        
-        if (nftResponse.ok) {
-          nftDetails = await nftResponse.json();
-          
-          // Decode URIs array to get IPFS URLs (standard MultiversX format)
-          let ipfsImageUrl = null;
-          let ipfsJsonUrl = null;
-          if (nftDetails.uris && Array.isArray(nftDetails.uris) && nftDetails.uris.length > 0) {
-            for (const uri of nftDetails.uris) {
-              try {
-                const decodedUri = Buffer.from(uri, 'base64').toString('utf-8');
-                console.log(`[SHOW-NFT] Decoded URI: ${decodedUri}`);
-                
-                if (decodedUri.includes('.png') || decodedUri.includes('.jpg') || decodedUri.includes('.jpeg') || decodedUri.includes('.gif') || decodedUri.includes('.webp')) {
-                  ipfsImageUrl = decodedUri;
-                } else if (decodedUri.includes('.json')) {
-                  ipfsJsonUrl = decodedUri;
-                }
-              } catch (uriError) {
-                console.log(`[SHOW-NFT] Could not decode URI: ${uriError.message}`);
-              }
-            }
-          }
-          
-          // Update image URL if available from API - check multiple sources
-          if (nftDetails.url && !nftDetails.url.includes('default.png')) {
-            nftImageUrl = convertIPFSToGateway(nftDetails.url);
-          } else if (ipfsImageUrl) {
-            nftImageUrl = convertIPFSToGateway(ipfsImageUrl);
-            console.log(`[SHOW-NFT] Using image from decoded URIs: ${nftImageUrl}`);
-          } else if (nftDetails.media && nftDetails.media.length > 0) {
-            const mediaUrl = nftDetails.media[0].url || nftDetails.media[0].thumbnailUrl;
-            if (mediaUrl && !mediaUrl.includes('default.png')) {
-              nftImageUrl = convertIPFSToGateway(mediaUrl);
-            }
-          }
-          
-          // Also check for image in metadata
-          if (!nftImageUrl && nftDetails.metadata) {
-            try {
-              if (typeof nftDetails.metadata === 'string') {
-                const decoded = Buffer.from(nftDetails.metadata, 'base64').toString('utf-8');
-                const parsed = JSON.parse(decoded);
-                if (parsed.image) {
-                  nftImageUrl = convertIPFSToGateway(parsed.image);
-                }
-              } else if (typeof nftDetails.metadata === 'object' && nftDetails.metadata.image) {
-                nftImageUrl = convertIPFSToGateway(nftDetails.metadata.image);
-              }
-            } catch (metaError) {
-              // Ignore metadata parsing errors for image
-            }
-          }
-          
-          // Decode attributes field to extract metadata URI (MultiversX standard format)
-          if (nftDetails.attributes && typeof nftDetails.attributes === 'string') {
-            try {
-              const decodedAttributes = Buffer.from(nftDetails.attributes, 'base64').toString('utf-8');
-              console.log(`[SHOW-NFT] Decoded attributes field: ${decodedAttributes}`);
-              
-              // Parse format: "tags:...;metadata:..."
-              const metadataMatch = decodedAttributes.match(/metadata:([^\s;]+)/);
-              if (metadataMatch && metadataMatch[1]) {
-                let metadataPath = metadataMatch[1];
-                // If it's just a path, construct full IPFS URL
-                if (!metadataPath.startsWith('http') && !metadataPath.startsWith('ipfs://')) {
-                  // Extract IPFS hash from other URIs or use the path directly
-                  if (ipfsJsonUrl) {
-                    // Use the decoded JSON URI we already found
-                    console.log(`[SHOW-NFT] Using JSON URI from uris array: ${ipfsJsonUrl}`);
-                  } else {
-                    // Try to construct from hash if available
-                    if (nftDetails.hash) {
-                      try {
-                        const hashDecoded = Buffer.from(nftDetails.hash, 'base64').toString('utf-8');
-                        metadataPath = `ipfs://${hashDecoded}/${metadataPath}`;
-                        console.log(`[SHOW-NFT] Constructed metadata path: ${metadataPath}`);
-                      } catch (hashError) {
-                        console.log(`[SHOW-NFT] Could not decode hash: ${hashError.message}`);
-                      }
-                    }
-                  }
-                } else {
-                  metadataPath = metadataMatch[1];
-                }
-                
-                // Use the JSON URL from uris if we have it, otherwise use the constructed path
-                const jsonUrlToFetch = ipfsJsonUrl || (metadataPath.startsWith('ipfs://') ? metadataPath : `ipfs://${metadataPath}`);
-                console.log(`[SHOW-NFT] Will fetch metadata from: ${jsonUrlToFetch}`);
-                
-                // Helper function to fetch JSON and extract attributes
-                const fetchJsonMetadata = async (url) => {
-                  if (url.startsWith('ipfs://')) {
-                    const ipfsHash = url.replace('ipfs://', '');
-                    const ipfsGateways = [
-                      `https://ipfs.io/ipfs/${ipfsHash}`,
-                      `https://cloudflare-ipfs.com/ipfs/${ipfsHash}`,
-                      `https://gateway.pinata.cloud/ipfs/${ipfsHash}`,
-                      `https://dweb.link/ipfs/${ipfsHash}`
-                    ];
-                    
-                    // Try each gateway until one works
-                    for (const gateway of ipfsGateways) {
-                      let timeoutId = null;
-                      try {
-                        console.log(`[SHOW-NFT] Attempting to fetch JSON metadata from ${gateway}`);
-                        const controller = new AbortController();
-                        timeoutId = setTimeout(() => controller.abort(), 5000);
-                        const ipfsResponse = await fetch(gateway, { 
-                          signal: controller.signal
-                        });
-                        if (timeoutId) clearTimeout(timeoutId);
-                        
-                        if (ipfsResponse.ok) {
-                          const ipfsData = await ipfsResponse.json();
-                          console.log(`[SHOW-NFT] Successfully fetched JSON metadata from ${gateway}`);
-                          
-                          // Extract attributes from IPFS JSON metadata
-                          if (ipfsData.attributes && Array.isArray(ipfsData.attributes)) {
-                            attributes = ipfsData.attributes;
-                            console.log(`[SHOW-NFT] Found ${attributes.length} attributes from IPFS JSON metadata`);
-                            
-                            // Also update image URL if found in IPFS JSON metadata
-                            if (ipfsData.image && !nftImageUrl) {
-                              nftImageUrl = convertIPFSToGateway(ipfsData.image);
-                              console.log(`[SHOW-NFT] Updated image URL from IPFS JSON metadata: ${nftImageUrl}`);
-                            }
-                            return true; // Success
-                          } else if (ipfsData.traits && Array.isArray(ipfsData.traits)) {
-                            attributes = ipfsData.traits;
-                            console.log(`[SHOW-NFT] Found ${attributes.length} traits from IPFS JSON metadata`);
-                            
-                            // Also update image URL if found in IPFS JSON metadata
-                            if (ipfsData.image && !nftImageUrl) {
-                              nftImageUrl = convertIPFSToGateway(ipfsData.image);
-                              console.log(`[SHOW-NFT] Updated image URL from IPFS JSON metadata: ${nftImageUrl}`);
-                            }
-                            return true; // Success
-                          }
-                        }
-                      } catch (ipfsError) {
-                        if (timeoutId) clearTimeout(timeoutId);
-                        console.log(`[SHOW-NFT] Failed to fetch JSON from ${gateway}:`, ipfsError.message);
-                        continue;
-                      }
-                    }
-                  } else if (url.startsWith('http')) {
-                    // Direct HTTP URL
-                    try {
-                      console.log(`[SHOW-NFT] Fetching JSON metadata from direct URL: ${url}`);
-                      const controller = new AbortController();
-                      const timeoutId = setTimeout(() => controller.abort(), 5000);
-                      const jsonResponse = await fetch(url, { 
-                        signal: controller.signal
-                      });
-                      clearTimeout(timeoutId);
-                      
-                      if (jsonResponse.ok) {
-                        const jsonData = await jsonResponse.json();
-                        if (jsonData.attributes && Array.isArray(jsonData.attributes)) {
-                          attributes = jsonData.attributes;
-                          console.log(`[SHOW-NFT] Found ${attributes.length} attributes from direct JSON URL`);
-                          
-                          // Also update image URL if found
-                          if (jsonData.image && !nftImageUrl) {
-                            nftImageUrl = convertIPFSToGateway(jsonData.image);
-                            console.log(`[SHOW-NFT] Updated image URL from JSON metadata: ${nftImageUrl}`);
-                          }
-                          return true; // Success
-                        } else if (jsonData.traits && Array.isArray(jsonData.traits)) {
-                          attributes = jsonData.traits;
-                          console.log(`[SHOW-NFT] Found ${attributes.length} traits from direct JSON URL`);
-                          
-                          // Also update image URL if found
-                          if (jsonData.image && !nftImageUrl) {
-                            nftImageUrl = convertIPFSToGateway(jsonData.image);
-                            console.log(`[SHOW-NFT] Updated image URL from JSON metadata: ${nftImageUrl}`);
-                          }
-                          return true; // Success
-                        }
-                      }
-                    } catch (jsonError) {
-                      console.log(`[SHOW-NFT] Failed to fetch from direct URL: ${jsonError.message}`);
-                    }
-                  }
-                  return false; // Failed
-                };
-                
-                // Try fetching from the JSON URL
-                await fetchJsonMetadata(jsonUrlToFetch);
-              }
-            } catch (attrError) {
-              console.log(`[SHOW-NFT] Could not decode attributes field: ${attrError.message}`);
-            }
-          }
-          
-          // If we still don't have attributes and we have a JSON URL from uris, try fetching it directly
-          if (attributes.length === 0 && ipfsJsonUrl) {
-            console.log(`[SHOW-NFT] Attempting to fetch attributes from uris JSON URL: ${ipfsJsonUrl}`);
-            const fetchJsonMetadata = async (url) => {
-              if (url.startsWith('ipfs://')) {
-                const ipfsHash = url.replace('ipfs://', '');
-                const ipfsGateways = [
-                  `https://ipfs.io/ipfs/${ipfsHash}`,
-                  `https://cloudflare-ipfs.com/ipfs/${ipfsHash}`,
-                  `https://gateway.pinata.cloud/ipfs/${ipfsHash}`,
-                  `https://dweb.link/ipfs/${ipfsHash}`
-                ];
-                
-                for (const gateway of ipfsGateways) {
-                  let timeoutId = null;
-                  try {
-                    console.log(`[SHOW-NFT] Attempting to fetch JSON metadata from ${gateway}`);
-                    const controller = new AbortController();
-                    timeoutId = setTimeout(() => controller.abort(), 5000);
-                    const ipfsResponse = await fetch(gateway, { 
-                      signal: controller.signal
-                    });
-                    if (timeoutId) clearTimeout(timeoutId);
-                    
-                    if (ipfsResponse.ok) {
-                      const ipfsData = await ipfsResponse.json();
-                      if (ipfsData.attributes && Array.isArray(ipfsData.attributes)) {
-                        attributes = ipfsData.attributes;
-                        console.log(`[SHOW-NFT] Found ${attributes.length} attributes from uris JSON URL`);
-                        if (ipfsData.image && !nftImageUrl) {
-                          nftImageUrl = convertIPFSToGateway(ipfsData.image);
-                        }
-                        return true;
-                      } else if (ipfsData.traits && Array.isArray(ipfsData.traits)) {
-                        attributes = ipfsData.traits;
-                        console.log(`[SHOW-NFT] Found ${attributes.length} traits from uris JSON URL`);
-                        if (ipfsData.image && !nftImageUrl) {
-                          nftImageUrl = convertIPFSToGateway(ipfsData.image);
-                        }
-                        return true;
-                      }
-                    }
-                  } catch (ipfsError) {
-                    if (timeoutId) clearTimeout(timeoutId);
-                    continue;
-                  }
-                }
-              } else if (url.startsWith('http')) {
-                try {
-                  const controller = new AbortController();
-                  const timeoutId = setTimeout(() => controller.abort(), 5000);
-                  const jsonResponse = await fetch(url, { 
-                    signal: controller.signal
-                  });
-                  clearTimeout(timeoutId);
-                  
-                  if (jsonResponse.ok) {
-                    const jsonData = await jsonResponse.json();
-                    if (jsonData.attributes && Array.isArray(jsonData.attributes)) {
-                      attributes = jsonData.attributes;
-                      console.log(`[SHOW-NFT] Found ${attributes.length} attributes from uris JSON URL`);
-                      if (jsonData.image && !nftImageUrl) {
-                        nftImageUrl = convertIPFSToGateway(jsonData.image);
-                      }
-                      return true;
-                    } else if (jsonData.traits && Array.isArray(jsonData.traits)) {
-                      attributes = jsonData.traits;
-                      console.log(`[SHOW-NFT] Found ${attributes.length} traits from uris JSON URL`);
-                      if (jsonData.image && !nftImageUrl) {
-                        nftImageUrl = convertIPFSToGateway(jsonData.image);
-                      }
-                      return true;
-                    }
-                  }
-                } catch (jsonError) {
-                  console.log(`[SHOW-NFT] Failed to fetch from uris JSON URL: ${jsonError.message}`);
-                }
-              }
-              return false;
-            };
-            await fetchJsonMetadata(ipfsJsonUrl);
-          }
-          
-          // Extract attributes - check multiple possible locations
-          if (nftDetails.attributes && Array.isArray(nftDetails.attributes) && nftDetails.attributes.length > 0) {
-            attributes = nftDetails.attributes;
-            console.log(`[SHOW-NFT] Found ${attributes.length} attributes from nftDetails.attributes for ${nft.identifier}`);
-          } else if (nftDetails.metadata) {
-            // Check if metadata is an object with attributes
-            if (typeof nftDetails.metadata === 'object' && !Array.isArray(nftDetails.metadata)) {
-              if (nftDetails.metadata.attributes && Array.isArray(nftDetails.metadata.attributes)) {
-                attributes = nftDetails.metadata.attributes;
-                console.log(`[SHOW-NFT] Found ${attributes.length} attributes from metadata.attributes for ${nft.identifier}`);
-              }
-            } else if (typeof nftDetails.metadata === 'string') {
-              // Try to decode base64 metadata if present
-              try {
-                const decoded = Buffer.from(nftDetails.metadata, 'base64').toString('utf-8');
-                const parsed = JSON.parse(decoded);
-                
-                // Check if it contains an IPFS URL for metadata
-                if (parsed.metadataUri || parsed.metadata_url || parsed.uri) {
-                  const ipfsUrl = parsed.metadataUri || parsed.metadata_url || parsed.uri;
-                  console.log(`[SHOW-NFT] Found IPFS metadata URL in decoded metadata: ${ipfsUrl}`);
-                  
-                  // Try to fetch from IPFS
-                  if (ipfsUrl.startsWith('ipfs://')) {
-                    const ipfsHash = ipfsUrl.replace('ipfs://', '');
-                    const ipfsGateways = [
-                      `https://ipfs.io/ipfs/${ipfsHash}`,
-                      `https://cloudflare-ipfs.com/ipfs/${ipfsHash}`,
-                      `https://gateway.pinata.cloud/ipfs/${ipfsHash}`,
-                      `https://dweb.link/ipfs/${ipfsHash}`
-                    ];
-                    
-                    // Try each gateway until one works
-                    for (const gateway of ipfsGateways) {
-                      let timeoutId = null;
-                      try {
-                        console.log(`[SHOW-NFT] Attempting to fetch metadata from ${gateway}`);
-                        const controller = new AbortController();
-                        timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
-                        const ipfsResponse = await fetch(gateway, { 
-                          signal: controller.signal
-                        });
-                        if (timeoutId) clearTimeout(timeoutId);
-                        
-                        if (ipfsResponse.ok) {
-                          const ipfsData = await ipfsResponse.json();
-                          console.log(`[SHOW-NFT] Successfully fetched IPFS metadata from ${gateway}`);
-                          
-                          // Extract attributes from IPFS metadata
-                          if (ipfsData.attributes && Array.isArray(ipfsData.attributes)) {
-                            attributes = ipfsData.attributes;
-                            console.log(`[SHOW-NFT] Found ${attributes.length} attributes from IPFS metadata`);
-                            break;
-                          } else if (ipfsData.traits && Array.isArray(ipfsData.traits)) {
-                            // Some NFTs use "traits" instead of "attributes"
-                            attributes = ipfsData.traits;
-                            console.log(`[SHOW-NFT] Found ${attributes.length} traits from IPFS metadata`);
-                            break;
-                          }
-                          
-                          // Also update image URL if found in IPFS metadata (prefer IPFS metadata image)
-                          if (ipfsData.image) {
-                            nftImageUrl = convertIPFSToGateway(ipfsData.image);
-                            console.log(`[SHOW-NFT] Updated image URL from IPFS metadata: ${nftImageUrl}`);
-                          }
-                        }
-                      } catch (ipfsError) {
-                        if (timeoutId) clearTimeout(timeoutId);
-                        console.log(`[SHOW-NFT] Failed to fetch from ${gateway}:`, ipfsError.message);
-                        continue; // Try next gateway
-                      }
-                    }
-                  }
-                }
-                
-                // Also check if attributes are directly in the decoded JSON
-                if (attributes.length === 0 && parsed.attributes && Array.isArray(parsed.attributes)) {
-                  attributes = parsed.attributes;
-                  console.log(`[SHOW-NFT] Found ${attributes.length} attributes from decoded base64 metadata for ${nft.identifier}`);
-                } else if (attributes.length === 0 && parsed.traits && Array.isArray(parsed.traits)) {
-                  attributes = parsed.traits;
-                  console.log(`[SHOW-NFT] Found ${attributes.length} traits from decoded base64 metadata for ${nft.identifier}`);
-                }
-              } catch (decodeError) {
-                console.log(`[SHOW-NFT] Could not decode base64 metadata for ${nft.identifier}:`, decodeError.message);
-              }
-            }
-          }
-          
-          // Fallback to stored metadata
-          if (attributes.length === 0 && metadata.attributes && Array.isArray(metadata.attributes) && metadata.attributes.length > 0) {
-            attributes = metadata.attributes;
-            console.log(`[SHOW-NFT] Found ${attributes.length} attributes from stored metadata for ${nft.identifier}`);
-          }
-          
-          // Log for debugging if no attributes found
-          if (attributes.length === 0) {
-            console.log(`[SHOW-NFT] No attributes found for ${nft.identifier}. API response keys:`, Object.keys(nftDetails));
-            if (nftDetails.metadata) {
-              console.log(`[SHOW-NFT] Metadata type:`, typeof nftDetails.metadata, 'Is array:', Array.isArray(nftDetails.metadata));
-              if (typeof nftDetails.metadata === 'object') {
-                console.log(`[SHOW-NFT] Metadata keys:`, Object.keys(nftDetails.metadata));
-              }
-            }
-          }
-          
-          // Merge metadata
-          metadata = {
-            ...metadata,
-            collection: nftDetails.collection || collection,
-            ticker: nftDetails.ticker || null,
-            owner: nftDetails.owner || null,
-            supply: nftDetails.supply || null,
-            decimals: nftDetails.decimals || null
-          };
-        }
-      } catch (fetchError) {
-        console.error(`[SHOW-NFT] Error fetching NFT details for ${nft.identifier}:`, fetchError.message);
-        // Continue with stored metadata if API fetch fails
-        if (metadata.attributes && Array.isArray(metadata.attributes)) {
-          attributes = metadata.attributes;
-        }
-      }
-      
+      });
+      let nftDetails = displayState.nftDetails;
+      let nftImageUrl = displayState.imageUrl;
+      let attributes = displayState.attributes;
+      let metadata = displayState.metadata;
+
       // Create beautiful embed
       const nftDisplayName = nft.nft_name || `${collection}#${nft.nonce}`;
       const amount = nft.amount || 1;
@@ -10271,6 +9856,16 @@ client.on('interactionCreate', async (interaction) => {
       const amountText = amount > 1 ? ` (${amount}x)` : '';
       const nftDisplayName = nft.nft_name || `${collection}#${nft.nonce}`;
       
+      await interaction.editReply({
+        content: '🔄 Resolving NFT image and preparing listing...',
+        flags: [MessageFlags.Ephemeral]
+      });
+      const listingDisplayState = await fetchMultiversXNftDisplayState(
+        { identifier: nft.identifier, nft_image_url: nft.nft_image_url, metadata: nft.metadata },
+        collection
+      );
+      const nftImageUrl = listingDisplayState.imageUrl;
+
       // Create listing embed
       const listingEmbed = new EmbedBuilder()
         .setTitle(title)
@@ -10289,21 +9884,6 @@ client.on('interactionCreate', async (interaction) => {
         listingEmbed.addFields([
           { name: '⏰ Expires', value: `<t:${Math.floor(expiresAt / 1000)}:R>`, inline: true }
         ]);
-      }
-      
-      // Fetch NFT details from API for better image URL resolution
-      let nftImageUrl = nft.nft_image_url;
-      try {
-        const nftApiUrl = `https://api.multiversx.com/nfts/${nft.identifier}`;
-        const nftResponse = await fetch(nftApiUrl);
-        if (nftResponse.ok) {
-          const nftDetails = await nftResponse.json();
-          nftImageUrl = await extractNFTImageUrl(nftDetails, nft.nft_image_url);
-        }
-      } catch (error) {
-        console.error('[NFT-MARKETPLACE] Error fetching NFT details for listing:', error.message);
-        // Use stored image URL as fallback
-        nftImageUrl = nft.nft_image_url;
       }
       
       if (nftImageUrl) {
@@ -28772,19 +28352,16 @@ async function updateNFTListingEmbed(guildId, listingId) {
       }
     }
 
-    // Fetch NFT details from API for better image URL resolution
     let nftImageUrl = listing.nftImageUrl;
     if (listing.identifier) {
       try {
-        const nftApiUrl = `https://api.multiversx.com/nfts/${listing.identifier}`;
-        const nftResponse = await fetch(nftApiUrl);
-        if (nftResponse.ok) {
-          const nftDetails = await nftResponse.json();
-          nftImageUrl = await extractNFTImageUrl(nftDetails, listing.nftImageUrl);
-        }
+        const display = await fetchMultiversXNftDisplayState(
+          { identifier: listing.identifier, nft_image_url: listing.nftImageUrl, metadata: {} },
+          listing.collection
+        );
+        nftImageUrl = display.imageUrl || listing.nftImageUrl;
       } catch (error) {
         console.error(`[NFT-MARKETPLACE] Error fetching NFT details for listing update: ${error.message}`);
-        // Use stored image URL as fallback
         nftImageUrl = listing.nftImageUrl;
       }
     }
