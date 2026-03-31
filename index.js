@@ -19420,6 +19420,7 @@ client.on('interactionCreate', async (interaction) => {
       // Check if offer expired
       if (offer.expiresAt && Date.now() > offer.expiresAt) {
         await virtualAccountsNFT.updateOffer(offerGuildId, offerId, { status: 'EXPIRED' });
+        await syncNFTOfferNotificationEmbeds(offer, offerListing, 'EXPIRED');
         await interaction.editReply({ content: '❌ This offer has expired.', flags: [MessageFlags.Ephemeral] });
         return;
       }
@@ -19441,6 +19442,7 @@ client.on('interactionCreate', async (interaction) => {
       
       if (balanceBN.isLessThan(offerAmountBN)) {
         await virtualAccountsNFT.updateOffer(offerGuildId, offerId, { status: 'REJECTED' });
+        await syncNFTOfferNotificationEmbeds(offer, offerListing, 'REJECTED');
         await interaction.editReply({ content: '❌ Offerer no longer has sufficient balance. Offer rejected.', flags: [MessageFlags.Ephemeral] });
         return;
       }
@@ -19496,9 +19498,11 @@ client.on('interactionCreate', async (interaction) => {
       
       // Reject/expire all other offers on this listing
       const allOffers = await virtualAccountsNFT.getOffersForListing(offerGuildId, offerListing.listingId);
+      const supersededOffers = [];
       for (const otherOffer of allOffers) {
         if (otherOffer.offerId !== offerId && otherOffer.status === 'PENDING') {
           await virtualAccountsNFT.updateOffer(offerGuildId, otherOffer.offerId, { status: 'REJECTED' });
+          supersededOffers.push(otherOffer);
         }
       }
       
@@ -19511,8 +19515,14 @@ client.on('interactionCreate', async (interaction) => {
       
       // Clean up forwarded messages
       await cleanupForwardedMessages(offerGuildId, 'listing', offerListing.listingId);
+
+      const acceptedOfferRecord = { ...offer, status: 'ACCEPTED' };
+      await syncNFTOfferNotificationEmbeds(acceptedOfferRecord, offerListing, 'ACCEPTED');
+      for (const sup of supersededOffers) {
+        await syncNFTOfferNotificationEmbeds({ ...sup, status: 'REJECTED' }, offerListing, 'SUPERSEDED');
+      }
       
-      // Update embeds
+      // Update listing embed
       await updateNFTListingEmbed(offerGuildId, offerListing.listingId);
       
       // Send notifications
@@ -19586,6 +19596,8 @@ client.on('interactionCreate', async (interaction) => {
       
       // Update offer status
       await virtualAccountsNFT.updateOffer(offerGuildId, offerId, { status: 'REJECTED' });
+      
+      await syncNFTOfferNotificationEmbeds({ ...offer, status: 'REJECTED' }, offerListing, 'REJECTED');
       
       // Send DM notification to offerer (buyer)
       try {
@@ -22377,6 +22389,7 @@ client.on('interactionCreate', async (interaction) => {
           });
           
           // Send DM notification to seller
+          let offerDmMessage = null;
           try {
             const seller = await client.users.fetch(listing.sellerId);
             if (seller) {
@@ -22416,7 +22429,7 @@ client.on('interactionCreate', async (interaction) => {
               
               const dmButtonRow = new ActionRowBuilder().addComponents(acceptButton, rejectButton);
               
-              await seller.send({ embeds: [dmEmbed], components: [dmButtonRow] });
+              offerDmMessage = await seller.send({ embeds: [dmEmbed], components: [dmButtonRow] });
               console.log(`[NFT-MARKETPLACE] Sent DM notification to seller ${listing.sellerId} about new offer`);
             }
           } catch (dmError) {
@@ -22424,6 +22437,7 @@ client.on('interactionCreate', async (interaction) => {
           }
           
           // Notify seller in thread (works for both regular threads and forum posts)
+          let offerThreadMessage = null;
           try {
             const channel = await client.channels.fetch(listing.channelId);
             if (channel && listing.threadId) {
@@ -22459,12 +22473,21 @@ client.on('interactionCreate', async (interaction) => {
                 
                 const buttonRow = new ActionRowBuilder().addComponents(acceptButton, rejectButton);
                 
-                await thread.send({ embeds: [offerEmbed], components: [buttonRow] });
+                offerThreadMessage = await thread.send({ embeds: [offerEmbed], components: [buttonRow] });
               }
             }
           } catch (threadError) {
             console.error('[NFT-MARKETPLACE] Error posting offer to thread:', threadError.message);
             // Don't fail the offer creation if thread posting fails - DM notification already sent with buttons
+          }
+
+          try {
+            await virtualAccountsNFT.updateOffer(guildId, offerId, {
+              threadMessageId: offerThreadMessage ? offerThreadMessage.id : null,
+              dmMessageId: offerDmMessage ? offerDmMessage.id : null
+            });
+          } catch (msgIdErr) {
+            console.error('[NFT-MARKETPLACE] Could not save offer notification message IDs:', msgIdErr.message);
           }
           
           // Update listing embed to show offer count
@@ -28280,7 +28303,72 @@ function isAuctionExpired(auction) {
   return Date.now() >= auction.endTime || auction.status !== 'ACTIVE';
 }
 
-// Update auction embed
+/** Outcome for offer thread/DM embeds: ACCEPTED, REJECTED, SUPERSEDED, EXPIRED */
+function buildNFTOfferOutcomeEmbed(offer, offerListing, outcome) {
+  const tokenTicker = offer.priceTokenIdentifier.split('-')[0];
+  let title;
+  let statusLine;
+  let color;
+  switch (outcome) {
+    case 'ACCEPTED':
+      title = '✅ Offer Accepted';
+      statusLine = '**Status:** Accepted — sale completed';
+      color = 0x57f287;
+      break;
+    case 'SUPERSEDED':
+      title = '💼 Offer Closed';
+      statusLine = '**Status:** Not accepted — another offer was accepted on this listing';
+      color = 0x99aab5;
+      break;
+    case 'EXPIRED':
+      title = '⏰ Offer Expired';
+      statusLine = '**Status:** Expired';
+      color = 0xfee75c;
+      break;
+    default:
+      title = '❌ Offer Rejected';
+      statusLine = '**Status:** Rejected';
+      color = 0xed4245;
+  }
+  return new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(
+      `**Offerer:** <@${offer.offererId}>\n**Amount:** ${offer.priceAmount} ${tokenTicker}\n${statusLine}`
+    )
+    .setColor(color)
+    .setTimestamp()
+    .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+}
+
+async function syncNFTOfferNotificationEmbeds(offer, offerListing, outcome) {
+  if (!offer || !offerListing) return;
+  const embed = buildNFTOfferOutcomeEmbed(offer, offerListing, outcome);
+  const payload = { embeds: [embed], components: [] };
+
+  if (offer.threadMessageId && offerListing.threadId) {
+    try {
+      const ch = await client.channels.fetch(offerListing.threadId);
+      if (ch && ch.isTextBased()) {
+        const msg = await ch.messages.fetch(offer.threadMessageId);
+        await msg.edit(payload);
+      }
+    } catch (err) {
+      console.error('[NFT-MARKETPLACE] Could not update offer thread notification:', err.message);
+    }
+  }
+
+  if (offer.dmMessageId && offerListing.sellerId) {
+    try {
+      const sellerUser = await client.users.fetch(offerListing.sellerId);
+      const dm = sellerUser.dmChannel || await sellerUser.createDM();
+      const msg = await dm.messages.fetch(offer.dmMessageId);
+      await msg.edit(payload);
+    } catch (err) {
+      console.error('[NFT-MARKETPLACE] Could not update offer DM notification:', err.message);
+    }
+  }
+}
+
 // Update NFT listing embed
 async function updateNFTListingEmbed(guildId, listingId) {
   try {

@@ -753,7 +753,9 @@ async function getOffer(guildId, offerId) {
       status: data.status,
       createdAt: data.created_at,
       acceptedAt: data.accepted_at,
-      expiresAt: data.expires_at
+      expiresAt: data.expires_at,
+      threadMessageId: data.thread_message_id || null,
+      dmMessageId: data.dm_message_id || null
     };
   } catch (error) {
     console.error('[DB] Error getting offer:', error);
@@ -784,7 +786,9 @@ async function getOfferById(offerId) {
       status: data.status,
       createdAt: data.created_at,
       acceptedAt: data.accepted_at,
-      expiresAt: data.expires_at
+      expiresAt: data.expires_at,
+      threadMessageId: data.thread_message_id || null,
+      dmMessageId: data.dm_message_id || null
     };
   } catch (error) {
     console.error('[DB] Error getting offer by ID:', error);
@@ -814,7 +818,9 @@ async function getOffersForListing(guildId, listingId) {
       status: row.status,
       createdAt: row.created_at,
       acceptedAt: row.accepted_at,
-      expiresAt: row.expires_at
+      expiresAt: row.expires_at,
+      threadMessageId: row.thread_message_id || null,
+      dmMessageId: row.dm_message_id || null
     }));
   } catch (error) {
     console.error('[DB] Error getting offers for listing:', error);
@@ -849,7 +855,9 @@ async function getUserOffers(guildId, userId, status = 'PENDING') {
       status: row.status,
       createdAt: row.created_at,
       acceptedAt: row.accepted_at,
-      expiresAt: row.expires_at
+      expiresAt: row.expires_at,
+      threadMessageId: row.thread_message_id || null,
+      dmMessageId: row.dm_message_id || null
     }));
   } catch (error) {
     console.error('[DB] Error getting user offers:', error);
@@ -864,6 +872,8 @@ async function updateOffer(guildId, offerId, updates) {
     if (updates.status !== undefined) updateData.status = updates.status;
     if (updates.acceptedAt !== undefined) updateData.accepted_at = updates.acceptedAt;
     if (updates.expiresAt !== undefined) updateData.expires_at = updates.expiresAt;
+    if (updates.threadMessageId !== undefined) updateData.thread_message_id = updates.threadMessageId;
+    if (updates.dmMessageId !== undefined) updateData.dm_message_id = updates.dmMessageId;
     
     updateData.updated_at = new Date().toISOString();
     
