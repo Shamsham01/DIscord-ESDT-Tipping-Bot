@@ -19725,15 +19725,16 @@ client.on('interactionCreate', async (interaction) => {
   } else if (customId.startsWith('staking-stake:')) {
     // Stake button handler
     try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
       const poolId = customId.split(':')[1];
       const userId = interaction.user.id;
       
       // Check rate limit
       const rateLimit = await dbStakingPools.checkRateLimit(guildId, poolId, userId, 'stake');
       if (!rateLimit.allowed) {
-        await interaction.reply({ 
-          content: `⏳ Rate limit: Please wait ${rateLimit.waitSeconds} seconds before staking again.`, 
-          flags: [MessageFlags.Ephemeral] 
+        await interaction.editReply({ 
+          content: `⏳ Rate limit: Please wait ${rateLimit.waitSeconds} seconds before staking again.`
         });
         return;
       }
@@ -19741,12 +19742,12 @@ client.on('interactionCreate', async (interaction) => {
       // Get pool
       const pool = await dbStakingPools.getStakingPool(guildId, poolId);
       if (!pool) {
-        await interaction.reply({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        await interaction.editReply({ content: '❌ Staking pool not found.' });
         return;
       }
       
       if (pool.status !== 'ACTIVE' && pool.status !== 'PAUSED') {
-        await interaction.reply({ content: '❌ This pool is not accepting new stakes.', flags: [MessageFlags.Ephemeral] });
+        await interaction.editReply({ content: '❌ This pool is not accepting new stakes.' });
         return;
       }
       
@@ -19754,13 +19755,15 @@ client.on('interactionCreate', async (interaction) => {
       const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, pool.collectionTicker);
       
       if (!userNFTs || userNFTs.length === 0) {
-        await interaction.reply({ content: `❌ You don't have any NFTs from collection "${pool.collectionTicker}" in your virtual account.`, flags: [MessageFlags.Ephemeral] });
+        await interaction.editReply({ content: `❌ You don't have any NFTs from collection "${pool.collectionTicker}" in your virtual account.` });
         return;
       }
       
       // Filter out NFTs that are staked, listed for sale, or in auctions
       const dbAuctions = require('./db/auctions');
       const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
+      // One query for all active auctions in this collection (avoids N round-trips that exceed Discord's 3s ack window)
+      const userCollectionAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId, pool.collectionTicker);
       const availableNFTs = [];
       
       for (const nft of userNFTs) {
@@ -19783,8 +19786,10 @@ client.on('interactionCreate', async (interaction) => {
           }
         }
         
-        // Check if in active auctions
-        const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId, nft.collection, nft.nonce);
+        // Check if in active auctions (in-memory filter from batched query)
+        const activeAuctions = userCollectionAuctions.filter(
+          a => a.collection === nft.collection && Number(a.nftNonce) === Number(nft.nonce)
+        );
         const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
         
         if (lockedInAuctions > 0) {
@@ -19800,9 +19805,8 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       if (availableNFTs.length === 0) {
-        await interaction.reply({ 
-          content: `❌ **No NFTs available for staking!**\n\nAll your NFTs from collection "${pool.collectionTicker}" are either:\n• Already staked\n• Listed for sale\n• In active auctions\n\n💡 **Tip:** Cancel listings or wait for auctions to end before staking.`, 
-          flags: [MessageFlags.Ephemeral] 
+        await interaction.editReply({ 
+          content: `❌ **No NFTs available for staking!**\n\nAll your NFTs from collection "${pool.collectionTicker}" are either:\n• Already staked\n• Listed for sale\n• In active auctions\n\n💡 **Tip:** Cancel listings or wait for auctions to end before staking.`
         });
         return;
       }
@@ -19837,32 +19841,36 @@ client.on('interactionCreate', async (interaction) => {
       
       const selectRow = new ActionRowBuilder().addComponents(selectMenu);
       
-      await interaction.reply({ 
+      await interaction.editReply({ 
         content: 'Select NFTs to stake:', 
-        components: [selectRow],
-        flags: [MessageFlags.Ephemeral] 
+        components: [selectRow]
       });
       
     } catch (error) {
       console.error('[STAKING] Error handling stake button:', error);
-      if (interaction.replied || interaction.deferred) {
-        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      try {
+        if (interaction.deferred) {
+          await interaction.editReply({ content: `❌ Error: ${error.message}` });
+        } else if (!interaction.replied) {
+          await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        }
+      } catch (replyErr) {
+        console.error('[STAKING] Could not send stake error reply:', replyErr.message);
       }
     }
   } else if (customId.startsWith('staking-unstake:')) {
     // Unstake button handler
     try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
       const poolId = customId.split(':')[1];
       const userId = interaction.user.id;
       
       // Check rate limit
       const rateLimit = await dbStakingPools.checkRateLimit(guildId, poolId, userId, 'unstake');
       if (!rateLimit.allowed) {
-        await interaction.reply({ 
-          content: `⏳ Rate limit: Please wait ${rateLimit.waitSeconds} seconds before unstaking again.`, 
-          flags: [MessageFlags.Ephemeral] 
+        await interaction.editReply({ 
+          content: `⏳ Rate limit: Please wait ${rateLimit.waitSeconds} seconds before unstaking again.`
         });
         return;
       }
@@ -19870,7 +19878,7 @@ client.on('interactionCreate', async (interaction) => {
       // Get pool
       const pool = await dbStakingPools.getStakingPool(guildId, poolId);
       if (!pool) {
-        await interaction.reply({ content: '❌ Staking pool not found.', flags: [MessageFlags.Ephemeral] });
+        await interaction.editReply({ content: '❌ Staking pool not found.' });
         return;
       }
       
@@ -19878,7 +19886,7 @@ client.on('interactionCreate', async (interaction) => {
       const stakedNFTs = await dbStakingPools.getUserStakedNFTs(guildId, poolId, userId);
       
       if (!stakedNFTs || stakedNFTs.length === 0) {
-        await interaction.reply({ content: '❌ You don\'t have any NFTs staked in this pool.', flags: [MessageFlags.Ephemeral] });
+        await interaction.editReply({ content: '❌ You don\'t have any NFTs staked in this pool.' });
         return;
       }
       
@@ -19913,18 +19921,21 @@ client.on('interactionCreate', async (interaction) => {
       
       const selectRow = new ActionRowBuilder().addComponents(selectMenu);
       
-      await interaction.reply({ 
+      await interaction.editReply({ 
         content: 'Select NFTs to unstake:', 
-        components: [selectRow],
-        flags: [MessageFlags.Ephemeral] 
+        components: [selectRow]
       });
       
     } catch (error) {
       console.error('[STAKING] Error handling unstake button:', error);
-      if (interaction.replied || interaction.deferred) {
-        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
-      } else {
-        await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      try {
+        if (interaction.deferred) {
+          await interaction.editReply({ content: `❌ Error: ${error.message}` });
+        } else if (!interaction.replied) {
+          await interaction.reply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        }
+      } catch (replyErr) {
+        console.error('[STAKING] Could not send unstake error reply:', replyErr.message);
       }
     }
   } else if (customId.startsWith('staking-claim-rewards:')) {
@@ -21045,6 +21056,7 @@ client.on('interactionCreate', async (interaction) => {
       // Filter out NFTs that are staked, listed for sale, or in auctions
       const dbAuctions = require('./db/auctions');
       const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
+      const userCollectionAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId, pool.collectionTicker);
       const availableNFTs = [];
       const unavailableNFTs = [];
       
@@ -21075,8 +21087,9 @@ client.on('interactionCreate', async (interaction) => {
           }
         }
         
-        // Check if in active auctions
-        const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId, nft.collection, nft.nonce);
+        const activeAuctions = userCollectionAuctions.filter(
+          a => a.collection === nft.collection && Number(a.nftNonce) === Number(nft.nonce)
+        );
         const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
         
         if (lockedInAuctions > 0) {
