@@ -216,6 +216,7 @@ function mapPoolFromDb(data) {
 // ============================================
 
 async function stakeNFT(guildId, poolId, userId, nftData) {
+  let insertedRowId = null;
   try {
     const { data, error } = await supabase
       .from('staking_pool_balances')
@@ -236,12 +237,21 @@ async function stakeNFT(guildId, poolId, userId, nftData) {
       .single();
     
     if (error) throw error;
+    insertedRowId = data.id;
     
     // Update pool statistics
     await updatePoolStatistics(guildId, poolId);
     
     return data;
   } catch (error) {
+    if (insertedRowId) {
+      try {
+        await supabase.from('staking_pool_balances').delete().eq('id', insertedRowId);
+        await updatePoolStatistics(guildId, poolId);
+      } catch (cleanupErr) {
+        console.error('[DB] Error cleaning up partial stake row after failed stakeNFT:', cleanupErr);
+      }
+    }
     console.error('[DB] Error staking NFT:', error);
     throw error;
   }
@@ -344,7 +354,8 @@ async function updatePoolStatistics(guildId, poolId) {
 // RATE LIMITING
 // ============================================
 
-async function checkRateLimit(guildId, poolId, userId, actionType) {
+async function checkRateLimit(guildId, poolId, userId, actionType, options = {}) {
+  const windowMs = typeof options.windowMs === 'number' ? options.windowMs : 60000;
   try {
     const { data, error } = await supabase
       .from('staking_pool_rate_limits')
@@ -359,10 +370,10 @@ async function checkRateLimit(guildId, poolId, userId, actionType) {
     
     if (data) {
       const timeSince = Date.now() - data.last_action_at;
-      if (timeSince < 60000) { // 1 minute
+      if (timeSince < windowMs) {
         return {
           allowed: false,
-          waitSeconds: Math.ceil((60000 - timeSince) / 1000)
+          waitSeconds: Math.ceil((windowMs - timeSince) / 1000)
         };
       }
     }

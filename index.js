@@ -19764,11 +19764,19 @@ client.on('interactionCreate', async (interaction) => {
       const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
       // One query for all active auctions in this collection (avoids N round-trips that exceed Discord's 3s ack window)
       const userCollectionAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId, pool.collectionTicker);
+      const userStakedInThisPool = await dbStakingPools.getUserStakedNFTs(guildId, poolId, userId);
+      const alreadyStakedInPoolKeys = new Set(
+        (userStakedInThisPool || []).map(s => `${s.collection}\u0000${Number(s.nonce)}`)
+      );
       const availableNFTs = [];
       
       for (const nft of userNFTs) {
         // Skip if already staked
         if (nft.staked === true) {
+          continue;
+        }
+        // Source of truth: pool row can exist while VA still has staked=false (partial failure / race)
+        if (alreadyStakedInPoolKeys.has(`${nft.collection}\u0000${Number(nft.nonce)}`)) {
           continue;
         }
         
@@ -21008,8 +21016,24 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      const submitRateLimit = await dbStakingPools.checkRateLimit(guildId, poolId, userId, 'stake_submit', { windowMs: 5000 });
+      if (!submitRateLimit.allowed) {
+        await interaction.followUp({
+          content: `⏳ Please wait ${submitRateLimit.waitSeconds} second(s) before confirming stake again (prevents duplicate submissions).`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
       // Get user's NFTs from VA
-      const userNFTs = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, pool.collectionTicker);
+      const userNFTsRaw = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, pool.collectionTicker);
+      const userStakedInThisPoolSelect = await dbStakingPools.getUserStakedNFTs(guildId, poolId, userId);
+      const alreadyStakedInPoolKeysSel = new Set(
+        (userStakedInThisPoolSelect || []).map(s => `${s.collection}\u0000${Number(s.nonce)}`)
+      );
+      const userNFTs = userNFTsRaw.filter(
+        nft => !alreadyStakedInPoolKeysSel.has(`${nft.collection}\u0000${Number(nft.nonce)}`)
+      );
       
       // Determine which NFTs to stake
       let nftsToStake = [];
@@ -21236,24 +21260,72 @@ client.on('interactionCreate', async (interaction) => {
             lockUntil: null // No lock period
           });
           
-          // Create transaction record
           const transactionId = `stake_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-          await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
-            id: transactionId,
-            type: 'stake',
-            collection: nft.collection,
-            identifier: nft.identifier,
-            nonce: nft.nonce,
-            nft_name: nft.nft_name,
-            timestamp: Date.now(),
-            description: `Staked in pool: ${pool.poolName || pool.collectionName}`
-          });
+          try {
+            await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
+              id: transactionId,
+              type: 'stake',
+              collection: nft.collection,
+              identifier: nft.identifier,
+              nonce: nft.nonce,
+              nft_name: nft.nft_name,
+              timestamp: Date.now(),
+              description: `Staked in pool: ${pool.poolName || pool.collectionName}`
+            });
+          } catch (txErr) {
+            console.error(`[STAKING] Stake committed for ${nft.identifier} but transaction log failed:`, txErr);
+          }
           
           stakedCount++;
           console.log(`[STAKING] Successfully staked NFT ${nft.identifier}`);
         } catch (stakeError) {
           console.error(`[STAKING] Error staking NFT ${nft.identifier}:`, stakeError);
-          // If staking failed, unmark the NFT as staked (rollback)
+          
+          const errCode = stakeError.code || stakeError.cause?.code;
+          const isUniqueViolation = errCode === '23505';
+          
+          if (isUniqueViolation) {
+            const userStakedRows = await dbStakingPools.getUserStakedNFTs(guildId, poolId, userId);
+            const poolRow = userStakedRows.find(
+              s => s.collection === nft.collection && Number(s.nonce) === Number(nft.nonce)
+            );
+            if (poolRow) {
+              try {
+                const supabase = require('./supabase-client');
+                await supabase
+                  .from('virtual_account_nft_balances')
+                  .update({
+                    staked: true,
+                    staking_pool_id: poolId,
+                    updated_at: new Date().toISOString()
+                  })
+                  .eq('guild_id', guildId)
+                  .eq('user_id', userId)
+                  .eq('collection', nft.collection)
+                  .eq('nonce', nft.nonce);
+              } catch (syncErr) {
+                console.error(`[STAKING] Failed to sync VA after duplicate stake for ${nft.identifier}:`, syncErr);
+              }
+              const dupTxId = `stake_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+              try {
+                await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
+                  id: dupTxId,
+                  type: 'stake',
+                  collection: nft.collection,
+                  identifier: nft.identifier,
+                  nonce: nft.nonce,
+                  nft_name: nft.nft_name,
+                  timestamp: Date.now(),
+                  description: `Staked in pool: ${pool.poolName || pool.collectionName}`
+                });
+              } catch (txErr) {
+                console.error(`[STAKING] Transaction log failed after duplicate-key reconcile for ${nft.identifier}:`, txErr);
+              }
+              stakedCount++;
+              continue;
+            }
+          }
+          
           try {
             const supabase = require('./supabase-client');
             await supabase
@@ -24365,7 +24437,7 @@ async function createStakingPoolEmbed(guildId, pool) {
     const rewardPerNftHuman = new BigNumber(pool.rewardPerNftPerDayWei).dividedBy(new BigNumber(10).pow(tokenDecimals)).toString();
     
     const currentSupplyUsd = tokenPriceUsd > 0 ? new BigNumber(currentSupplyHuman).multipliedBy(tokenPriceUsd).toFixed(2) : null;
-    const rewardPerNftUsd = tokenPriceUsd > 0 ? new BigNumber(rewardPerNftHuman).multipliedBy(tokenPriceUsd).toFixed(2) : null;
+    const rewardPerNftUsd = tokenPriceUsd > 0 ? new BigNumber(rewardPerNftHuman).multipliedBy(tokenPriceUsd).toFixed(4) : null;
     
     // Determine embed color based on status
     let embedColor = 0x00FF00; // Green for ACTIVE
