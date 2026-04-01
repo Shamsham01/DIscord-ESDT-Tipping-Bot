@@ -136,6 +136,9 @@ const API_TOKEN = process.env.API_TOKEN; // For MultiversX API
 const FD_TOKEN = process.env.FD_TOKEN; // For Football-Data.org API
 const SWAP_API_BASE_URL = process.env.SWAP_API_BASE_URL || 'https://swap-esdt-makex-api.onrender.com';
 const SWAP_API_TOKEN = process.env.SWAP_API_TOKEN || process.env.SECURE_TOKEN;
+const SWAP_EMBED_THUMBNAIL_QUOTE = 'https://i.ibb.co/Cs5P7Xkw/swap-thumbnail.png';
+const SWAP_EMBED_THUMBNAIL_SUCCESS = 'https://i.ibb.co/cKGFd8rj/success.png';
+const SWAP_EMBED_THUMBNAIL_FAIL = 'https://i.ibb.co/zhswbpyS/fail.png';
 
 // All data is now stored in Supabase database
 // Wallet timestamps for blockchain listener are stored in Supabase (wallet_timestamps table)
@@ -11100,6 +11103,7 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder()
           .setTitle(isExpired ? 'Swap Quote (Expired)' : 'Swap Quote')
           .setColor(isExpired ? 0x666666 : 0x3498db)
+          .setThumbnail(SWAP_EMBED_THUMBNAIL_QUOTE)
           .addFields(
             { name: 'From Token', value: fromVal, inline: true },
             { name: 'Slippage', value: `${slippage}%`, inline: true },
@@ -17675,6 +17679,7 @@ client.on('interactionCreate', async (interaction) => {
         const successEmbed = new EmbedBuilder()
           .setTitle('Swap Completed')
           .setColor(0x00FF00)
+          .setThumbnail(SWAP_EMBED_THUMBNAIL_SUCCESS)
           .addFields(
             { name: 'Sold', value: `${formatNumberForDisplay(amount)} ${fromTokenTicker}`, inline: true },
             { name: 'Received', value: `${outputsText}${toUsdSuccess ? ` (≈ $${toUsdSuccess})` : ''}`, inline: true },
@@ -17708,6 +17713,7 @@ client.on('interactionCreate', async (interaction) => {
         const successEmbed = new EmbedBuilder()
           .setTitle('Swap Completed')
           .setColor(0x00FF00)
+          .setThumbnail(SWAP_EMBED_THUMBNAIL_SUCCESS)
           .addFields(
             { name: 'Sold', value: `${formatNumberForDisplay(amount)} ${fromTokenTicker}`, inline: true },
             { name: 'Received', value: `~${formatNumberForDisplay(totalHuman)} ${toTokenTicker}`, inline: true },
@@ -17749,6 +17755,7 @@ client.on('interactionCreate', async (interaction) => {
         const successEmbed = new EmbedBuilder()
           .setTitle('Swap Completed')
           .setColor(0x00FF00)
+          .setThumbnail(SWAP_EMBED_THUMBNAIL_SUCCESS)
           .setDescription('Swap executed on-chain. Amount credited from quote (API response was incomplete).')
           .addFields(
             { name: 'Sold', value: `${formatNumberForDisplay(amount)} ${fromTokenTicker}`, inline: true },
@@ -17794,6 +17801,7 @@ client.on('interactionCreate', async (interaction) => {
       const failEmbed = new EmbedBuilder()
         .setTitle('Swap Failed')
         .setColor(0xFF0000)
+        .setThumbnail(SWAP_EMBED_THUMBNAIL_FAIL)
         .setDescription(errMsg + (explorerUrl ? `\n[View on Explorer](${explorerUrl})` : '') + `\n\nYour ${formatNumberForDisplay(amount)} ${fromTokenTicker} has been refunded to your VA.`)
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
