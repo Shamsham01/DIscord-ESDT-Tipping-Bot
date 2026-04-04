@@ -16022,42 +16022,91 @@ client.on('interactionCreate', async (interaction) => {
 
   // USER AUTOCOMPLETE FOR TIP-VIRTUAL
   if ((interaction.commandName === 'tip-virtual-esdt' || interaction.commandName === 'tip-virtual-nft') && interaction.options.getFocused(true).name === 'user-tag') {
+    const startTime = Date.now();
+    const TIMEOUT_MS = 2500;
     try {
-      const focusedValue = interaction.options.getFocused();
-      const guild = interaction.guild;
+      const focusedRaw = interaction.options.getFocused();
+      const focusedValue = typeof focusedRaw === 'string' ? focusedRaw : String(focusedRaw ?? '');
+      const lowerInput = focusedValue.toLowerCase();
       const guildId = interaction.guildId;
-      
-      let choices = [];
-      const userWallets = await getUserWallets(guildId);
-      const userWalletEntries = Object.entries(userWallets).slice(0, 100);
 
-      if (userWalletEntries.length > 0) {
-        const walletUserPromises = userWalletEntries.map(async ([userId, wallet]) => {
+      if (!guildId) {
+        await safeRespond(interaction, []);
+        return;
+      }
+
+      let guild = interaction.guild;
+      if (!guild) {
+        guild = await interaction.client.guilds.fetch(guildId).catch(() => null);
+      }
+      if (!guild) {
+        await safeRespond(interaction, []);
+        return;
+      }
+
+      const userWallets = await getUserWallets(guildId);
+      const userWalletEntries = Object.entries(userWallets || {}).slice(0, 100);
+      if (userWalletEntries.length === 0) {
+        await safeRespond(interaction, []);
+        return;
+      }
+
+      const cachedChoices = [];
+      const uncachedUserIds = [];
+      for (const [userId] of userWalletEntries) {
+        const member = guild.members.cache.get(userId);
+        if (member) {
+          cachedChoices.push({ name: member.user.tag, value: member.user.tag });
+        } else {
+          uncachedUserIds.push(userId);
+        }
+      }
+
+      // Empty query: only cached members. (matches still pass includes(''); without this we fan out ~100 parallel fetches and often miss Discord's autocomplete deadline.)
+      if (!focusedValue.trim()) {
+        await safeRespond(interaction, cachedChoices.slice(0, 25));
+        return;
+      }
+
+      let filtered = cachedChoices.filter(c => c.name.toLowerCase().includes(lowerInput));
+      if (filtered.length >= 25) {
+        await safeRespond(interaction, filtered.slice(0, 25));
+        return;
+      }
+
+      const MAX_FETCHES = Math.min(uncachedUserIds.length, 40);
+      const usersToFetch = uncachedUserIds.slice(0, MAX_FETCHES);
+      if (usersToFetch.length > 0 && Date.now() - startTime < TIMEOUT_MS - 600) {
+        const fetchPromises = usersToFetch.map(async (userId) => {
           try {
-            let member = guild.members.cache.get(userId);
-            if (!member) {
-              member = await guild.members.fetch(userId).catch(() => null);
-            }
-            if (member) {
-              return {
-                name: member.user.tag,
-                value: member.user.tag
-              };
-            }
-            return null;
-          } catch (error) {
+            const member = await Promise.race([
+              guild.members.fetch(userId),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 700))
+            ]).catch(() => null);
+            if (!member) return null;
+            const choice = { name: member.user.tag, value: member.user.tag };
+            return choice.name.toLowerCase().includes(lowerInput) ? choice : null;
+          } catch {
             return null;
           }
         });
-        const walletUsers = (await Promise.all(walletUserPromises)).filter(Boolean);
-        choices = walletUsers;
+        const remainingMs = TIMEOUT_MS - (Date.now() - startTime) - 200;
+        const fetched = await Promise.race([
+          Promise.all(fetchPromises).then(results => results.filter(Boolean)),
+          new Promise(resolve => setTimeout(() => resolve([]), Math.max(remainingMs, 0)))
+        ]);
+        filtered = filtered.concat(fetched);
       }
 
-      const filtered = choices.filter(choice =>
-        choice.name.toLowerCase().includes(focusedValue.toLowerCase())
-      );
-      await safeRespond(interaction, filtered.slice(0, 25));
+      const seen = new Set();
+      const unique = filtered.filter(c => {
+        if (seen.has(c.value)) return false;
+        seen.add(c.value);
+        return true;
+      });
+      await safeRespond(interaction, unique.slice(0, 25));
     } catch (error) {
+      console.error('[AUTOCOMPLETE] Error in tip-virtual user-tag autocomplete:', error);
       await safeRespond(interaction, []);
     }
     return;
