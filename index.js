@@ -16642,7 +16642,9 @@ client.on('interactionCreate', async (interaction) => {
   // NFT NAME AUTOCOMPLETE FOR TIP-VIRTUAL-NFT
   if (interaction.commandName === 'tip-virtual-nft' && interaction.options.getFocused(true).name === 'nft-name') {
     try {
-      const focusedValue = interaction.options.getFocused();
+      const focusedRaw = interaction.options.getFocused();
+      const focusedValue = typeof focusedRaw === 'string' ? focusedRaw : String(focusedRaw ?? '');
+      const focusedLower = focusedValue.toLowerCase();
       let guildId = interaction.guildId;
       const userId = interaction.user.id;
       const selectedCollection = interaction.options.getString('collection');
@@ -16670,9 +16672,18 @@ client.on('interactionCreate', async (interaction) => {
       // Get user's NFTs in selected collection
       const nfts = await virtualAccountsNFT.getUserNFTBalances(guildId, userId, selectedCollection);
       
-      // Get active auctions and listings to calculate available balance
+      // Get active auctions and listings to calculate available balance (one auction query for the whole collection — not per-NFT — to stay within Discord autocomplete latency)
       const dbAuctions = require('./db/auctions');
-      const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
+      const [allActiveAuctions, activeListings] = await Promise.all([
+        dbAuctions.getUserActiveAuctions(guildId, userId, selectedCollection),
+        virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE')
+      ]);
+      const lockedByNonceAuction = new Map();
+      for (const auction of allActiveAuctions) {
+        const n = auction.nftNonce;
+        if (n == null) continue;
+        lockedByNonceAuction.set(n, (lockedByNonceAuction.get(n) || 0) + (auction.amount || 1));
+      }
       
       // Filter NFTs with available balance > 0 and match search term
       const availableNFTs = [];
@@ -16683,9 +16694,7 @@ client.on('interactionCreate', async (interaction) => {
             continue;
           }
           
-          // Get active auctions for this NFT
-          const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId, selectedCollection, nft.nonce);
-          const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+          const lockedInAuctions = lockedByNonceAuction.get(nft.nonce) || 0;
           
           // Get active listings for this NFT
           const listingsForThisNFT = activeListings.filter(listing =>
@@ -16701,8 +16710,8 @@ client.on('interactionCreate', async (interaction) => {
             const nftName = nft.nft_name || `${selectedCollection}#${nft.nonce}`;
             const identifier = `${selectedCollection}#${nft.nonce}`;
             
-            if (nftName.toLowerCase().includes(focusedValue.toLowerCase()) ||
-                identifier.toLowerCase().includes(focusedValue.toLowerCase())) {
+            if (nftName.toLowerCase().includes(focusedLower) ||
+                identifier.toLowerCase().includes(focusedLower)) {
               availableNFTs.push({
                 nft: nft,
                 name: nftName,
@@ -16717,11 +16726,16 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
       
+      const truncateAutocomplete = (text, maxLen = 100) =>
+        text.length <= maxLen ? text : `${text.slice(0, Math.max(0, maxLen - 1))}…`;
+      
       await safeRespond(interaction,
-        availableNFTs.slice(0, 25).map(item => ({
-          name: `${item.name} (${item.identifier}) - Available: ${item.available}`,
-          value: item.name || item.identifier
-        }))
+        availableNFTs.slice(0, 25).map(item => {
+          // value must be unique per choice (Discord rejects duplicates) and <= 100 chars; collection#nonce matches /tip-virtual-nft parser
+          const value = truncateAutocomplete(item.identifier, 100);
+          const name = truncateAutocomplete(`${item.name} (${item.identifier}) · avail ${item.available}`, 100);
+          return { name, value };
+        })
       );
     } catch (error) {
       console.error('[AUTOCOMPLETE] Error in tip-virtual-nft nft-name autocomplete:', error);
