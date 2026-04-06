@@ -9911,6 +9911,16 @@ client.on('interactionCreate', async (interaction) => {
           .setStyle(ButtonStyle.Primary);
         buttons.push(offerButton);
       }
+
+      const showNftImageUrl = nftImageUrlForLinkButton(nftImageUrl);
+      if (showNftImageUrl) {
+        buttons.push(
+          new ButtonBuilder()
+            .setLabel('Show NFT')
+            .setStyle(ButtonStyle.Link)
+            .setURL(showNftImageUrl)
+        );
+      }
       
       const cancelButton = new ButtonBuilder()
         .setCustomId(`nft-listing-cancel:${listingId}`)
@@ -28741,6 +28751,15 @@ async function syncNFTOffererDmNotification(offer, offerListing, outcome) {
   }
 }
 
+/** Link-style buttons require http(s) and URL length ≤ 512 (Discord API). */
+function nftImageUrlForLinkButton(url) {
+  if (!url || typeof url !== 'string') return null;
+  const u = normalizeNftMediaUrlForDiscord(url).trim();
+  if (!/^https?:\/\//i.test(u)) return null;
+  if (u.length > 512) return null;
+  return u;
+}
+
 // Update NFT listing embed
 async function updateNFTListingEmbed(guildId, listingId) {
   try {
@@ -28862,6 +28881,16 @@ async function updateNFTListingEmbed(guildId, listingId) {
           .setLabel('Make Offer')
           .setStyle(ButtonStyle.Primary);
         buttons.push(offerButton);
+      }
+
+      const showNftImageUrl = nftImageUrlForLinkButton(nftImageUrl);
+      if (showNftImageUrl) {
+        buttons.push(
+          new ButtonBuilder()
+            .setLabel('Show NFT')
+            .setStyle(ButtonStyle.Link)
+            .setURL(showNftImageUrl)
+        );
       }
       
       const cancelButton = new ButtonBuilder()
