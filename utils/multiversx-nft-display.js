@@ -1,5 +1,19 @@
 const fetch = require('node-fetch');
 
+/** Prefer for Discord embeds: distinct hostname from ipfs.io can avoid some rate-limit/fetch quirks with Discord's proxy. */
+const DISCORD_FRIENDLY_IPFS_PREFIX = 'https://dweb.link/ipfs/';
+
+function normalizeNftMediaUrlForDiscord(url) {
+  if (!url || typeof url !== 'string') return url || null;
+  let u = url.trim();
+  if (u.startsWith('ipfs://')) {
+    u = `${DISCORD_FRIENDLY_IPFS_PREFIX}${u.replace(/^ipfs:\/\//i, '')}`;
+  }
+  u = u.replace(/^https:\/\/ipfs\.io\/ipfs\//i, DISCORD_FRIENDLY_IPFS_PREFIX);
+  u = u.replace(/^https:\/\/gateway\.ipfs\.io\/ipfs\//i, DISCORD_FRIENDLY_IPFS_PREFIX);
+  return u;
+}
+
 /**
  * Shared MultiversX NFT metadata + image resolution (same pipeline as /show-my-nft).
  * @param {object} nftLike - { identifier, nft_image_url?, metadata? }
@@ -16,7 +30,7 @@ async function fetchMultiversXNftDisplayState(nftLike, collection, options = {})
   if (!identifier) {
     return {
       nftDetails: null,
-      imageUrl: nftLike?.nft_image_url || null,
+      imageUrl: normalizeNftMediaUrlForDiscord(nftLike?.nft_image_url),
       attributes: [],
       metadata
     };
@@ -30,7 +44,7 @@ async function fetchMultiversXNftDisplayState(nftLike, collection, options = {})
     if (!ipfsUrl) return ipfsUrl;
     if (ipfsUrl.startsWith('ipfs://')) {
       const ipfsHash = ipfsUrl.replace('ipfs://', '');
-      return `https://ipfs.io/ipfs/${ipfsHash}`;
+      return `${DISCORD_FRIENDLY_IPFS_PREFIX}${ipfsHash}`;
     }
     return ipfsUrl;
   };
@@ -69,11 +83,13 @@ async function fetchMultiversXNftDisplayState(nftLike, collection, options = {})
         }
       }
 
-      if (nftDetails.url && !nftDetails.url.includes('default.png')) {
-        nftImageUrl = convertIPFSToGateway(nftDetails.url);
-      } else if (ipfsImageUrl) {
+      // Prefer explicit image URIs from the token (reliable artwork URL). MultiversX `url` often
+      // overrides these with a link Discord's embed proxy fails to render.
+      if (ipfsImageUrl) {
         nftImageUrl = convertIPFSToGateway(ipfsImageUrl);
         console.log(`[SHOW-NFT] Using image from decoded URIs: ${nftImageUrl}`);
+      } else if (nftDetails.url && !nftDetails.url.includes('default.png')) {
+        nftImageUrl = convertIPFSToGateway(nftDetails.url);
       } else if (nftDetails.media && nftDetails.media.length > 0) {
         const mediaUrl = nftDetails.media[0].url || nftDetails.media[0].thumbnailUrl;
         if (mediaUrl && !mediaUrl.includes('default.png')) {
@@ -415,10 +431,10 @@ async function fetchMultiversXNftDisplayState(nftLike, collection, options = {})
 
   return {
     nftDetails,
-    imageUrl: nftImageUrl,
+    imageUrl: normalizeNftMediaUrlForDiscord(nftImageUrl),
     attributes,
     metadata
   };
 }
 
-module.exports = { fetchMultiversXNftDisplayState };
+module.exports = { fetchMultiversXNftDisplayState, normalizeNftMediaUrlForDiscord };

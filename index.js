@@ -69,7 +69,7 @@ if (missingVars.length > 0) {
 const { Client, IntentsBitField, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags, ChannelType, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const BigNumber = require('bignumber.js');
-const { fetchMultiversXNftDisplayState } = require('./utils/multiversx-nft-display');
+const { fetchMultiversXNftDisplayState, normalizeNftMediaUrlForDiscord } = require('./utils/multiversx-nft-display');
 
 // Import virtual accounts and blockchain listener
 const virtualAccounts = require('./virtual-accounts.js');
@@ -9890,7 +9890,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       if (nftImageUrl) {
-        listingEmbed.setThumbnail(nftImageUrl);
+        listingEmbed.setImage(normalizeNftMediaUrlForDiscord(nftImageUrl));
       }
       
       // Create buttons
@@ -26944,7 +26944,7 @@ async function forwardListingToSubscribers(sourceGuildId, listingId) {
     }
     
     if (listing.nftImageUrl) {
-      forwardEmbed.setThumbnail(listing.nftImageUrl);
+      forwardEmbed.setImage(normalizeNftMediaUrlForDiscord(listing.nftImageUrl));
     }
     
     // Forward to each subscription (excluding source guild)
@@ -28752,7 +28752,8 @@ async function updateNFTListingEmbed(guildId, listingId) {
 
     const message = await channel.messages.fetch(listing.messageId);
     if (!message) return;
-    const previousThumbnailUrl = message.embeds?.[0]?.thumbnail?.url || null;
+    const previousThumbnailUrl =
+      message.embeds?.[0]?.image?.url || message.embeds?.[0]?.thumbnail?.url || null;
 
     const isExpired = listing.expiresAt && Date.now() > listing.expiresAt;
     const isSold = listing.status === 'SOLD';
@@ -28839,7 +28840,7 @@ async function updateNFTListingEmbed(guildId, listingId) {
     }
     
     if (nftImageUrl) {
-      listingEmbed.setThumbnail(nftImageUrl);
+      listingEmbed.setImage(normalizeNftMediaUrlForDiscord(nftImageUrl));
     }
 
     // Create buttons based on status
