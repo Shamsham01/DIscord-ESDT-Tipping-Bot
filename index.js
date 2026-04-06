@@ -9890,7 +9890,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       if (nftImageUrl) {
-        listingEmbed.setImage(normalizeNftMediaUrlForDiscord(nftImageUrl));
+        listingEmbed.setThumbnail(normalizeNftMediaUrlForDiscord(nftImageUrl));
       }
       
       // Create buttons
@@ -26944,7 +26944,7 @@ async function forwardListingToSubscribers(sourceGuildId, listingId) {
     }
     
     if (listing.nftImageUrl) {
-      forwardEmbed.setImage(normalizeNftMediaUrlForDiscord(listing.nftImageUrl));
+      forwardEmbed.setThumbnail(normalizeNftMediaUrlForDiscord(listing.nftImageUrl));
     }
     
     // Forward to each subscription (excluding source guild)
@@ -28840,7 +28840,7 @@ async function updateNFTListingEmbed(guildId, listingId) {
     }
     
     if (nftImageUrl) {
-      listingEmbed.setImage(normalizeNftMediaUrlForDiscord(nftImageUrl));
+      listingEmbed.setThumbnail(normalizeNftMediaUrlForDiscord(nftImageUrl));
     }
 
     // Create buttons based on status
