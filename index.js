@@ -236,6 +236,55 @@ async function ashSwapAggregator(walletPem, fromToken, toToken, amount, slippage
   return data;
 }
 
+/** Poll MultiversX API until swap tx is success, fail, invalid, or timeout. */
+const MULTIVERSX_TX_POLL_INTERVAL_MS = 2000;
+const MULTIVERSX_TX_POLL_MAX_WAIT_MS = 90000;
+
+function delayMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * @returns {Promise<{ status: 'success' | 'failed' | 'timeout' | 'invalid_hash' | 'api_error', tx?: object, userMessage?: string }>}
+ */
+async function waitForMultiversXTransactionTerminalOutcome(txHash) {
+  const normalized = typeof txHash === 'string' ? txHash.toLowerCase() : '';
+  if (!/^[a-f0-9]{64}$/.test(normalized)) {
+    return { status: 'invalid_hash', userMessage: 'Invalid transaction hash from swap API.' };
+  }
+  const deadline = Date.now() + MULTIVERSX_TX_POLL_MAX_WAIT_MS;
+
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`https://api.multiversx.com/transactions/${normalized}`);
+      if (res.status === 404) {
+        await delayMs(MULTIVERSX_TX_POLL_INTERVAL_MS);
+        continue;
+      }
+      if (!res.ok) {
+        return { status: 'api_error', userMessage: `Could not verify transaction (HTTP ${res.status}).` };
+      }
+      const tx = await res.json();
+      if (tx.status === 'success') {
+        return { status: 'success', tx };
+      }
+      if (tx.status === 'fail' || tx.status === 'invalid') {
+        const userMessage = tx.status === 'invalid'
+          ? 'Transaction was invalid on-chain.'
+          : 'Transaction failed on-chain (for example insufficient funds or slippage).';
+        return { status: 'failed', userMessage };
+      }
+    } catch (e) {
+      console.error('[SWAP] Tx status poll error:', e.message);
+    }
+    await delayMs(MULTIVERSX_TX_POLL_INTERVAL_MS);
+  }
+  return {
+    status: 'timeout',
+    userMessage: `Transaction not confirmed within ${Math.round(MULTIVERSX_TX_POLL_MAX_WAIT_MS / 1000)}s. Check the explorer; your sold tokens were refunded to your VA.`
+  };
+}
+
 // Pending swap quotes (key: guildId:userId:messageId)
 const pendingSwapQuotes = new Map();
 
@@ -17673,8 +17722,35 @@ client.on('interactionCreate', async (interaction) => {
       console.log('[SWAP] Parsed data:', JSON.stringify({ outputs: data?.outputs ?? data?.swapDetails?.outputs, transactionHash: data?.transactionHash, explorerUrl: data?.explorerUrl }, null, 2));
 
       const outputs = data?.swapDetails?.outputs ?? data?.outputs ?? [];
+      const txHash = data?.transactionHash;
+      const explorerBase =
+        data?.explorerUrl ||
+        (txHash && isValidTransactionHash(txHash) ? `https://explorer.multiversx.com/transactions/${txHash}` : null);
+
+      const canFallbackCredit = Boolean(txHash && (expectedAmountOutRaw || minAmountOutRaw));
+      if (outputs.length === 0 && !canFallbackCredit) {
+        console.error('[SWAP] No outputs in response. Raw structure:', JSON.stringify(swapResult, null, 2).slice(0, 500));
+        const err = new Error('No outputs in swap response');
+        err.data = data;
+        throw err;
+      }
+      if (!txHash || !isValidTransactionHash(txHash)) {
+        const err = new Error('Swap response missing valid transaction hash.');
+        err.data = data;
+        throw err;
+      }
+
+      console.log('[SWAP] Verifying on-chain status for tx:', txHash);
+      const txOutcome = await waitForMultiversXTransactionTerminalOutcome(txHash);
+      if (txOutcome.status !== 'success') {
+        const err = new Error(txOutcome.userMessage || 'Swap failed on-chain.');
+        err.status = 422;
+        err.data = { transactionHash: txHash, explorerUrl: explorerBase };
+        throw err;
+      }
+
       if (outputs.length > 0) {
-        console.log('[SWAP] Processing outputs:', outputs.length, 'from', fromToken, 'to', toToken, 'amount', amount, 'txHash', data?.transactionHash);
+        console.log('[SWAP] Processing outputs:', outputs.length, 'from', fromToken, 'to', toToken, 'amount', amount, 'txHash', txHash);
         const additionTxIds = [];
         for (const output of outputs) {
           const outToken = output.token || toToken;
@@ -17688,7 +17764,7 @@ client.on('interactionCreate', async (interaction) => {
           } else {
             humanAmount = '0';
           }
-          const addResult = await virtualAccounts.addFundsToAccount(guildId, userId, outToken, humanAmount, data.transactionHash, 'swap', interaction.user.tag);
+          const addResult = await virtualAccounts.addFundsToAccount(guildId, userId, outToken, humanAmount, txHash, 'swap', interaction.user.tag);
           if (addResult?.transaction?.id) additionTxIds.push(addResult.transaction.id);
         }
         const totalReceived = outputs.reduce((sum, o) => {
@@ -17714,7 +17790,7 @@ client.on('interactionCreate', async (interaction) => {
             amountSold: amount,
             amountReceived: totalHuman,
             slippagePercentage: parseFloat(slippage),
-            transactionHash: data.transactionHash,
+            transactionHash: txHash,
             status: 'completed',
             deductionTransactionId: deductResult?.transaction?.id || null,
             additionTransactionId: additionTxIds.length > 0 ? additionTxIds[0] : null
@@ -17757,7 +17833,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Sold', value: `${formatNumberForDisplay(amount)} ${fromTokenTicker}`, inline: true },
             { name: 'Received', value: `${outputsText}${toUsdSuccess ? ` (≈ $${toUsdSuccess})` : ''}`, inline: true },
             { name: 'New VA Balance', value: `${fromTokenTicker}: ${formatNumberForDisplay(balanceAfterFrom)} | ${toTokenTicker}: ${formatNumberForDisplay(balanceAfterTo)}`, inline: false },
-            { name: 'Transaction', value: data.explorerUrl ? `[View on Explorer](${data.explorerUrl})` : (data.transactionHash || 'N/A'), inline: false }
+            { name: 'Transaction', value: explorerBase ? `[View on Explorer](${explorerBase})` : (txHash || 'N/A'), inline: false }
           )
           .setTimestamp()
           .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
@@ -17768,51 +17844,9 @@ client.on('interactionCreate', async (interaction) => {
           console.error('[SWAP] Error editing success message:', editErr.message);
           await interaction.followUp({ embeds: [successEmbed], flags: [MessageFlags.Ephemeral] });
         }
-      } else if (data?.transactionHash && (expectedAmountOutRaw || minAmountOutRaw)) {
-        // Fallback: swap succeeded on-chain but API returned no outputs - credit using quote's expected amount
-        console.log('[SWAP] Fallback: no outputs but txHash present, crediting from quote. txHash:', data.transactionHash, 'expectedAmountOutRaw:', expectedAmountOutRaw || minAmountOutRaw);
-        const fallbackAmountRaw = expectedAmountOutRaw || minAmountOutRaw || '0';
-        const totalHuman = new BigNumber(fallbackAmountRaw).dividedBy(new BigNumber(10).pow(toTokenDecimals)).toString();
-        await virtualAccounts.addFundsToAccount(guildId, userId, toToken, totalHuman, data.transactionHash, 'swap', interaction.user.tag);
-        try {
-          await dbSwapTransactions.insertSwapTransaction({
-            guildId, userId, fromToken, toToken, amountSold: amount, amountReceived: totalHuman,
-            slippagePercentage: parseFloat(slippage), transactionHash: data.transactionHash, status: 'completed',
-            deductionTransactionId: deductResult?.transaction?.id || null, additionTransactionId: null
-          });
-        } catch (dbErr) {
-          console.error('[SWAP] Error saving swap to DB:', dbErr.message);
-        }
-        const successEmbed = new EmbedBuilder()
-          .setTitle('Swap Completed')
-          .setColor(0x00FF00)
-          .setThumbnail(SWAP_EMBED_THUMBNAIL_SUCCESS)
-          .addFields(
-            { name: 'Sold', value: `${formatNumberForDisplay(amount)} ${fromTokenTicker}`, inline: true },
-            { name: 'Received', value: `~${formatNumberForDisplay(totalHuman)} ${toTokenTicker}`, inline: true },
-            { name: 'Transaction', value: data.explorerUrl ? `[View on Explorer](${data.explorerUrl})` : (data.transactionHash || 'N/A'), inline: false }
-          )
-          .setFooter({ text: 'Powered by MakeX (amount from quote - API did not return outputs)', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-          .setTimestamp();
-        try {
-          await interaction.message.edit({ embeds: [successEmbed], components: [] });
-        } catch (editErr) {
-          await interaction.followUp({ embeds: [successEmbed], flags: [MessageFlags.Ephemeral] });
-        }
       } else {
-        console.error('[SWAP] No outputs in response. Raw structure:', JSON.stringify(swapResult, null, 2).slice(0, 500));
-        const err = new Error('No outputs in swap response');
-        err.data = data;
-        throw err;
-      }
-    } catch (swapErr) {
-      const txHash = swapErr.data?.transactionHash ?? swapErr.data?.data?.transactionHash;
-      const explorerUrl = swapErr.data?.explorerUrl ?? swapErr.data?.data?.explorerUrl;
-      const status = swapErr.status;
-
-      // If we have a tx hash, swap may have succeeded on-chain - credit user instead of refunding
-      if (txHash && (expectedAmountOutRaw || minAmountOutRaw)) {
-        console.log('[SWAP] Catch fallback: crediting from quote (swap likely succeeded). txHash:', txHash, 'error:', swapErr.message);
+        // Fallback: verified on-chain success but API returned no outputs — credit using quote's expected amount
+        console.log('[SWAP] Fallback: crediting from quote after verified success. txHash:', txHash, 'expectedAmountOutRaw:', expectedAmountOutRaw || minAmountOutRaw);
         const fallbackAmountRaw = expectedAmountOutRaw || minAmountOutRaw || '0';
         const totalHuman = new BigNumber(fallbackAmountRaw).dividedBy(new BigNumber(10).pow(toTokenDecimals)).toString();
         await virtualAccounts.addFundsToAccount(guildId, userId, toToken, totalHuman, txHash, 'swap', interaction.user.tag);
@@ -17829,20 +17863,63 @@ client.on('interactionCreate', async (interaction) => {
           .setTitle('Swap Completed')
           .setColor(0x00FF00)
           .setThumbnail(SWAP_EMBED_THUMBNAIL_SUCCESS)
-          .setDescription('Swap executed on-chain. Amount credited from quote (API response was incomplete).')
           .addFields(
             { name: 'Sold', value: `${formatNumberForDisplay(amount)} ${fromTokenTicker}`, inline: true },
             { name: 'Received', value: `~${formatNumberForDisplay(totalHuman)} ${toTokenTicker}`, inline: true },
-            { name: 'Transaction', value: explorerUrl ? `[View on Explorer](${explorerUrl})` : txHash, inline: false }
+            { name: 'Transaction', value: explorerBase ? `[View on Explorer](${explorerBase})` : (txHash || 'N/A'), inline: false }
           )
-          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+          .setFooter({ text: 'Powered by MakeX (amount from quote - API did not return outputs)', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
           .setTimestamp();
         try {
           await interaction.message.edit({ embeds: [successEmbed], components: [] });
         } catch (editErr) {
           await interaction.followUp({ embeds: [successEmbed], flags: [MessageFlags.Ephemeral] });
         }
-        return;
+      }
+    } catch (swapErr) {
+      const txHash = swapErr.data?.transactionHash ?? swapErr.data?.data?.transactionHash;
+      const explorerUrl = swapErr.data?.explorerUrl ?? swapErr.data?.data?.explorerUrl;
+      const status = swapErr.status;
+
+      // If API errored but submitted a tx, confirm on-chain before crediting from quote
+      const catchExplorerUrl =
+        explorerUrl ||
+        (txHash && isValidTransactionHash(txHash) ? `https://explorer.multiversx.com/transactions/${txHash}` : null);
+      if (txHash && isValidTransactionHash(txHash) && (expectedAmountOutRaw || minAmountOutRaw)) {
+        const outcome = await waitForMultiversXTransactionTerminalOutcome(txHash);
+        if (outcome.status === 'success') {
+          console.log('[SWAP] Catch fallback: verified on-chain success, crediting from quote. txHash:', txHash, 'error:', swapErr.message);
+          const fallbackAmountRaw = expectedAmountOutRaw || minAmountOutRaw || '0';
+          const totalHuman = new BigNumber(fallbackAmountRaw).dividedBy(new BigNumber(10).pow(toTokenDecimals)).toString();
+          await virtualAccounts.addFundsToAccount(guildId, userId, toToken, totalHuman, txHash, 'swap', interaction.user.tag);
+          try {
+            await dbSwapTransactions.insertSwapTransaction({
+              guildId, userId, fromToken, toToken, amountSold: amount, amountReceived: totalHuman,
+              slippagePercentage: parseFloat(slippage), transactionHash: txHash, status: 'completed',
+              deductionTransactionId: deductResult?.transaction?.id || null, additionTransactionId: null
+            });
+          } catch (dbErr) {
+            console.error('[SWAP] Error saving swap to DB:', dbErr.message);
+          }
+          const successEmbed = new EmbedBuilder()
+            .setTitle('Swap Completed')
+            .setColor(0x00FF00)
+            .setThumbnail(SWAP_EMBED_THUMBNAIL_SUCCESS)
+            .setDescription('Swap executed on-chain. Amount credited from quote (API response was incomplete).')
+            .addFields(
+              { name: 'Sold', value: `${formatNumberForDisplay(amount)} ${fromTokenTicker}`, inline: true },
+              { name: 'Received', value: `~${formatNumberForDisplay(totalHuman)} ${toTokenTicker}`, inline: true },
+              { name: 'Transaction', value: catchExplorerUrl ? `[View on Explorer](${catchExplorerUrl})` : txHash, inline: false }
+            )
+            .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+            .setTimestamp();
+          try {
+            await interaction.message.edit({ embeds: [successEmbed], components: [] });
+          } catch (editErr) {
+            await interaction.followUp({ embeds: [successEmbed], flags: [MessageFlags.Ephemeral] });
+          }
+          return;
+        }
       }
 
       console.log('[SWAP] Refunding user. Error:', swapErr.message, 'txHash:', txHash || 'none');
