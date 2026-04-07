@@ -185,6 +185,170 @@ function formatNumberForDisplay(num) {
   return isNaN(n) ? '0.00' : n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
 }
 
+const SERVER_BALANCES_FIELDS_PER_PAGE = 25;
+/** Summary fields on page 1; leave room for tokens on the first embed (Discord max 25 fields). */
+const SERVER_BALANCES_FIRST_PAGE_TOKEN_SLOTS = SERVER_BALANCES_FIELDS_PER_PAGE - 3;
+
+function buildServerBalancesHeaderFields(summary) {
+  return [
+    { name: '👥 Total Users', value: summary.totalUsers.toString(), inline: true },
+    { name: '💰 Active Users', value: summary.activeUsers.toString(), inline: true },
+    { name: '📊 Total Token Types', value: Object.keys(summary.totalBalances || {}).length.toString(), inline: true }
+  ];
+}
+
+function buildServerBalancesTokenFieldsFlat(summary) {
+  return Object.entries(summary.totalBalances || {}).map(([token, total]) => ({
+    name: `${token} Total`,
+    value: `**${total}** tokens`,
+    inline: true
+  }));
+}
+
+/** NFT/SFT embed fields (same structure as /server-balances). */
+function buildServerBalancesNftFields(nftSummary) {
+  const fields = [];
+  const totalNfts = Number(nftSummary.totalNFTs) || 0;
+  const totalSfts = Number(nftSummary.totalSFTs) || 0;
+  if (totalNfts <= 0 && totalSfts <= 0) return fields;
+
+  fields.push({ name: '\u200b', value: '**NFT/SFT Totals**', inline: false });
+
+  if (totalNfts > 0) {
+    fields.push({
+      name: '🖼️ Total NFTs',
+      value: `**${totalNfts.toLocaleString()}** NFTs\n${nftSummary.nftCollectionCount} collection${nftSummary.nftCollectionCount !== 1 ? 's' : ''}`,
+      inline: true
+    });
+  }
+
+  if (totalSfts > 0) {
+    fields.push({
+      name: '🎫 Total SFTs',
+      value: `**${totalSfts.toLocaleString()}** SFTs\n${nftSummary.sftCollectionCount} collection${nftSummary.sftCollectionCount !== 1 ? 's' : ''}`,
+      inline: true
+    });
+  }
+
+  const collectionEntries = Object.entries(nftSummary.collectionTotals || {});
+  if (collectionEntries.length > 0) {
+    fields.push({ name: '\u200b', value: '**Collection Breakdown**', inline: false });
+
+    const collectionsToShow = collectionEntries.slice(0, 10);
+    for (const [collection, totals] of collectionsToShow) {
+      const parts = [];
+      if (totals.nftCount > 0) {
+        parts.push(`${totals.nftCount} NFT${totals.nftCount !== 1 ? 's' : ''}`);
+      }
+      if (parseInt(totals.sftAmount, 10) > 0) {
+        parts.push(`${parseInt(totals.sftAmount, 10).toLocaleString()} SFT${parseInt(totals.sftAmount, 10) !== 1 ? 's' : ''}`);
+      }
+      if (parts.length > 0) {
+        fields.push({
+          name: collection,
+          value: parts.join(' • '),
+          inline: true
+        });
+      }
+    }
+
+    if (collectionEntries.length > 10) {
+      fields.push({
+        name: '\u200b',
+        value: `*...and ${collectionEntries.length - 10} more collection${collectionEntries.length - 10 !== 1 ? 's' : ''}*`,
+        inline: false
+      });
+    }
+  }
+
+  return fields;
+}
+
+/**
+ * Split header, token rows, and NFT rows into pages of at most 25 fields.
+ * Page 1 includes the 3 summary fields; further token pages hold 25 each; NFT packed into the last page when space allows.
+ */
+function packServerBalancesPages(headerFields, tokenFields, nftFields) {
+  const F = SERVER_BALANCES_FIELDS_PER_PAGE;
+  const pages = [];
+
+  let ti = 0;
+  const firstTokenCount = Math.min(SERVER_BALANCES_FIRST_PAGE_TOKEN_SLOTS, tokenFields.length);
+  const page1 = [...headerFields, ...tokenFields.slice(0, firstTokenCount)];
+  ti = firstTokenCount;
+  pages.push(page1);
+
+  while (ti < tokenFields.length) {
+    pages.push(tokenFields.slice(ti, ti + F));
+    ti += F;
+  }
+
+  if (nftFields.length === 0) {
+    return pages;
+  }
+
+  const last = pages[pages.length - 1];
+  const space = F - last.length;
+  if (space > 0) {
+    last.push(...nftFields.slice(0, space));
+    let ni = space;
+    while (ni < nftFields.length) {
+      pages.push(nftFields.slice(ni, ni + F));
+      ni += F;
+    }
+  } else {
+    let ni = 0;
+    while (ni < nftFields.length) {
+      pages.push(nftFields.slice(ni, ni + F));
+      ni += F;
+    }
+  }
+
+  return pages;
+}
+
+function buildServerBalancesPageEmbed(guildName, fieldSlice, currentPage, totalPages) {
+  const isFirst = currentPage === 1;
+  const desc = isFirst
+    ? `Virtual accounts overview for ${guildName}`
+    : `Continued — ${guildName} · Page ${currentPage} of ${totalPages}`;
+
+  const embed = new EmbedBuilder()
+    .setTitle('🏦 Server Virtual Accounts Summary')
+    .setDescription(desc)
+    .addFields(...fieldSlice)
+    .setColor(0x00ff00)
+    .setTimestamp()
+    .setFooter({
+      text: totalPages > 1 ? `Page ${currentPage}/${totalPages} • Powered by MakeX` : 'Powered by MakeX',
+      iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png'
+    });
+  return embed;
+}
+
+function buildServerBalancesPaginationRows(guildId, requesterId, currentPage, totalPages) {
+  if (totalPages <= 1) return [];
+  const row = new ActionRowBuilder();
+  row.addComponents(
+    new ButtonBuilder()
+      .setCustomId(`server-balances:${guildId}:${requesterId}:${currentPage - 1}`)
+      .setLabel('◀ Previous')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(currentPage <= 1),
+    new ButtonBuilder()
+      .setCustomId(`server-balances-page:${guildId}:${requesterId}:${currentPage}`)
+      .setLabel(`Page ${currentPage}/${totalPages}`)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true),
+    new ButtonBuilder()
+      .setCustomId(`server-balances:${guildId}:${requesterId}:${currentPage + 1}`)
+      .setLabel('Next ▶')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(currentPage >= totalPages)
+  );
+  return [row];
+}
+
 // AshSwap API: Get quote (no execution)
 async function ashSwapQuote(fromToken, toToken, amount, slippage) {
   const url = SWAP_API_BASE_URL.endsWith('/') ? `${SWAP_API_BASE_URL}ashSwapQuote` : `${SWAP_API_BASE_URL}/ashSwapQuote`;
@@ -10525,90 +10689,23 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply({ flags: isPublic ? [] : [MessageFlags.Ephemeral] });
       
       const guildId = interaction.guildId;
-      
-      // Get server-wide virtual accounts summary
+      const requesterId = interaction.user.id;
+      const guildName = interaction.guild.name;
+
       const summary = await virtualAccounts.getServerVirtualAccountsSummary(guildId);
-      
-      // Get NFT/SFT summary
       const nftSummary = await virtualAccountsNFT.getServerNFTSummary(guildId);
-      
-      const embed = new EmbedBuilder()
-        .setTitle('🏦 Server Virtual Accounts Summary')
-        .setDescription(`Virtual accounts overview for ${interaction.guild.name}`)
-        .addFields([
-          { name: '👥 Total Users', value: summary.totalUsers.toString(), inline: true },
-          { name: '💰 Active Users', value: summary.activeUsers.toString(), inline: true },
-          { name: '📊 Total Token Types', value: Object.keys(summary.totalBalances).length.toString(), inline: true }
-        ])
-        .setColor('#00FF00')
-        .setTimestamp()
-        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
-      
-      // Add token balances
-      for (const [token, total] of Object.entries(summary.totalBalances)) {
-        embed.addFields({
-          name: `${token} Total`,
-          value: `**${total}** tokens`,
-          inline: true
-        });
-      }
-      
-      // Add NFT/SFT totals
-      if (nftSummary.totalNFTs > 0 || nftSummary.totalSFTs > 0) {
-        embed.addFields({ name: '\u200b', value: '**NFT/SFT Totals**', inline: false });
-        
-        if (nftSummary.totalNFTs > 0) {
-          embed.addFields({
-            name: '🖼️ Total NFTs',
-            value: `**${nftSummary.totalNFTs.toLocaleString()}** NFTs\n${nftSummary.nftCollectionCount} collection${nftSummary.nftCollectionCount !== 1 ? 's' : ''}`,
-            inline: true
-          });
-        }
-        
-        if (nftSummary.totalSFTs > 0) {
-          embed.addFields({
-            name: '🎫 Total SFTs',
-            value: `**${nftSummary.totalSFTs.toLocaleString()}** SFTs\n${nftSummary.sftCollectionCount} collection${nftSummary.sftCollectionCount !== 1 ? 's' : ''}`,
-            inline: true
-          });
-        }
-        
-        // Add collection breakdown if there are collections
-        const collectionEntries = Object.entries(nftSummary.collectionTotals);
-        if (collectionEntries.length > 0) {
-          embed.addFields({ name: '\u200b', value: '**Collection Breakdown**', inline: false });
-          
-          // Limit to first 10 collections to avoid embed field limit
-          const collectionsToShow = collectionEntries.slice(0, 10);
-          for (const [collection, totals] of collectionsToShow) {
-            const parts = [];
-            if (totals.nftCount > 0) {
-              parts.push(`${totals.nftCount} NFT${totals.nftCount !== 1 ? 's' : ''}`);
-            }
-            if (parseInt(totals.sftAmount, 10) > 0) {
-              parts.push(`${parseInt(totals.sftAmount, 10).toLocaleString()} SFT${parseInt(totals.sftAmount, 10) !== 1 ? 's' : ''}`);
-            }
-            
-            if (parts.length > 0) {
-              embed.addFields({
-                name: collection,
-                value: parts.join(' • '),
-                inline: true
-              });
-            }
-          }
-          
-          if (collectionEntries.length > 10) {
-            embed.addFields({
-              name: '\u200b',
-              value: `*...and ${collectionEntries.length - 10} more collection${collectionEntries.length - 10 !== 1 ? 's' : ''}*`,
-              inline: false
-            });
-          }
-        }
-      }
-      
-      await interaction.editReply({ embeds: [embed] });
+
+      const headerFields = buildServerBalancesHeaderFields(summary);
+      const tokenFields = buildServerBalancesTokenFieldsFlat(summary);
+      const nftFields = buildServerBalancesNftFields(nftSummary);
+      const pages = packServerBalancesPages(headerFields, tokenFields, nftFields);
+      const totalPages = pages.length;
+      const currentPage = 1;
+
+      const embed = buildServerBalancesPageEmbed(guildName, pages[currentPage - 1], currentPage, totalPages);
+      const components = buildServerBalancesPaginationRows(guildId, requesterId, currentPage, totalPages);
+
+      await interaction.editReply({ embeds: [embed], components });
       
     } catch (error) {
       console.error('Error in server-balances command:', error.message);
@@ -20843,6 +20940,52 @@ client.on('interactionCreate', async (interaction) => {
     } catch (error) {
       console.error('[HELP] Error in help pagination:', error.message);
       await interaction.editReply({ content: `❌ Error: ${error.message}` });
+    }
+  } else if (customId.startsWith('server-balances:')) {
+    // /server-balances pagination (admin + same user who ran the command)
+    try {
+      await interaction.deferUpdate();
+
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.followUp({ content: '❌ **Admin only.**', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      const parts = customId.split(':');
+      const guildId = parts[1];
+      const requesterId = parts[2];
+      const page = parseInt(parts[3], 10) || 1;
+
+      if (interaction.user.id !== requesterId) {
+        await interaction.followUp({ content: '❌ Only the user who ran `/server-balances` can use these buttons.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      if (interaction.guildId !== guildId) {
+        await interaction.followUp({ content: '❌ This summary belongs to another server.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      const summary = await virtualAccounts.getServerVirtualAccountsSummary(guildId);
+      const nftSummary = await virtualAccountsNFT.getServerNFTSummary(guildId);
+      const headerFields = buildServerBalancesHeaderFields(summary);
+      const tokenFields = buildServerBalancesTokenFieldsFlat(summary);
+      const nftFields = buildServerBalancesNftFields(nftSummary);
+      const pages = packServerBalancesPages(headerFields, tokenFields, nftFields);
+      const totalPages = Math.max(1, pages.length);
+      const currentPage = Math.max(1, Math.min(page, totalPages));
+      const guildName = interaction.guild?.name || 'Server';
+
+      const embed = buildServerBalancesPageEmbed(guildName, pages[currentPage - 1], currentPage, totalPages);
+      const components = buildServerBalancesPaginationRows(guildId, requesterId, currentPage, totalPages);
+
+      await interaction.editReply({ embeds: [embed], components });
+    } catch (error) {
+      console.error('[SERVER-BALANCES] Pagination error:', error.message);
+      try {
+        await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } catch (e) {
+        /* ignore */
+      }
     }
   } else if (customId.startsWith('balance-history:')) {
     // Balance history pagination handler

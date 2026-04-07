@@ -929,7 +929,7 @@ const commands = [
     },
     {
         name: 'server-balances',
-        description: 'View server-wide virtual account summary (Admin only)',
+        description: 'View server-wide virtual account summary with pagination when needed (Admin only)',
         options: [
             {
                 name: 'public',
