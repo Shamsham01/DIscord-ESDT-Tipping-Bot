@@ -28364,108 +28364,162 @@ async function getTokenDecimals(tokenIdentifier, retryCount = 0, maxRetries = 3)
   }
 }
 
-// Function to get token USD price with MultiversX API fallback to DexScreener
+// When DexScreener omits priceUsd (common on MultiversX), derive from priceNative × quote USD or base USD / priceNative.
+async function resolveUsdFromDexScreenerPair(pair, tokenIdentifier, depth, visiting) {
+  const baseAddr = pair.baseToken?.address;
+  const quoteAddr = pair.quoteToken?.address;
+  const priceUsdDirect = parseFloat(pair.priceUsd || 0);
+  const priceNative = parseFloat(pair.priceNative || 0);
+
+  if (baseAddr === tokenIdentifier) {
+    if (priceUsdDirect > 0) {
+      return priceUsdDirect;
+    }
+    if (priceNative > 0 && quoteAddr && quoteAddr !== tokenIdentifier) {
+      const quoteUsd = await getTokenPriceUsdInternal(quoteAddr, depth + 1, visiting);
+      if (quoteUsd > 0) {
+        const derived = priceNative * quoteUsd;
+        console.log(`[TOKEN-PRICE] Derived USD for ${tokenIdentifier} via quote ${quoteAddr}: ${priceNative} × $${quoteUsd} = $${derived}`);
+        return derived;
+      }
+    }
+  }
+
+  if (quoteAddr === tokenIdentifier) {
+    if (priceNative > 0 && baseAddr && baseAddr !== tokenIdentifier) {
+      const baseUsd = await getTokenPriceUsdInternal(baseAddr, depth + 1, visiting);
+      if (baseUsd > 0) {
+        const derived = baseUsd / priceNative;
+        console.log(`[TOKEN-PRICE] Derived USD for ${tokenIdentifier} as quote vs ${baseAddr}: $${baseUsd} / ${priceNative} = $${derived}`);
+        return derived;
+      }
+    }
+  }
+
+  return 0;
+}
+
+function sortDexPairsByActivity(pairs) {
+  const score = (p) => {
+    const vol = parseFloat(p.volume?.h24 ?? p.volume?.h6 ?? 0);
+    const liq = parseFloat(p.liquidity?.usd ?? 0);
+    const tx = (p.txns?.h24?.buys ?? 0) + (p.txns?.h24?.sells ?? 0);
+    return vol * 1e6 + liq + tx;
+  };
+  return [...pairs].sort((a, b) => score(b) - score(a));
+}
+
 async function getTokenPriceUsd(tokenIdentifier) {
-  // Log the token identifier being queried for debugging
-  console.log(`[TOKEN-PRICE] Fetching USD price for token: ${tokenIdentifier}`);
-  
+  return getTokenPriceUsdInternal(tokenIdentifier, 0, new Set());
+}
+
+async function getTokenPriceUsdInternal(tokenIdentifier, depth = 0, visiting = new Set()) {
+  if (!tokenIdentifier || depth > 4) {
+    return 0;
+  }
+  if (visiting.has(tokenIdentifier)) {
+    return 0;
+  }
+  visiting.add(tokenIdentifier);
+
   try {
-    // Try MultiversX API first
-    const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
-    if (priceResponse.ok) {
-      const priceData = await priceResponse.json();
-      const price = priceData.price || 0;
-      // If we got a valid price, return it
-      if (price > 0) {
-        console.log(`[TOKEN-PRICE] Using MultiversX API price for ${tokenIdentifier}: $${price}`);
-        return price;
-      } else {
-        console.log(`[TOKEN-PRICE] MultiversX API returned price 0 for ${tokenIdentifier}, trying DexScreener...`);
-      }
-    } else {
-      console.log(`[TOKEN-PRICE] MultiversX API returned status ${priceResponse.status} for ${tokenIdentifier}, trying DexScreener...`);
-    }
-  } catch (error) {
-    console.error(`[TOKEN-PRICE] Error fetching price from MultiversX for ${tokenIdentifier}:`, error.message);
-  }
-  
-  // Fallback to DexScreener API
-  // DexScreener for MultiversX requires the token contract address (erd1...), not the identifier
-  // First, try to get token metadata to find the owner/issuer address
-  let tokenContractAddress = null;
-  let tokenTicker = null;
-  try {
-    const tokenMetadataResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
-    if (tokenMetadataResponse.ok) {
-      const tokenMetadata = await tokenMetadataResponse.json();
-      // MultiversX token metadata includes 'owner' or 'issuer' field which is the contract address
-      tokenContractAddress = tokenMetadata.owner || tokenMetadata.issuer || null;
-      tokenTicker = tokenMetadata.ticker || null;
-      if (tokenContractAddress) {
-        console.log(`[TOKEN-PRICE] Found contract address for ${tokenIdentifier}: ${tokenContractAddress}`);
-      }
-      if (tokenTicker) {
-        console.log(`[TOKEN-PRICE] Found ticker for ${tokenIdentifier}: ${tokenTicker}`);
-      }
-    }
-  } catch (error) {
-    console.error(`[TOKEN-PRICE] Error fetching token metadata for ${tokenIdentifier}:`, error.message);
-  }
-  
-  // Try DexScreener with contract address first (most reliable), then identifier, then ticker
-  const dexscreenerQueries = [];
-  if (tokenContractAddress) {
-    dexscreenerQueries.push(tokenContractAddress);
-  }
-  // Also try with the identifier in case DexScreener accepts it
-  if (tokenIdentifier && tokenIdentifier !== tokenContractAddress) {
-    dexscreenerQueries.push(tokenIdentifier);
-  }
-  // Try with ticker as last resort (for search)
-  if (tokenTicker && tokenTicker !== tokenIdentifier) {
-    dexscreenerQueries.push(tokenTicker);
-  }
-  
-  for (const dexscreenerQuery of dexscreenerQueries) {
+    console.log(`[TOKEN-PRICE] Fetching USD price for token: ${tokenIdentifier}${depth > 0 ? ` (depth ${depth})` : ''}`);
+
     try {
-      const dexscreenerResponse = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${dexscreenerQuery}`);
-      if (dexscreenerResponse.ok) {
-        const dexscreenerData = await dexscreenerResponse.json();
-        // Check if we have pairs and extract priceUsd from the first pair
-        if (dexscreenerData.pairs && dexscreenerData.pairs.length > 0) {
-          // Find the best pair (prefer pairs with higher liquidity or volume)
-          let bestPair = dexscreenerData.pairs[0];
-          for (const pair of dexscreenerData.pairs) {
-            // Prefer pairs with higher liquidity
-            const liquidity = parseFloat(pair.liquidity?.usd || 0);
-            const bestLiquidity = parseFloat(bestPair.liquidity?.usd || 0);
-            if (liquidity > bestLiquidity) {
-              bestPair = pair;
-            }
-          }
-          
-          if (bestPair.priceUsd) {
-            const priceUsd = parseFloat(bestPair.priceUsd);
-            if (priceUsd > 0) {
-              console.log(`[TOKEN-PRICE] Using DexScreener price for ${tokenIdentifier} (query: ${dexscreenerQuery}): $${priceUsd}`);
-              return priceUsd;
-            }
-          }
-        } else {
-          console.log(`[TOKEN-PRICE] DexScreener returned no pairs for ${tokenIdentifier} (query: ${dexscreenerQuery})`);
+      const priceResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}?denominated=true`);
+      if (priceResponse.ok) {
+        const priceData = await priceResponse.json();
+        const price = priceData.price || 0;
+        if (price > 0) {
+          console.log(`[TOKEN-PRICE] Using MultiversX API price for ${tokenIdentifier}: $${price}`);
+          return price;
         }
+        console.log(`[TOKEN-PRICE] MultiversX API returned price 0 for ${tokenIdentifier}, trying DexScreener...`);
       } else {
-        console.log(`[TOKEN-PRICE] DexScreener returned status ${dexscreenerResponse.status} for ${tokenIdentifier} (query: ${dexscreenerQuery})`);
+        console.log(`[TOKEN-PRICE] MultiversX API returned status ${priceResponse.status} for ${tokenIdentifier}, trying DexScreener...`);
       }
     } catch (error) {
-      console.error(`[TOKEN-PRICE] Error fetching price from DexScreener for ${tokenIdentifier} (query: ${dexscreenerQuery}):`, error.message);
-      // Continue to next query method
+      console.error(`[TOKEN-PRICE] Error fetching price from MultiversX for ${tokenIdentifier}:`, error.message);
     }
+
+    let tokenContractAddress = null;
+    let tokenTicker = null;
+    try {
+      const tokenMetadataResponse = await fetch(`https://api.multiversx.com/tokens/${tokenIdentifier}`);
+      if (tokenMetadataResponse.ok) {
+        const tokenMetadata = await tokenMetadataResponse.json();
+        tokenContractAddress = tokenMetadata.owner || tokenMetadata.issuer || null;
+        tokenTicker = tokenMetadata.ticker || null;
+        if (tokenContractAddress) {
+          console.log(`[TOKEN-PRICE] Found contract address for ${tokenIdentifier}: ${tokenContractAddress}`);
+        }
+        if (tokenTicker) {
+          console.log(`[TOKEN-PRICE] Found ticker for ${tokenIdentifier}: ${tokenTicker}`);
+        }
+      }
+    } catch (error) {
+      console.error(`[TOKEN-PRICE] Error fetching token metadata for ${tokenIdentifier}:`, error.message);
+    }
+
+    try {
+      const v1Url = `https://api.dexscreener.com/tokens/v1/multiversx/${encodeURIComponent(tokenIdentifier)}`;
+      const v1Response = await fetch(v1Url);
+      if (v1Response.ok) {
+        const v1Data = await v1Response.json();
+        const v1Pairs = Array.isArray(v1Data) ? v1Data : [];
+        for (const pair of sortDexPairsByActivity(v1Pairs)) {
+          const resolved = await resolveUsdFromDexScreenerPair(pair, tokenIdentifier, depth, visiting);
+          if (resolved > 0) {
+            console.log(`[TOKEN-PRICE] Using DexScreener v1 multiversx for ${tokenIdentifier}: $${resolved}`);
+            return resolved;
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`[TOKEN-PRICE] Error fetching DexScreener v1 multiversx for ${tokenIdentifier}:`, error.message);
+    }
+
+    const dexscreenerQueries = [];
+    if (tokenContractAddress) {
+      dexscreenerQueries.push(tokenContractAddress);
+    }
+    if (tokenIdentifier && tokenIdentifier !== tokenContractAddress) {
+      dexscreenerQueries.push(tokenIdentifier);
+    }
+    if (tokenTicker && tokenTicker !== tokenIdentifier) {
+      dexscreenerQueries.push(tokenTicker);
+    }
+
+    for (const dexscreenerQuery of dexscreenerQueries) {
+      try {
+        const dexscreenerResponse = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${dexscreenerQuery}`);
+        if (dexscreenerResponse.ok) {
+          const dexscreenerData = await dexscreenerResponse.json();
+          if (dexscreenerData.pairs && dexscreenerData.pairs.length > 0) {
+            const sortedPairs = sortDexPairsByActivity(dexscreenerData.pairs);
+            for (const pair of sortedPairs) {
+              const resolved = await resolveUsdFromDexScreenerPair(pair, tokenIdentifier, depth, visiting);
+              if (resolved > 0) {
+                console.log(`[TOKEN-PRICE] Using DexScreener latest/dex for ${tokenIdentifier} (query: ${dexscreenerQuery}): $${resolved}`);
+                return resolved;
+              }
+            }
+          } else {
+            console.log(`[TOKEN-PRICE] DexScreener returned no pairs for ${tokenIdentifier} (query: ${dexscreenerQuery})`);
+          }
+        } else {
+          console.log(`[TOKEN-PRICE] DexScreener returned status ${dexscreenerResponse.status} for ${tokenIdentifier} (query: ${dexscreenerQuery})`);
+        }
+      } catch (error) {
+        console.error(`[TOKEN-PRICE] Error fetching price from DexScreener for ${tokenIdentifier} (query: ${dexscreenerQuery}):`, error.message);
+      }
+    }
+
+    console.log(`[TOKEN-PRICE] Failed to fetch USD price for ${tokenIdentifier} from MultiversX and DexScreener`);
+    return 0;
+  } finally {
+    visiting.delete(tokenIdentifier);
   }
-  
-  // Return 0 if both APIs failed
-  console.log(`[TOKEN-PRICE] Failed to fetch USD price for ${tokenIdentifier} from both APIs`);
-  return 0;
 }
 
 // Helper function to sanitize token identifier
