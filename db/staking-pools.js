@@ -319,6 +319,30 @@ async function getUserStakedNFTs(guildId, poolId, userId) {
   }
 }
 
+/**
+ * All (collection, nonce) pairs the user currently has staked in any pool.
+ * Source of truth when VA `staked` flag is out of sync with staking_pool_balances.
+ */
+async function getStakedNftKeysForUser(guildId, userId) {
+  try {
+    const { data, error } = await supabase
+      .from('staking_pool_balances')
+      .select('collection, nonce')
+      .eq('guild_id', guildId)
+      .eq('user_id', userId);
+    
+    if (error) throw error;
+    const keys = new Set();
+    for (const row of data || []) {
+      keys.add(`${row.collection}\u0000${Number(row.nonce)}`);
+    }
+    return keys;
+  } catch (error) {
+    console.error('[DB] Error getting staked NFT keys for user:', error);
+    throw error;
+  }
+}
+
 async function getAllStakedNFTs(guildId, poolId) {
   try {
     const { data, error } = await supabase
@@ -881,6 +905,7 @@ module.exports = {
   stakeNFT,
   unstakeNFT,
   getUserStakedNFTs,
+  getStakedNftKeysForUser,
   getAllStakedNFTs,
   updatePoolStatistics,
   

@@ -10365,6 +10365,16 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
+      const withdrawGuard = await virtualAccountsNFT.validateNFTsForWithdrawal(guildId, userId, [nft]);
+      if (!withdrawGuard.ok) {
+        const first = withdrawGuard.blocked[0];
+        await interaction.editReply({
+          content: `❌ **Cannot withdraw**\n\n${first.reason}`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      
       // Get Community Fund project
       const communityFundProjectName = getCommunityFundProjectName();
       const projects = await getProjects(guildId);
@@ -13315,18 +13325,11 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Check if NFT is staked
-      if (verifyNFT.staked === true) {
-        const poolId = verifyNFT.staking_pool_id;
-        let errorMessage = `❌ **Cannot transfer staked NFT!**\n\n`;
-        errorMessage += `This NFT "${nftName}" (${collection}#${nft.nonce}) is currently staked`;
-        if (poolId) {
-          errorMessage += ` in pool \`${poolId}\``;
-        }
-        errorMessage += `.\n\nPlease unstake it first before transferring.`;
-        
+      const crossGuildGuard = await virtualAccountsNFT.validateNFTsForWithdrawal(sourceGuildId, userId, [verifyNFT]);
+      if (!crossGuildGuard.ok) {
+        const first = crossGuildGuard.blocked[0];
         await interaction.editReply({
-          content: errorMessage,
+          content: `❌ **Cannot transfer**\n\n${first.reason}`,
           flags: [MessageFlags.Ephemeral]
         });
         return;
@@ -17134,8 +17137,9 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Get user NFTs (exclude staked)
+      // Get user NFTs (exclude staked in VA)
       const nfts = await virtualAccountsNFT.getUserNFTBalances(sourceGuildId, userId, selectedCollection, false);
+      const stakedKeysCrossGuild = await dbStakingPools.getStakedNftKeysForUser(sourceGuildId, userId);
       
       // Get active auctions and listings to calculate available balance
       const dbAuctions = require('./db/auctions');
@@ -17145,6 +17149,9 @@ client.on('interactionCreate', async (interaction) => {
       const availableNFTs = [];
       for (const nft of nfts) {
         try {
+          if (stakedKeysCrossGuild.has(`${nft.collection}\u0000${Number(nft.nonce)}`)) {
+            continue;
+          }
           // Get active auctions for this NFT
           const activeAuctions = await dbAuctions.getUserActiveAuctions(sourceGuildId, userId, selectedCollection, nft.nonce);
           const lockedInAuctions = activeAuctions.reduce((sum, auction) => sum + (auction.amount || 1), 0);
@@ -21894,6 +21901,26 @@ client.on('interactionCreate', async (interaction) => {
       
       if (nftsToWithdraw.length === 0) {
         await interaction.followUp({ content: '❌ No valid NFTs selected.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      
+      const bulkWithdrawGuard = await virtualAccountsNFT.validateNFTsForWithdrawal(
+        guildIdFromCustomId,
+        interaction.user.id,
+        nftsToWithdraw
+      );
+      if (!bulkWithdrawGuard.ok) {
+        const lines = bulkWithdrawGuard.blocked.slice(0, 10).map(({ nft, reason }) => {
+          const name = nft.nft_name || `${nft.collection}#${nft.nonce}`;
+          return `• **${name}** — ${reason}`;
+        }).join('\n');
+        const more = bulkWithdrawGuard.blocked.length > 10
+          ? `\n\n_…and ${bulkWithdrawGuard.blocked.length - 10} more._`
+          : '';
+        await interaction.followUp({
+          content: `❌ **Cannot withdraw**\n\n${lines}${more}`,
+          flags: [MessageFlags.Ephemeral]
+        });
         return;
       }
       

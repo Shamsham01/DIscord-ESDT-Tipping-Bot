@@ -1,9 +1,69 @@
 const supabase = require('../supabase-client');
 const BigNumber = require('bignumber.js');
+const dbStakingPools = require('./staking-pools');
+const dbAuctions = require('./auctions');
 
 // ============================================
 // BALANCE MANAGEMENT
 // ============================================
+
+function nftBalanceKey(collection, nonce) {
+  return `${collection}\u0000${Number(nonce)}`;
+}
+
+/**
+ * Same rules as the staking NFT picker: staking_pool_balances is the source of truth when VA rows
+ * are out of sync. Blocks moves (withdraw or cross-guild transfer) when staked, fully listed, or fully in auction.
+ * @returns {Promise<{ ok: true, nfts: typeof nfts } | { ok: false, blocked: Array<{ nft: object, reason: string }> }>}
+ */
+async function validateNFTsForWithdrawal(guildId, userId, nfts) {
+  if (!nfts || nfts.length === 0) {
+    return { ok: true, nfts: [] };
+  }
+  const stakedKeys = await dbStakingPools.getStakedNftKeysForUser(guildId, userId);
+  const activeListings = await getUserListings(guildId, userId, 'ACTIVE');
+  const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId);
+
+  const blocked = [];
+  for (const nft of nfts) {
+    const reason = getWithdrawBlockReason(nft, stakedKeys, activeListings, activeAuctions);
+    if (reason) {
+      blocked.push({ nft, reason });
+    }
+  }
+  if (blocked.length > 0) {
+    return { ok: false, blocked };
+  }
+  return { ok: true, nfts };
+}
+
+function getWithdrawBlockReason(nft, stakedKeys, activeListings, activeAuctions) {
+  const key = nftBalanceKey(nft.collection, nft.nonce);
+  if (nft.staked === true) {
+    return 'This NFT is staked. Unstake it before withdrawing or transferring it.';
+  }
+  if (stakedKeys.has(key)) {
+    return 'This NFT is still recorded as staked in a pool. Unstake it before withdrawing or transferring it.';
+  }
+
+  const totalBalance = nft.amount || 1;
+  const listingsForThisNFT = activeListings.filter(
+    listing => listing.collection === nft.collection && listing.nonce === nft.nonce
+  );
+  const lockedInListings = listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
+  if (lockedInListings >= totalBalance) {
+    return 'This NFT is listed for sale. Cancel the listing before withdrawing or transferring it.';
+  }
+
+  const auctionsForNft = activeAuctions.filter(
+    a => a.collection === nft.collection && Number(a.nftNonce) === Number(nft.nonce)
+  );
+  const lockedInAuctions = auctionsForNft.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+  if (lockedInAuctions >= totalBalance) {
+    return 'This NFT is in an active auction. Wait for the auction to end or cancel it before withdrawing or transferring it.';
+  }
+  return null;
+}
 
 async function getUserNFTBalances(guildId, userId, collection = null, includeStaked = false) {
   try {
@@ -1015,6 +1075,7 @@ async function getServerNFTSummary(guildId) {
 module.exports = {
   // Balance Management
   getUserNFTBalances,
+  validateNFTsForWithdrawal,
   getUserNFTBalance,
   getUserCollections,
   addNFTToAccount,
