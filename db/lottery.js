@@ -138,6 +138,58 @@ async function getActiveLotteries(guildId) {
   }
 }
 
+/** All LIVE lotteries in one query; grouped by guild_id for embed refresh loops. */
+async function getActiveLotteriesByGuildMap() {
+  try {
+    const { data, error } = await supabase
+      .from('lotteries')
+      .select('*')
+      .eq('status', 'LIVE')
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    
+    const byGuild = {};
+    (data || []).forEach(row => {
+      const gid = row.guild_id;
+      if (!byGuild[gid]) byGuild[gid] = {};
+      byGuild[gid][row.lottery_id] = {
+        lotteryId: row.lottery_id,
+        guildId: row.guild_id,
+        winningNumbersCount: row.winning_numbers_count,
+        totalPoolNumbers: row.total_pool_numbers,
+        tokenIdentifier: row.token_identifier,
+        tokenTicker: row.token_ticker,
+        drawingFrequency: row.drawing_frequency,
+        houseCommissionPercent: row.house_commission_percent,
+        ticketPriceWei: row.ticket_price_wei,
+        prizePoolWei: row.prize_pool_wei,
+        prizePoolUsd: row.prize_pool_usd,
+        startTime: row.start_time,
+        endTime: row.end_time,
+        nextDrawTime: row.next_draw_time,
+        status: row.status,
+        hasWinners: row.has_winners,
+        winningNumbers: row.winning_numbers,
+        channelId: row.channel_id,
+        messageId: row.message_id,
+        threadId: row.thread_id,
+        totalTickets: row.total_tickets,
+        uniqueParticipants: row.unique_participants,
+        isRollover: row.is_rollover,
+        originalLotteryId: row.original_lottery_id,
+        rolloverCount: row.rollover_count,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      };
+    });
+    return byGuild;
+  } catch (error) {
+    console.error('[DB] Error getting active lotteries map:', error);
+    throw error;
+  }
+}
+
 async function getAllLotteriesForDrawCheck() {
   try {
     // Check for both LIVE lotteries that have expired AND PROCESSING lotteries that might be stuck
@@ -764,6 +816,7 @@ module.exports = {
   createLottery,
   getLottery,
   getActiveLotteries,
+  getActiveLotteriesByGuildMap,
   getAllLotteriesForDrawCheck,
   updateLottery,
   updateLotteryStatusAtomically,

@@ -27372,18 +27372,11 @@ client.on('ready', async () => {
   // Set up periodic check for expired auctions
   setInterval(async () => {
     try {
-      const allGuilds = await client.guilds.fetch();
-      for (const [guildId, guild] of allGuilds) {
-        try {
-          const activeAuctions = await dbAuctions.getActiveAuctions(guildId);
-          for (const auction of activeAuctions) {
-            if (isAuctionExpired(auction)) {
-              console.log(`[AUCTIONS] Processing expired auction ${auction.auctionId}`);
-              await processAuctionClosure(guildId, auction.auctionId);
-            }
-          }
-        } catch (error) {
-          console.error(`[AUCTIONS] Error checking auctions for guild ${guildId}:`, error.message);
+      const activeAuctions = await dbAuctions.getActiveAuctionsGlobally();
+      for (const auction of activeAuctions) {
+        if (isAuctionExpired(auction)) {
+          console.log(`[AUCTIONS] Processing expired auction ${auction.auctionId}`);
+          await processAuctionClosure(auction.guildId, auction.auctionId);
         }
       }
     } catch (error) {
@@ -27445,10 +27438,11 @@ client.on('ready', async () => {
   // Set up periodic update for lottery embeds (USD price)
   setInterval(async () => {
     try {
+      const lotteriesByGuild = await dbLottery.getActiveLotteriesByGuildMap();
       const allGuilds = await client.guilds.fetch();
       for (const [guildId, guild] of allGuilds) {
         try {
-          const activeLotteries = await dbLottery.getActiveLotteries(guildId);
+          const activeLotteries = lotteriesByGuild[guildId] || {};
           for (const lotteryId of Object.keys(activeLotteries)) {
             await updateLotteryEmbed(guildId, lotteryId);
           }
@@ -27513,29 +27507,35 @@ client.on('ready', async () => {
   setInterval(async () => {
     try {
       const allGuilds = await client.guilds.fetch();
+      const guildIds = [...allGuilds.keys()];
+      const allPools = await dbStakingPools.getStakingPoolsForGuildIds(guildIds, ['ACTIVE', 'CLOSED']);
+      const byGuild = new Map();
+      for (const pool of allPools) {
+        if (!byGuild.has(pool.guildId)) {
+          byGuild.set(pool.guildId, { active: [], closed: [] });
+        }
+        const bucket = byGuild.get(pool.guildId);
+        if (pool.status === 'ACTIVE') bucket.active.push(pool);
+        else if (pool.status === 'CLOSED') bucket.closed.push(pool);
+      }
       for (const [guildId, guild] of allGuilds) {
         try {
-          // Update active pools (for USD price updates)
-          const activePoolsList = await dbStakingPools.getStakingPoolsByGuild(guildId, 'ACTIVE');
+          const buckets = byGuild.get(guildId) || { active: [], closed: [] };
+          const activePoolsList = buckets.active;
+          const closedPools = buckets.closed;
+          
           for (const pool of activePoolsList) {
             await updateStakingPoolEmbed(guildId, pool.poolId);
           }
           
-          // Update closed pools (to remove reward claimability message after 24h)
-          // CRITICAL: Skip pools that share message_id with ACTIVE pools to prevent conflicts
-          const closedPools = await dbStakingPools.getStakingPoolsByGuild(guildId, 'CLOSED');
           const activeMessageIds = new Set(activePoolsList.map(p => p.messageId).filter(Boolean));
           
           for (const pool of closedPools) {
-            // Skip if this CLOSED pool shares message_id with an ACTIVE pool
             if (pool.messageId && activeMessageIds.has(pool.messageId)) {
               console.warn(`[STAKING] ⚠️ Skipping embed update for CLOSED pool ${pool.poolId.substring(0, 20)}... - shares message_id ${pool.messageId} with ACTIVE pool(s)`);
               continue;
             }
             
-            // Update ALL closed pools - ensures status shows correctly (red/Closed) even if
-            // the immediate update failed. Pools with lastRewardDistributionAt also get
-            // the "claim within 24h" message refreshed.
             await updateStakingPoolEmbed(guildId, pool.poolId);
           }
         } catch (error) {
@@ -27555,15 +27555,9 @@ client.on('ready', async () => {
   // Set up periodic cleanup for expired NFT offers and listings
   setInterval(async () => {
     try {
-      const allGuilds = await client.guilds.fetch();
-      for (const [guildId, guild] of allGuilds) {
-        try {
-          await virtualAccountsNFT.cleanupExpiredOffers();
-          await virtualAccountsNFT.cleanupExpiredListings();
-        } catch (error) {
-          console.error(`[NFT-MARKETPLACE] Error cleaning up expired items for guild ${guildId}:`, error.message);
-        }
-      }
+      // Global UPDATEs — run once (previously duplicated per guild, multiplying egress)
+      await virtualAccountsNFT.cleanupExpiredOffers();
+      await virtualAccountsNFT.cleanupExpiredListings();
     } catch (error) {
       console.error('[NFT-MARKETPLACE] Error cleaning up expired NFT offers/listings:', error.message);
     }

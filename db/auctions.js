@@ -162,6 +162,52 @@ async function getActiveAuctions(guildId) {
   }
 }
 
+/** Single round-trip for all guilds (replaces per-guild polling loops). */
+async function getActiveAuctionsGlobally() {
+  try {
+    const { data, error } = await supabase
+      .from('auctions')
+      .select('*')
+      .eq('status', 'ACTIVE')
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    
+    return (data || []).map(row => ({
+      auctionId: row.auction_id,
+      guildId: row.guild_id,
+      creatorId: row.creator_id,
+      creatorTag: row.creator_tag,
+      projectName: row.project_name,
+      collection: row.collection,
+      nftName: row.nft_name,
+      nftIdentifier: row.nft_identifier,
+      nftNonce: row.nft_nonce,
+      amount: row.amount || 1,
+      tokenType: row.token_type || 'NFT',
+      nftImageUrl: row.nft_image_url,
+      title: row.title,
+      description: row.description,
+      duration: row.duration,
+      endTime: row.end_time,
+      tokenTicker: row.token_ticker,
+      startingAmount: row.starting_amount,
+      minBidIncrease: row.min_bid_increase,
+      currentBid: row.current_bid,
+      highestBidderId: row.highest_bidder_id,
+      highestBidderTag: row.highest_bidder_tag,
+      messageId: row.message_id,
+      threadId: row.thread_id,
+      channelId: row.channel_id,
+      status: row.status,
+      createdAt: row.created_at
+    }));
+  } catch (error) {
+    console.error('[DB] Error getting active auctions globally:', error);
+    throw error;
+  }
+}
+
 async function createAuction(guildId, auctionId, auctionData) {
   try {
     // Store token_identifier in token_ticker column (repurposed)
@@ -402,6 +448,7 @@ module.exports = {
   getAuction,
   getAuctionsByGuild,
   getActiveAuctions,
+  getActiveAuctionsGlobally,
   getUserActiveAuctions,
   createAuction,
   updateAuction,

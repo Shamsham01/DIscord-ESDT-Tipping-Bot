@@ -103,6 +103,27 @@ async function getStakingPoolsByCreator(guildId, creatorId) {
   }
 }
 
+/** Batch fetch for periodic embed updates (one query vs per-guild). */
+async function getStakingPoolsForGuildIds(guildIds, statuses = ['ACTIVE', 'CLOSED']) {
+  if (!guildIds || guildIds.length === 0) return [];
+  try {
+    let query = supabase
+      .from('staking_pools')
+      .select('*')
+      .in('guild_id', guildIds);
+    if (statuses && statuses.length > 0) {
+      query = query.in('status', statuses);
+    }
+    const { data, error } = await query.order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    return (data || []).map(mapPoolFromDb);
+  } catch (error) {
+    console.error('[DB] Error getting staking pools for guild ids:', error);
+    throw error;
+  }
+}
+
 async function updateStakingPool(guildId, poolId, updates) {
   try {
     const updateData = {
@@ -851,6 +872,7 @@ module.exports = {
   getStakingPool,
   getStakingPoolsByGuild,
   getStakingPoolsByCreator,
+  getStakingPoolsForGuildIds,
   updateStakingPool,
   getPoolsForRewardDistribution,
   getPoolsForAutoClose,

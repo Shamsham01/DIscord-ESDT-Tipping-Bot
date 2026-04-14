@@ -24,9 +24,15 @@ try {
 // Import Supabase client
 const supabase = require('./supabase-client');
 
-// Blockchain listener configuration
-const POLLING_INTERVAL = 10000; // 10 seconds
+// Blockchain listener configuration (egress: avoid unnecessary Supabase reads on every tick)
+const POLLING_INTERVAL = (() => {
+  const n = Number(process.env.BLOCKCHAIN_POLL_INTERVAL_MS);
+  return Number.isFinite(n) && n >= 5000 ? n : 10000;
+})(); // default 10s; set BLOCKCHAIN_POLL_INTERVAL_MS (e.g. 15000) to reduce poll frequency / egress
 const API_BASE_URL = 'https://api.multiversx.com';
+
+/** In-memory copy of wallet_timestamps; updated on init and after each successful poll (no full-table read every tick). */
+let cachedWalletTimestamps = {};
 
 // Rate limiting configuration for MultiversX API
 const MAX_RETRIES = 3;
@@ -132,6 +138,10 @@ async function loadTimestamps() {
   }
 }
 
+function replaceCachedTimestamps(next) {
+  cachedWalletTimestamps = next && typeof next === 'object' ? next : {};
+}
+
 // Save timestamps to Supabase (upsert for each wallet)
 async function saveTimestamps(wallets) {
   try {
@@ -221,7 +231,6 @@ async function updateWalletTimestamp(walletAddress, transactionTimestamp, curren
 // Get all community fund wallets from database
 async function getAllCommunityFundWallets() {
   try {
-    const dbServerData = require('./db/server-data');
     const supabase = require('./supabase-client');
     
     // Get all guild settings to find community fund projects
@@ -240,29 +249,41 @@ async function getAllCommunityFundWallets() {
       return [];
     }
     
-    const wallets = new Set();
+    const guildIds = [...new Set(guildSettings.map(s => s.guild_id))];
+    const projectNameByGuild = new Map(
+      guildSettings.map(s => [s.guild_id, s.community_fund_project])
+    );
     
-    // For each guild with a community fund project, get the project details
-    for (const setting of guildSettings) {
-      const guildId = setting.guild_id;
-      const communityFundProject = setting.community_fund_project; // This is the fund name for display
-      
-      if (!communityFundProject) continue;
-      
-      // Get the project details (always use "Community Fund" as the project name)
-      const project = await dbServerData.getProject(guildId, 'Community Fund');
-      
-      if (project && project.walletAddress) {
-        wallets.add({
-          address: project.walletAddress,
-          guildId: guildId,
-          projectName: communityFundProject
-        });
-      }
+    if (guildIds.length === 0) {
+      return [];
     }
     
-    console.log(`[BLOCKCHAIN] Found ${wallets.size} community fund wallets to monitor`);
-    return Array.from(wallets);
+    // One query: wallet addresses only (never load encrypted PEM — large egress per guild on every poll)
+    const { data: projects, error: projError } = await supabase
+      .from('projects')
+      .select('guild_id, wallet_address')
+      .in('guild_id', guildIds)
+      .eq('project_name', 'Community Fund');
+    
+    if (projError) {
+      console.error('[BLOCKCHAIN] Error fetching Community Fund projects:', projError);
+      return [];
+    }
+    
+    const wallets = [];
+    for (const row of projects || []) {
+      if (!row.wallet_address) continue;
+      const projectName = projectNameByGuild.get(row.guild_id);
+      if (!projectName) continue;
+      wallets.push({
+        address: row.wallet_address,
+        guildId: row.guild_id,
+        projectName
+      });
+    }
+    
+    console.log(`[BLOCKCHAIN] Found ${wallets.length} community fund wallets to monitor`);
+    return wallets;
   } catch (error) {
     console.error('[BLOCKCHAIN] Error getting community fund wallets:', error.message);
     return [];
@@ -843,10 +864,9 @@ async function pollBlockchain() {
     
     console.log(`[BLOCKCHAIN] 🔍 Polling ${wallets.length} community fund wallets...`);
     
-    // Load current timestamps from Supabase
-    const currentTimestamps = await loadTimestamps();
+    const currentTimestamps = cachedWalletTimestamps;
     
-    // Periodically clean up orphaned timestamps (every 10th poll cycle)
+    // Periodically clean up orphaned timestamps (rare; avoids full-table reads every tick)
     if (Math.random() < 0.1) {
       await cleanupOrphanedTimestamps();
     }
@@ -1008,12 +1028,20 @@ async function cleanupOrphanedTimestamps() {
     console.log('[BLOCKCHAIN] 🧹 Cleaning up orphaned timestamps...');
     
     const wallets = await getAllCommunityFundWallets();
-    const currentTimestamps = await loadTimestamps();
     const activeWalletAddresses = new Set(wallets.map(w => w.address));
     let removedCount = 0;
     
-    // Find timestamps for wallets that no longer exist
-    for (const walletAddress of Object.keys(currentTimestamps)) {
+    const { data: rows, error: listError } = await supabase
+      .from('wallet_timestamps')
+      .select('wallet_address');
+    
+    if (listError) {
+      console.error('[BLOCKCHAIN] Error listing wallet_timestamps for cleanup:', listError.message);
+      return 0;
+    }
+    
+    for (const row of rows || []) {
+      const walletAddress = row.wallet_address;
       if (!activeWalletAddresses.has(walletAddress)) {
         const { error } = await supabase
           .from('wallet_timestamps')
@@ -1022,6 +1050,7 @@ async function cleanupOrphanedTimestamps() {
         
         if (!error) {
           removedCount++;
+          delete cachedWalletTimestamps[walletAddress];
           console.log(`[BLOCKCHAIN] 🗑️ Removed orphaned timestamp for wallet ${walletAddress}`);
         }
       }
@@ -1047,6 +1076,7 @@ async function initializeWalletTimestamps() {
     
     const wallets = await getAllCommunityFundWallets();
     const currentTimestamps = await loadTimestamps();
+    replaceCachedTimestamps(currentTimestamps);
     let timestampsChanged = false;
     
     const recordsToInsert = [];
@@ -1131,7 +1161,7 @@ function stopBlockchainListener() {
 async function getListenerStatus() {
   try {
     const wallets = await getAllCommunityFundWallets();
-    const timestamps = await loadTimestamps();
+    const timestamps = cachedWalletTimestamps;
     const isRunning = global.blockchainPollInterval !== null;
     
     // Get last updated timestamp from Supabase
