@@ -362,51 +362,7 @@ async function processTransaction(transaction, guildId, projectName, userId = nu
       hasTransfers: !!(transaction.action && transaction.action.arguments && transaction.action.arguments.transfers)
     });
     
-    // CRITICAL: Check in-memory cache first (fast check for current session)
-    if (processedTransactions.has(transaction.txHash)) {
-      console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate transaction ${transaction.txHash} (in-memory cache)`);
-      return { processed: false, reason: 'Already processed (in-memory)' };
-    }
-    
-    // CRITICAL: Check database for duplicates BEFORE any processing
-    // This is bulletproof and survives crashes/restarts
-    // NOTE: For multi-transfer transactions, we check per-transfer inside the loop
-    // This initial check is a quick filter for completely new transactions
-    try {
-      // Quick check: If this is a pure ESDT transaction (no NFTs), check ESDT table
-      // For NFT transactions, we'll check per-transfer inside the loop
-      const { data: existingEsdtTx, error: esdtCheckError } = await supabase
-        .from('virtual_account_transactions')
-        .select('id, user_id, token, amount, type, tx_hash')
-        .eq('tx_hash', transaction.txHash)
-        .limit(1)
-        .maybeSingle(); // Use maybeSingle() to avoid error if no record found
-      
-      if (esdtCheckError && esdtCheckError.code !== 'PGRST116') { // PGRST116 = no rows found, which is OK
-        console.error(`[BLOCKCHAIN] ⚠️ Error checking ESDT transactions for duplicate:`, esdtCheckError.message);
-        // Continue processing if database check fails (fail-open to avoid missing transactions)
-      } else if (existingEsdtTx) {
-        // Check if this transaction contains ONLY ESDT transfers (no NFTs)
-        const transfers = transaction.action?.arguments?.transfers || [];
-        const hasNFTs = transfers.some(t => t.type === 'NonFungibleESDT' || t.type === 'SemiFungibleESDT');
-        
-        if (!hasNFTs) {
-          // Pure ESDT transaction, safe to skip
-          console.log(`[BLOCKCHAIN] 🔄 Skipped duplicate ESDT transaction ${transaction.txHash} (found in ESDT transactions)`);
-          console.log(`[BLOCKCHAIN] ℹ️ Already processed: user=${existingEsdtTx.user_id}, token=${existingEsdtTx.token}, amount=${existingEsdtTx.amount}, type=${existingEsdtTx.type}`);
-          processedTransactions.add(transaction.txHash);
-          return { processed: false, reason: 'Already processed (database - ESDT)' };
-        }
-        // If transaction has NFTs, continue processing (NFTs checked per-transfer)
-      }
-      
-      console.log(`[BLOCKCHAIN] ✅ Transaction ${transaction.txHash} not found in database or contains NFTs, proceeding with processing`);
-    } catch (dbCheckError) {
-      console.error(`[BLOCKCHAIN] ⚠️ Critical error during database duplicate check:`, dbCheckError.message);
-      // Fail-open: Continue processing if database check fails completely
-      // This prevents missing transactions due to temporary database issues
-      // But log the error so we can investigate
-    }
+    // Idempotency is enforced per transfer leg (tx_hash + transfer_index) in apply_virtual_account_balance_delta.
     
     // Timestamp validation is now handled by the API call with 'after' parameter
     // This ensures we only get transactions newer than our last known timestamp
@@ -426,7 +382,8 @@ async function processTransaction(transaction, guildId, projectName, userId = nu
     
     console.log(`[BLOCKCHAIN] Found ${transfers.length} transfer(s) in transaction ${transaction.txHash}`);
     
-    for (const transfer of transfers) {
+    for (let transferIndex = 0; transferIndex < transfers.length; transferIndex++) {
+      const transfer = transfers[transferIndex];
       console.log(`[BLOCKCHAIN] Processing transfer type: ${transfer.type}`, {
         hasCollection: !!transfer.collection,
         hasIdentifier: !!transfer.identifier,
@@ -454,7 +411,8 @@ async function processTransaction(transaction, guildId, projectName, userId = nu
           transaction.receiver,
           tokenIdentifier,
           humanAmount,
-          transaction.txHash
+          transaction.txHash,
+          transferIndex
         );
         
         if (depositResult && depositResult.success) {

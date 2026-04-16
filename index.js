@@ -11637,7 +11637,7 @@ client.on('interactionCreate', async (interaction) => {
           try {
             const dbVirtualAccounts = require('./db/virtual-accounts');
             // Restore the balance by adding back the withdrawn amount
-            const restoredBalance = await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, withdrawAmountStr);
+            const { newBalance: restoredBalance } = await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, withdrawAmountStr, {});
             balanceRestored = true;
             console.log(`[WITHDRAW] Balance restored successfully. New balance: ${restoredBalance}`);
             
@@ -17856,7 +17856,8 @@ client.on('interactionCreate', async (interaction) => {
       if (outputs.length > 0) {
         console.log('[SWAP] Processing outputs:', outputs.length, 'from', fromToken, 'to', toToken, 'amount', amount, 'txHash', txHash);
         const additionTxIds = [];
-        for (const output of outputs) {
+        for (let outIdx = 0; outIdx < outputs.length; outIdx++) {
+          const output = outputs[outIdx];
           const outToken = output.token || toToken;
           // MakeX API: output.amount is human-readable; output.rawAmount is blockchain format (use with decimals)
           let humanAmount;
@@ -17868,7 +17869,7 @@ client.on('interactionCreate', async (interaction) => {
           } else {
             humanAmount = '0';
           }
-          const addResult = await virtualAccounts.addFundsToAccount(guildId, userId, outToken, humanAmount, txHash, 'swap', interaction.user.tag);
+          const addResult = await virtualAccounts.addFundsToAccount(guildId, userId, outToken, humanAmount, txHash, 'swap', interaction.user.tag, outIdx);
           if (addResult?.transaction?.id) additionTxIds.push(addResult.transaction.id);
         }
         const totalReceived = outputs.reduce((sum, o) => {
@@ -17953,7 +17954,7 @@ client.on('interactionCreate', async (interaction) => {
         console.log('[SWAP] Fallback: crediting from quote after verified success. txHash:', txHash, 'expectedAmountOutRaw:', expectedAmountOutRaw || minAmountOutRaw);
         const fallbackAmountRaw = expectedAmountOutRaw || minAmountOutRaw || '0';
         const totalHuman = new BigNumber(fallbackAmountRaw).dividedBy(new BigNumber(10).pow(toTokenDecimals)).toString();
-        await virtualAccounts.addFundsToAccount(guildId, userId, toToken, totalHuman, txHash, 'swap', interaction.user.tag);
+        await virtualAccounts.addFundsToAccount(guildId, userId, toToken, totalHuman, txHash, 'swap', interaction.user.tag, 0);
         try {
           await dbSwapTransactions.insertSwapTransaction({
             guildId, userId, fromToken, toToken, amountSold: amount, amountReceived: totalHuman,
@@ -17995,7 +17996,7 @@ client.on('interactionCreate', async (interaction) => {
           console.log('[SWAP] Catch fallback: verified on-chain success, crediting from quote. txHash:', txHash, 'error:', swapErr.message);
           const fallbackAmountRaw = expectedAmountOutRaw || minAmountOutRaw || '0';
           const totalHuman = new BigNumber(fallbackAmountRaw).dividedBy(new BigNumber(10).pow(toTokenDecimals)).toString();
-          await virtualAccounts.addFundsToAccount(guildId, userId, toToken, totalHuman, txHash, 'swap', interaction.user.tag);
+          await virtualAccounts.addFundsToAccount(guildId, userId, toToken, totalHuman, txHash, 'swap', interaction.user.tag, 0);
           try {
             await dbSwapTransactions.insertSwapTransaction({
               guildId, userId, fromToken, toToken, amountSold: amount, amountReceived: totalHuman,
@@ -29489,13 +29490,13 @@ async function processAuctionClosure(guildId, auctionId) {
           auctionAmount
         );
         
-        // Credit tokens to seller's virtual account
+        // Credit tokens to seller's virtual account (txHash must be null for VA-only sale; memo is not a chain hash)
         await virtualAccounts.addFundsToAccount(
           guildId,
           auction.sellerId,
           tokenIdentifier,
           auction.currentBid,
-          `Auction sale: ${auction.nftName}`,
+          null,
           'auction_sale',
           null
         );

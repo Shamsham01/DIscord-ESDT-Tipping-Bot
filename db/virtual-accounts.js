@@ -118,8 +118,7 @@ async function getAccountBalance(guildId, userId, tokenTicker) {
     return balance.toString();
   } catch (error) {
     console.error('[DB] Error getting account balance:', error);
-    // Return '0' on error instead of throwing, to prevent undefined returns
-    return '0';
+    throw error;
   }
 }
 
@@ -133,98 +132,69 @@ async function getAllUserBalances(guildId, userId) {
   }
 }
 
-async function updateAccountBalance(guildId, userId, tokenIdentifier, amountChange) {
-  try {
-    // Validate that tokenIdentifier is a full identifier (format: TICKER-6hexchars)
-    // This ensures we NEVER store tickers, only identifiers
-    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
-    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
-      throw new Error(`Invalid token identifier format: "${tokenIdentifier}". Expected format: TICKER-6hexchars (e.g., "USDC-c76f1f"). Tickers are not allowed for security reasons.`);
+/**
+ * Atomically applies a balance delta (PostgreSQL RPC: row lock + optional on-chain deposit leg).
+ * @param {object} [options]
+ * @param {string} [options.txHash] - If set with a positive delta, claims idempotency leg (tx_hash + transfer_index).
+ * @param {number} [options.transferIndex] - Index of this transfer within the chain tx (0 if omitted).
+ * @returns {{ skipped: boolean, newBalance: string|null, balanceBefore: string|null, canonicalKey?: string }}
+ */
+async function updateAccountBalance(guildId, userId, tokenIdentifier, amountChange, options = {}) {
+  const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+  if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+    throw new Error(`Invalid token identifier format: "${tokenIdentifier}". Expected format: TICKER-6hexchars (e.g., "USDC-c76f1f"). Tickers are not allowed for security reasons.`);
+  }
+
+  const BigNumber = require('bignumber.js');
+  let deltaStr = amountChange != null ? String(amountChange) : '';
+  if (deltaStr === 'NaN' || deltaStr === 'undefined' || deltaStr === 'null') {
+    throw new Error(`Invalid amount change: ${amountChange}`);
+  }
+  const change = new BigNumber(deltaStr);
+  if (change.isNaN()) {
+    throw new Error(`Invalid amount change: ${amountChange}`);
+  }
+  deltaStr = change.toString();
+
+  const { txHash, transferIndex } = options;
+  const hasTx = txHash != null && String(txHash).trim() !== '';
+  const payload = {
+    p_guild_id: guildId,
+    p_user_id: userId,
+    p_token_identifier: tokenIdentifier,
+    p_delta: deltaStr,
+    p_tx_hash: hasTx ? String(txHash).trim() : null,
+    p_transfer_index: hasTx ? (transferIndex != null ? transferIndex : 0) : null
+  };
+
+  const { data, error } = await supabase.rpc('apply_virtual_account_balance_delta', payload);
+
+  if (error) {
+    const msg = error.message || String(error);
+    if (/insufficient|reserved/i.test(msg) || /P0001/i.test(msg)) {
+      const err = new Error(msg);
+      err.code = 'INSUFFICIENT_BALANCE';
+      throw err;
     }
-    
-    const account = await getUserAccount(guildId, userId);
-    const balances = account.balances || {};
-    
-    // Find existing token with case-insensitive matching (by identifier only)
-    const existingToken = Object.keys(balances).find(
-      key => key.toLowerCase() === tokenIdentifier.toLowerCase()
-    );
-    
-    // Use the provided identifier (never fall back to ticker)
-    const tokenKey = tokenIdentifier;
-    
-    // Use BigNumber for large number arithmetic
-    const BigNumber = require('bignumber.js');
-    
-    // Sanitize current balance - handle "NaN" string from database
-    let currentBalanceValue = balances[tokenKey] || '0';
-    if (currentBalanceValue === 'NaN' || currentBalanceValue === null || currentBalanceValue === undefined) {
-      currentBalanceValue = '0';
+    if (/virtual_account_not_found/i.test(msg)) {
+      const err = new Error(msg);
+      err.code = 'ACCOUNT_NOT_FOUND';
+      throw err;
     }
-    const currentBalance = new BigNumber(currentBalanceValue);
-    
-    // Validate current balance is not NaN
-    if (currentBalance.isNaN()) {
-      console.warn(`[DB] Current balance for ${tokenKey} is NaN, resetting to 0`);
-      currentBalanceValue = '0';
-    }
-    
-    // Validate and sanitize amountChange
-    let amountChangeStr = amountChange;
-    if (typeof amountChange === 'string' && (amountChange === 'NaN' || isNaN(parseFloat(amountChange)))) {
-      throw new Error(`Invalid amount change: ${amountChange}`);
-    }
-    if (typeof amountChange === 'number' && isNaN(amountChange)) {
-      throw new Error(`Invalid amount change: ${amountChange}`);
-    }
-    amountChangeStr = amountChange.toString();
-    
-    const change = new BigNumber(amountChangeStr);
-    if (change.isNaN()) {
-      throw new Error(`Invalid amount change: ${amountChange}`);
-    }
-    
-    const currentBalanceBN = new BigNumber(currentBalanceValue);
-    const newBalance = currentBalanceBN.plus(change);
-    
-    if (newBalance.isNaN()) {
-      throw new Error('Balance calculation resulted in NaN');
-    }
-    
-    const newBalanceStr = newBalance.toString();
-    balances[tokenKey] = newBalanceStr;
-    
-    // Sanitize all balances before saving to prevent NaN storage
-    const sanitizedBalances = {};
-    for (const [token, balance] of Object.entries(balances)) {
-      if (balance === null || balance === undefined || balance === 'null' || balance === 'undefined' || balance === 'NaN') {
-        sanitizedBalances[token] = '0';
-      } else {
-        const balanceBN = new BigNumber(balance);
-        if (balanceBN.isNaN()) {
-          sanitizedBalances[token] = '0';
-        } else {
-          sanitizedBalances[token] = balance.toString();
-        }
-      }
-    }
-    
-    const { error } = await supabase
-      .from('virtual_accounts')
-      .update({
-        balances: sanitizedBalances,
-        last_updated: Date.now(),
-        updated_at: new Date().toISOString()
-      })
-      .eq('guild_id', guildId)
-      .eq('user_id', userId);
-    
-    if (error) throw error;
-    return newBalanceStr;
-  } catch (error) {
-    console.error('[DB] Error updating account balance:', error);
+    console.error('[DB] Error updating account balance (RPC):', msg);
     throw error;
   }
+
+  if (data && data.skipped === true) {
+    return { skipped: true, newBalance: null, balanceBefore: null };
+  }
+
+  return {
+    skipped: false,
+    newBalance: data.new_balance,
+    balanceBefore: data.balance_before,
+    canonicalKey: data.canonical_key
+  };
 }
 
 async function addTransaction(guildId, userId, transaction) {

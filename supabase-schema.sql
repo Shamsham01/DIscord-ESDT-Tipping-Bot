@@ -139,6 +139,21 @@ CREATE TABLE IF NOT EXISTS virtual_account_transactions (
 CREATE INDEX IF NOT EXISTS idx_virtual_transactions_guild_user ON virtual_account_transactions(guild_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_virtual_transactions_timestamp ON virtual_account_transactions(timestamp DESC);
 
+-- On-chain ESDT credit idempotency (one row per tx_hash + transfer_index; same MultiversX tx may credit multiple legs)
+CREATE TABLE IF NOT EXISTS virtual_account_esdt_deposit_legs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tx_hash TEXT NOT NULL,
+    transfer_index INTEGER NOT NULL,
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    token_identifier TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (tx_hash, transfer_index)
+);
+CREATE INDEX IF NOT EXISTS idx_esdt_deposit_legs_guild_user
+  ON virtual_account_esdt_deposit_legs (guild_id, user_id);
+
 -- Swap transactions (AshSwap VA swap integration)
 CREATE TABLE IF NOT EXISTS swap_transactions (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

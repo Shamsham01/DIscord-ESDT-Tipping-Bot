@@ -105,40 +105,11 @@ async function getAllUserBalances(guildId, userId) {
 
 // Add funds to user account (from blockchain deposit)
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") or ticker for backward compatibility
-async function addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHash, source = 'deposit', username = null) {
+// transferIndex: index of this credit within the same chain tx (required for multi-output swaps / multi-transfer txs)
+async function addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHash, source = 'deposit', username = null, transferIndex = null) {
   try {
-    // CRITICAL: Check for duplicate transaction by tx_hash BEFORE processing
-    // This is a redundant safety check (main check happens in processTransaction)
-    // but ensures we never process duplicates even if called from other code paths
-    if (txHash) {
-      const dbVirtualAccounts = require('./db/virtual-accounts');
-      const supabase = require('./supabase-client');
-      
-      const { data: existingTx, error: checkError } = await supabase
-        .from('virtual_account_transactions')
-        .select('id, user_id, token, amount, type')
-        .eq('tx_hash', txHash)
-        .eq('guild_id', guildId)
-        .eq('user_id', userId)
-        .limit(1)
-        .maybeSingle(); // Use maybeSingle() to avoid error if no record found
-      
-      if (checkError && checkError.code !== 'PGRST116') { // PGRST116 = no rows found, which is OK
-        console.error(`[VIRTUAL] ⚠️ Error checking ESDT duplicate in addFundsToAccount:`, checkError.message);
-        // Continue processing if database check fails (fail-open)
-      } else if (existingTx) {
-        console.log(`[VIRTUAL] ⚠️ Transaction ${txHash} already processed (found in database), skipping`);
-        console.log(`[VIRTUAL] ℹ️ Already processed: user=${existingTx.user_id}, token=${existingTx.token}, amount=${existingTx.amount}, type=${existingTx.type}`);
-        return {
-          success: false,
-          error: 'Transaction already processed'
-        };
-      }
-    }
-    
-    // Get current account to find existing token key
-    const account = await getUserAccount(guildId, userId, username);
-    const balances = account.balances || {};
+    // Get current account (creates row if needed)
+    await getUserAccount(guildId, userId, username);
     
     // Validate tokenIdentifier format - must be full identifier (TICKER-6hexchars)
     const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
@@ -146,18 +117,24 @@ async function addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHas
       throw new Error(`Invalid token identifier: "${tokenIdentifier}". Must be full identifier format: TICKER-6hexchars (e.g., "USDC-c76f1f"). Tickers are not allowed for security.`);
     }
     
-    // Find existing token by identifier only (no ticker matching)
-    const availableTokens = Object.keys(balances);
-    const existingToken = availableTokens.find(token => 
-      token.toLowerCase() === tokenIdentifier.toLowerCase()
-    );
+    const updateOpts = {};
+    if (txHash != null && String(txHash).trim() !== '') {
+      updateOpts.txHash = txHash;
+      updateOpts.transferIndex = transferIndex != null ? transferIndex : 0;
+    }
     
-    // Calculate new balance
-    const currentBalance = new BigNumber(balances[tokenIdentifier] || '0');
-    const newBalance = currentBalance.plus(new BigNumber(amount));
+    const updateResult = await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, amount, updateOpts);
     
-    // Update balance in database (always use identifier)
-    await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, amount);
+    if (updateResult.skipped) {
+      console.log(`[VIRTUAL] Skipped duplicate on-chain credit (tx leg already applied): ${txHash} index=${updateOpts.transferIndex ?? 'n/a'}`);
+      return {
+        success: false,
+        error: 'Transaction already processed'
+      };
+    }
+    
+    const newBalanceStr = updateResult.newBalance;
+    const balanceBeforeStr = updateResult.balanceBefore;
     
     // Record transaction
     const transaction = {
@@ -165,8 +142,8 @@ async function addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHas
       type: 'deposit',
       token: tokenIdentifier,
       amount: amount,
-      balanceBefore: currentBalance.toString(),
-      balanceAfter: newBalance.toString(),
+      balanceBefore: balanceBeforeStr,
+      balanceAfter: newBalanceStr,
       txHash: txHash,
       source: source,
       timestamp: Date.now(),
@@ -175,11 +152,11 @@ async function addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHas
     
     await dbVirtualAccounts.addTransaction(guildId, userId, transaction);
     
-    console.log(`[VIRTUAL] Added ${amount} ${tokenIdentifier} to user ${userId} in guild ${guildId}. New balance: ${newBalance.toString()}`);
+    console.log(`[VIRTUAL] Added ${amount} ${tokenIdentifier} to user ${userId} in guild ${guildId}. New balance: ${newBalanceStr}`);
     
     return {
       success: true,
-      newBalance: newBalance.toString(),
+      newBalance: newBalanceStr,
       transaction: transaction
     };
   } catch (error) {
@@ -254,7 +231,7 @@ async function deductFundsFromAccount(guildId, userId, tokenIdentifier, amount, 
       const amountToAdd = totalBalance.minus(identifierBalance);
       
       // Update identifier balance with the migrated amount
-      await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, amountToAdd.toString());
+      await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, amountToAdd.toString(), {});
       
       console.log(`[VIRTUAL] Migrated ${balanceByTicker} from ticker "${tokenTicker}" to identifier "${tokenIdentifier}". New identifier balance: ${totalBalance.toString()}`);
       
@@ -310,9 +287,10 @@ async function deductFundsFromAccount(guildId, userId, tokenIdentifier, amount, 
     // Use total balance for the actual deduction (reserved funds are still in the account)
     const currentBalance = totalBalance;
     
-    // Deduct funds (using negative amount)
+    // Deduct funds (using negative amount; atomic RPC enforces non-negative total and reserved funds)
     const negativeAmount = deductionAmount.negated().toString();
-    const newBalanceStr = await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, negativeAmount);
+    const updateResult = await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, negativeAmount, {});
+    const newBalanceStr = updateResult.newBalance;
     const newBalance = new BigNumber(newBalanceStr);
     
     // Record transaction
@@ -321,7 +299,7 @@ async function deductFundsFromAccount(guildId, userId, tokenIdentifier, amount, 
       type: 'deduction',
       token: tokenIdentifier,
       amount: amountStr, // Ensure amount is always a valid string
-      balanceBefore: currentBalance.toString(),
+      balanceBefore: updateResult.balanceBefore != null ? updateResult.balanceBefore : currentBalance.toString(),
       balanceAfter: newBalance.toString(),
       description: description,
       gameType: gameType,
@@ -358,12 +336,13 @@ async function transferFundsBetweenUsers(guildId, fromUserId, toUserId, tokenIde
     // Add to recipient
     const additionResult = await addFundsToAccount(guildId, toUserId, tokenIdentifier, amount, null, 'tip');
     if (!additionResult.success) {
-      // If adding to recipient fails, refund the sender
-      await addFundsToAccount(guildId, fromUserId, tokenIdentifier, amount, null, 'refund');
+      const refundResult = await addFundsToAccount(guildId, fromUserId, tokenIdentifier, amount, null, 'refund');
       return {
         success: false,
-        error: 'Failed to add funds to recipient',
-        refunded: true
+        error: refundResult.success
+          ? 'Failed to add funds to recipient (sender refunded)'
+          : `Failed to add funds to recipient; refund failed: ${refundResult.error || 'unknown'}`,
+        refunded: refundResult.success
       };
     }
     
@@ -409,7 +388,7 @@ async function getServerVirtualAccountsSummary(guildId) {
 
 // Process blockchain deposit event
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") or ticker for backward compatibility
-async function processBlockchainDeposit(guildId, senderWallet, receiverWallet, tokenIdentifier, amount, txHash) {
+async function processBlockchainDeposit(guildId, senderWallet, receiverWallet, tokenIdentifier, amount, txHash, transferIndex = 0) {
   try {
     // Load server data to find user by wallet address
     const dbServerData = require('./db/server-data');
@@ -454,7 +433,7 @@ async function processBlockchainDeposit(guildId, senderWallet, receiverWallet, t
     }
     
     // Add funds to user account (with username if available)
-    const result = await addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHash, 'blockchain_deposit', username);
+    const result = await addFundsToAccount(guildId, userId, tokenIdentifier, amount, txHash, 'blockchain_deposit', username, transferIndex);
     
     if (result.success) {
       console.log(`[VIRTUAL] Successfully processed blockchain deposit: ${amount} ${tokenIdentifier} for user ${userId} in guild ${guildId}`);
