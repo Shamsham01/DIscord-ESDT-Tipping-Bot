@@ -20936,6 +20936,31 @@ client.on('interactionCreate', async (interaction) => {
       console.error('[DROP] Error in drop-leaderboard pagination:', error.message);
       await interaction.editReply({ content: `❌ Error: ${error.message}` });
     }
+  } else if (customId.startsWith('drop-weekly-airdrop:')) {
+    try {
+      await interaction.deferUpdate();
+
+      const parts = customId.split(':');
+      const guildId = parts[1];
+      const weekStart = parseInt(parts[2], 10);
+      const weekEnd = parseInt(parts[3], 10);
+      const page = parseInt(parts[4], 10) || 1;
+
+      if (!guildId || interaction.guildId !== guildId || Number.isNaN(weekStart) || Number.isNaN(weekEnd)) {
+        await interaction.followUp({ content: '❌ Invalid airdrop report control.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      const { embed, components } = await buildWeeklyAirdropDistributionView(guildId, weekStart, weekEnd, page);
+      await interaction.message.edit({ embeds: [embed], components });
+    } catch (error) {
+      console.error('[DROP] Error in weekly airdrop report pagination:', error.message);
+      try {
+        await interaction.followUp({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } catch (e) {
+        /* ignore */
+      }
+    }
   } else if (customId.startsWith('help:')) {
     // Help command pagination handler
     try {
@@ -26170,6 +26195,171 @@ async function finalizeActiveRoundsForWeek(guildId, weekStart, weekEnd) {
   }
 }
 
+// Weekly airdrop announcement embed + pagination (same UX as /drop-leaderboard)
+const WEEKLY_AIRDROP_ENTRIES_PER_PAGE = 10;
+
+async function buildWeeklyAirdropDistributionView(guildId, weekStart, weekEnd, page) {
+  const leaderboard = await dbDropRounds.getWeeklyLeaderboard(guildId, weekStart, weekEnd);
+
+  const weekStartDate = new Date(weekStart);
+  const weekEndDate = new Date(weekEnd);
+  const periodDescription = `${weekStartDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${weekEndDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+
+  if (!leaderboard.length) {
+    const emptyEmbed = new EmbedBuilder()
+      .setTitle(`🎁 Weekly DROP Airdrop — ${periodDescription}`)
+      .setDescription('No leaderboard entries for this week.')
+      .setColor('#00FF00')
+      .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+      .setTimestamp();
+    return { embed: emptyEmbed, components: [] };
+  }
+
+  const game = await dbDropGames.getDropGame(guildId);
+  const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+  const tokenTicker = game?.tokenTicker || null;
+  const tokenDecimals = tokenTicker
+    ? (tokenMetadata[tokenTicker]?.decimals ?? ((await getStoredTokenDecimals(guildId, tokenTicker)) || 8))
+    : 8;
+  const tokenTickerDisplay = tokenTicker ? (tokenMetadata[tokenTicker]?.ticker || tokenTicker.split('-')[0]) : 'TOKEN';
+
+  let tokenPriceUsd = 0;
+  if (tokenTicker) {
+    try {
+      tokenPriceUsd = await getTokenPriceUsd(tokenTicker);
+    } catch (error) {
+      console.error(`[DROP] Error fetching token price for weekly airdrop view:`, error.message);
+    }
+  }
+
+  const userWallets = await getUserWallets(guildId);
+
+  const rows = await Promise.all(leaderboard.map(async (entry) => {
+    let multiplier = 1;
+    if (game?.nftCollectionMultiplier && game?.collectionIdentifier) {
+      const walletAddress = userWallets[entry.userId];
+      if (walletAddress) {
+        try {
+          const nftResult = await dropHelpers.getUserNFTCount(walletAddress, game.collectionIdentifier);
+          if (nftResult.success) {
+            multiplier = dropHelpers.calculateSupporterStatus(nftResult.count).multiplier;
+          }
+        } catch (err) {
+          console.error(`[DROP] Error fetching NFT count for airdrop report:`, err.message);
+        }
+      }
+    }
+    const amountWeiStr = dropHelpers.calculateWeeklyAirdrop(entry.points, game?.baseAmountWei || '0', multiplier);
+    const amountWeiBn = new BigNumber(amountWeiStr);
+    const credited = !!entry.airdropStatus;
+    return { entry, multiplier, amountWeiBn, credited };
+  }));
+
+  rows.sort((a, b) => {
+    if (b.entry.points !== a.entry.points) return b.entry.points - a.entry.points;
+    return b.amountWeiBn.comparedTo(a.amountWeiBn);
+  });
+
+  let totalDistributedWei = new BigNumber(0);
+  for (const r of rows) {
+    if (r.credited) {
+      totalDistributedWei = totalDistributedWei.plus(r.amountWeiBn);
+    }
+  }
+  const paidCount = rows.filter((r) => r.credited).length;
+  const skippedCount = rows.filter((r) => !r.credited).length;
+
+  const totalHuman = totalDistributedWei.dividedBy(new BigNumber(10).pow(tokenDecimals));
+  let totalUsdText = '';
+  if (tokenTicker && tokenPriceUsd > 0 && totalHuman.isGreaterThan(0)) {
+    totalUsdText = ` (≈ $${totalHuman.multipliedBy(tokenPriceUsd).toFixed(2)})`;
+  }
+
+  const totalLine = tokenTicker
+    ? `**Total distributed:** ${totalHuman.toFixed(2)} ${tokenTickerDisplay}${totalUsdText}`
+    : '**Total distributed:** — (no token configured for this server)';
+
+  const summaryExtra = [];
+  if (paidCount > 0) summaryExtra.push(`**Paid:** ${paidCount}`);
+  if (skippedCount > 0) summaryExtra.push(`**Skipped:** ${skippedCount} (no wallet)`);
+  const summaryLine = summaryExtra.length ? `\n${summaryExtra.join(' · ')}` : '';
+
+  const totalPages = Math.max(1, Math.ceil(rows.length / WEEKLY_AIRDROP_ENTRIES_PER_PAGE));
+  const currentPage = Math.max(1, Math.min(page || 1, totalPages));
+  const startIndex = (currentPage - 1) * WEEKLY_AIRDROP_ENTRIES_PER_PAGE;
+  const pageRows = rows.slice(startIndex, startIndex + WEEKLY_AIRDROP_ENTRIES_PER_PAGE);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🎁 Weekly DROP Airdrop — ${periodDescription}`)
+    .setDescription(
+      `${totalLine}${summaryLine}\n\n` +
+      `Sorted by weekly points (highest first). Amounts follow the same DROP payout formula (NFT multiplier may change if holdings change after payout). Funds were added to **virtual accounts**.`
+    )
+    .setColor('#00FF00')
+    .setFooter({
+      text: totalPages > 1
+        ? `Page ${currentPage}/${totalPages} • Powered by MakeX`
+        : `Total: ${rows.length} players • Powered by MakeX`,
+      iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png'
+    })
+    .setTimestamp();
+
+  const fields = [];
+  for (let i = 0; i < pageRows.length; i++) {
+    const { entry, multiplier, amountWeiBn, credited } = pageRows[i];
+    const globalIndex = startIndex + i;
+    const medal = globalIndex === 0 ? '🥇' : globalIndex === 1 ? '🥈' : globalIndex === 2 ? '🥉' : `${globalIndex + 1}.`;
+
+    const human = amountWeiBn.dividedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(2);
+    let usdSuffix = '';
+    if (tokenTicker && tokenPriceUsd > 0 && amountWeiBn.isGreaterThan(0)) {
+      usdSuffix = ` (≈ $${new BigNumber(human).multipliedBy(tokenPriceUsd).toFixed(2)})`;
+    }
+
+    let valueText;
+    if (credited && amountWeiBn.isGreaterThan(0)) {
+      valueText = `**Points:** ${entry.points} | **Multiplier:** ${multiplier}x | **Received:** ${human} ${tokenTickerDisplay}${usdSuffix}`;
+    } else if (credited && amountWeiBn.isLessThanOrEqualTo(0)) {
+      valueText = `**Points:** ${entry.points} | **Multiplier:** ${multiplier}x | **Received:** 0 ${tokenTickerDisplay}`;
+    } else {
+      valueText = `**Points:** ${entry.points} | **Multiplier:** ${multiplier}x | **Received:** — *Not sent (no wallet)* · *Would be ${human} ${tokenTickerDisplay}*${usdSuffix}`;
+    }
+
+    fields.push({
+      name: `${medal} ${entry.userTag || 'Unknown'}`,
+      value: valueText,
+      inline: false
+    });
+  }
+
+  embed.addFields(fields);
+
+  const components = [];
+  if (totalPages > 1) {
+    const buttonRow = new ActionRowBuilder();
+    buttonRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`drop-weekly-airdrop:${guildId}:${weekStart}:${weekEnd}:${currentPage - 1}`)
+        .setLabel('◀ Previous')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(currentPage <= 1),
+      new ButtonBuilder()
+        .setCustomId(`drop-weekly-airdrop-page:${currentPage}`)
+        .setLabel(`Page ${currentPage}/${totalPages}`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId(`drop-weekly-airdrop:${guildId}:${weekStart}:${weekEnd}:${currentPage + 1}`)
+        .setLabel('Next ▶')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(currentPage >= totalPages)
+    );
+    components.push(buttonRow);
+  }
+
+  return { embed, components };
+}
+
 async function distributeWeeklyAirdrops() {
   try {
     const activeGames = await dbDropGames.getActiveDropGames();
@@ -26247,14 +26437,24 @@ async function distributeWeeklyAirdrops() {
           
           // Create announcement if there were entries
           if (channel) {
-            const embed = new EmbedBuilder()
-              .setTitle('🎁 Weekly DROP Airdrop Distributed!')
-              .setDescription(`**${leaderboardEntries.length}** winner(s) received their weekly airdrops!`)
-              .setColor('#00FF00')
-              .setFooter({ text: 'Check your virtual account balance!', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-              .setTimestamp();
-            
-            await channel.send({ embeds: [embed] });
+            try {
+              const { embed, components } = await buildWeeklyAirdropDistributionView(
+                game.guildId,
+                weekStart,
+                weekEnd,
+                1
+              );
+              await channel.send({ embeds: [embed], components });
+            } catch (reportErr) {
+              console.error('[DROP] Error building weekly airdrop report embed:', reportErr);
+              const fallbackEmbed = new EmbedBuilder()
+                .setTitle('🎁 Weekly DROP Airdrop Distributed!')
+                .setDescription(`**${leaderboardEntries.length}** winner(s) received their weekly airdrops!`)
+                .setColor('#00FF00')
+                .setFooter({ text: 'Check your virtual account balance!', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+                .setTimestamp();
+              await channel.send({ embeds: [fallbackEmbed] });
+            }
           }
         }
         
