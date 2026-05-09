@@ -184,6 +184,61 @@ async function getRoundsForWeek(guildId, weekStart, weekEnd) {
   }
 }
 
+// Atomically transition a LIVE round to COMPLETED with winner columns.
+// Only the first concurrent caller succeeds (returns true); prevents duplicate winner announcements.
+async function tryCompleteRoundAsWinner(guildId, roundId, { closedAt, currentDroppers, winnerId, winnerTag }) {
+  try {
+    const updateData = {
+      status: 'COMPLETED',
+      closed_at: closedAt,
+      current_droppers: currentDroppers,
+      winner_id: winnerId,
+      winner_tag: winnerTag,
+      updated_at: new Date().toISOString()
+    };
+
+    const { data, error } = await supabase
+      .from('drop_rounds')
+      .update(updateData)
+      .eq('guild_id', guildId)
+      .eq('round_id', roundId)
+      .eq('status', 'LIVE')
+      .select('round_id');
+
+    if (error) throw error;
+    return Array.isArray(data) && data.length > 0;
+  } catch (error) {
+    console.error('[DB] Error in tryCompleteRoundAsWinner:', error);
+    throw error;
+  }
+}
+
+// Atomically close a LIVE round without a winner (insufficient participants, etc.).
+async function tryCloseRoundLive(guildId, roundId, { closedAt, currentDroppers }) {
+  try {
+    const updateData = {
+      status: 'CLOSED',
+      closed_at: closedAt,
+      current_droppers: currentDroppers,
+      updated_at: new Date().toISOString()
+    };
+
+    const { data, error } = await supabase
+      .from('drop_rounds')
+      .update(updateData)
+      .eq('guild_id', guildId)
+      .eq('round_id', roundId)
+      .eq('status', 'LIVE')
+      .select('round_id');
+
+    if (error) throw error;
+    return Array.isArray(data) && data.length > 0;
+  } catch (error) {
+    console.error('[DB] Error in tryCloseRoundLive:', error);
+    throw error;
+  }
+}
+
 // Update round
 async function updateRound(guildId, roundId, roundData) {
   try {
@@ -542,6 +597,8 @@ module.exports = {
   getActiveRounds,
   getAllActiveRounds,
   getRoundsForWeek,
+  tryCompleteRoundAsWinner,
+  tryCloseRoundLive,
   updateRound,
   addParticipant,
   removeParticipant,

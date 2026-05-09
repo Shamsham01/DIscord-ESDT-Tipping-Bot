@@ -25762,6 +25762,14 @@ async function autoCloseStakingPool(guildId, poolId) {
 // ============================================
 
 // DROP Game helper functions
+function formatDropRoundDisplayId(roundId) {
+  if (!roundId || typeof roundId !== 'string') return 'N';
+  const parts = roundId.split('-');
+  // drop-{guildId}-{epoch} or drop-{guildId}-{epoch}-{entropy}
+  if (parts.length >= 3) return parts[2];
+  return parts[parts.length - 1] || 'N';
+}
+
 async function createDropRoundEmbed(guildId, roundId, game, round, isClosed = false) {
   try {
     const now = Date.now();
@@ -25826,7 +25834,7 @@ async function createDropRoundEmbed(guildId, roundId, game, round, isClosed = fa
     }
     
     const embed = new EmbedBuilder()
-      .setTitle(`🪂 DROP Game - Round ${roundId.split('-').pop() || 'N'}`)
+      .setTitle(`🪂 DROP Game - Round ${formatDropRoundDisplayId(roundId)}`)
       .setColor(color)
       .setDescription(`**Status:** ${statusText}\n**Time Remaining:** ${countdownText}`)
       .addFields(
@@ -25879,7 +25887,7 @@ async function createWinnerAnnouncementEmbed(guildId, round, game) {
   try {
     const embed = new EmbedBuilder()
       .setTitle('🎉 DROP Game Winner!')
-      .setDescription(`**Round:** ${round.roundId.split('-').pop() || 'N'}\n**Winner:** <@${round.winnerId}> (${round.winnerTag || 'Unknown'})`)
+      .setDescription(`**Round:** ${formatDropRoundDisplayId(round.roundId)}\n**Winner:** <@${round.winnerId}> (${round.winnerTag || 'Unknown'})`)
       .setColor('#00FF00')
       .setFooter({ text: 'Congratulations!', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
       .setTimestamp();
@@ -25946,52 +25954,58 @@ async function processDropRound(guildId, roundId) {
         
         const winner = participants[Math.floor(Math.random() * participants.length)];
         
-        // Update round
-        await dbDropRounds.updateRound(guildId, roundId, {
-          status: 'COMPLETED',
+        // Only one concurrent processor may complete this round (avoids duplicate winner posts)
+        const claimed = await dbDropRounds.tryCompleteRoundAsWinner(guildId, roundId, {
           closedAt: now,
           currentDroppers: participantCount,
           winnerId: winner.userId,
           winnerTag: winner.userTag
         });
-        
-        // Update leaderboard
-        const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
-        await dbDropRounds.updateLeaderboardEntry(guildId, winner.userId, winner.userTag, weekStart, weekEnd, {
-          points: 1,
-          wins: 1
-        });
-        
-        // Create winner announcement
-        const channel = await client.channels.fetch(round.channelId).catch(() => null);
-        if (channel) {
-          const winnerEmbed = await createWinnerAnnouncementEmbed(guildId, {
-            ...round,
-            winnerId: winner.userId,
-            winnerTag: winner.userTag
-          }, game);
-          if (winnerEmbed) {
-            await channel.send({ embeds: [winnerEmbed] });
-          }
-          
-          // Update closed round embed
-          const closedEmbed = await createDropRoundEmbed(guildId, roundId, game, {
-            ...round,
-            currentDroppers: participantCount,
-            status: 'CLOSED'
-          }, true);
-          if (closedEmbed) {
-            await updateDropRoundMessage(channel, round, game, closedEmbed, guildId, roundId);
-          }
-          
-          // Create next round
-          await createNextDropRound(guildId, game);
+        if (!claimed) {
+          return;
         }
         
-        // Clean up participants
-        await dbDropRounds.deleteParticipantsForRound(guildId, roundId);
+        try {
+          // Update leaderboard
+          const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
+          await dbDropRounds.updateLeaderboardEntry(guildId, winner.userId, winner.userTag, weekStart, weekEnd, {
+            points: 1,
+            wins: 1
+          });
+          
+          // Create winner announcement and refresh the round embed
+          const channel = await client.channels.fetch(round.channelId).catch(() => null);
+          if (channel) {
+            const winnerEmbed = await createWinnerAnnouncementEmbed(guildId, {
+              ...round,
+              winnerId: winner.userId,
+              winnerTag: winner.userTag
+            }, game);
+            if (winnerEmbed) {
+              await channel.send({ embeds: [winnerEmbed] });
+            }
+            
+            const closedEmbed = await createDropRoundEmbed(guildId, roundId, game, {
+              ...round,
+              currentDroppers: participantCount,
+              status: 'CLOSED'
+            }, true);
+            if (closedEmbed) {
+              await updateDropRoundMessage(channel, round, game, closedEmbed, guildId, roundId);
+            }
+          }
+          
+          console.log(`[DROP] Round ${roundId} completed, winner: ${winner.userTag}`);
+        } finally {
+          try {
+            await dbDropRounds.deleteParticipantsForRound(guildId, roundId);
+          } catch (cleanupErr) {
+            console.error(`[DROP] Error deleting participants for round ${roundId}:`, cleanupErr);
+          }
+        }
         
-        console.log(`[DROP] Round ${roundId} completed, winner: ${winner.userTag}`);
+        // Next round uses game channel; must not be skipped if the old message channel fetch failed
+        await createNextDropRound(guildId, game);
       } else {
         // Update embed to show missing droppers
         const channel = await client.channels.fetch(round.channelId).catch(() => null);
@@ -26039,7 +26053,7 @@ async function createNextDropRound(guildId, game) {
     const oneHour = 60 * 60 * 1000;
     const drawTime = now + oneHour;
     const { weekStart, weekEnd } = dropHelpers.getCurrentWeekBoundaries();
-    const roundId = `drop-${guildId}-${now}`;
+    const roundId = `drop-${guildId}-${now}-${require('crypto').randomBytes(5).toString('hex')}`;
     
     // Create round
     await dbDropRounds.createRound(guildId, {
@@ -26096,42 +26110,88 @@ async function finalizeActiveRoundsForWeek(guildId, weekStart, weekEnd) {
           if (participants.length > 0) {
             const winner = participants[Math.floor(Math.random() * participants.length)];
             
-            // Update round status
-            await dbDropRounds.updateRound(guildId, round.roundId, {
-              status: 'COMPLETED',
+            const claimed = await dbDropRounds.tryCompleteRoundAsWinner(guildId, round.roundId, {
               closedAt: now,
               currentDroppers: participantCount,
               winnerId: winner.userId,
               winnerTag: winner.userTag
             });
+            if (!claimed) {
+              continue;
+            }
             
-            // Add winner to leaderboard for the week this round belongs to
-            await dbDropRounds.updateLeaderboardEntry(guildId, winner.userId, winner.userTag, round.weekStart, round.weekEnd, {
-              points: 1,
-              wins: 1
+            try {
+              // Add winner to leaderboard for the week this round belongs to
+              await dbDropRounds.updateLeaderboardEntry(guildId, winner.userId, winner.userTag, round.weekStart, round.weekEnd, {
+                points: 1,
+                wins: 1
+              });
+              
+              // Create winner announcement
+              const channel = await client.channels.fetch(round.channelId).catch(() => null);
+              if (channel) {
+                const game = await dbDropGames.getDropGame(guildId);
+                if (game) {
+                  const winnerEmbed = await createWinnerAnnouncementEmbed(guildId, {
+                    ...round,
+                    winnerId: winner.userId,
+                    winnerTag: winner.userTag
+                  }, game);
+                  if (winnerEmbed) {
+                    await channel.send({ embeds: [winnerEmbed] });
+                  }
+                  
+                  // Update closed round embed
+                  const closedEmbed = await createDropRoundEmbed(guildId, round.roundId, game, {
+                    ...round,
+                    currentDroppers: participantCount,
+                    status: 'CLOSED',
+                    winnerId: winner.userId,
+                    winnerTag: winner.userTag
+                  }, true);
+                  if (closedEmbed) {
+                    await updateDropRoundMessage(channel, round, game, closedEmbed, guildId, round.roundId);
+                  }
+                }
+              }
+              
+              console.log(`[DROP] Finalized round ${round.roundId} for week ending ${new Date(round.weekEnd).toISOString()}, winner: ${winner.userTag}`);
+              finalizedCount++;
+            } finally {
+              try {
+                await dbDropRounds.deleteParticipantsForRound(guildId, round.roundId);
+              } catch (cleanupErr) {
+                console.error(`[DROP] Error deleting participants for round ${round.roundId}:`, cleanupErr);
+              }
+            }
+          } else {
+            // No participants, just close the round
+            const closed = await dbDropRounds.tryCloseRoundLive(guildId, round.roundId, {
+              closedAt: now,
+              currentDroppers: 0
             });
-            
-            // Create winner announcement
+            if (closed) {
+              console.log(`[DROP] Closed round ${round.roundId} with no participants`);
+              finalizedCount++;
+            }
+          }
+        } else {
+          // Not enough participants, close without winner
+          const closed = await dbDropRounds.tryCloseRoundLive(guildId, round.roundId, {
+            closedAt: now,
+            currentDroppers: participantCount
+          });
+          
+          if (closed) {
+            // Update embed to show it's closed
             const channel = await client.channels.fetch(round.channelId).catch(() => null);
             if (channel) {
               const game = await dbDropGames.getDropGame(guildId);
               if (game) {
-                const winnerEmbed = await createWinnerAnnouncementEmbed(guildId, {
-                  ...round,
-                  winnerId: winner.userId,
-                  winnerTag: winner.userTag
-                }, game);
-                if (winnerEmbed) {
-                  await channel.send({ embeds: [winnerEmbed] });
-                }
-                
-                // Update closed round embed
                 const closedEmbed = await createDropRoundEmbed(guildId, round.roundId, game, {
                   ...round,
                   currentDroppers: participantCount,
-                  status: 'CLOSED',
-                  winnerId: winner.userId,
-                  winnerTag: winner.userTag
+                  status: 'CLOSED'
                 }, true);
                 if (closedEmbed) {
                   await updateDropRoundMessage(channel, round, game, closedEmbed, guildId, round.roundId);
@@ -26139,47 +26199,9 @@ async function finalizeActiveRoundsForWeek(guildId, weekStart, weekEnd) {
               }
             }
             
-            // Clean up participants
-            await dbDropRounds.deleteParticipantsForRound(guildId, round.roundId);
-            
-            console.log(`[DROP] Finalized round ${round.roundId} for week ending ${new Date(round.weekEnd).toISOString()}, winner: ${winner.userTag}`);
-            finalizedCount++;
-          } else {
-            // No participants, just close the round
-            await dbDropRounds.updateRound(guildId, round.roundId, {
-              status: 'CLOSED',
-              closedAt: now,
-              currentDroppers: 0
-            });
-            console.log(`[DROP] Closed round ${round.roundId} with no participants`);
+            console.log(`[DROP] Closed round ${round.roundId} - insufficient participants (${participantCount}/${round.minDroppers})`);
             finalizedCount++;
           }
-        } else {
-          // Not enough participants, close without winner
-          await dbDropRounds.updateRound(guildId, round.roundId, {
-            status: 'CLOSED',
-            closedAt: now,
-            currentDroppers: participantCount
-          });
-          
-          // Update embed to show it's closed
-          const channel = await client.channels.fetch(round.channelId).catch(() => null);
-          if (channel) {
-            const game = await dbDropGames.getDropGame(guildId);
-            if (game) {
-              const closedEmbed = await createDropRoundEmbed(guildId, round.roundId, game, {
-                ...round,
-                currentDroppers: participantCount,
-                status: 'CLOSED'
-              }, true);
-              if (closedEmbed) {
-                await updateDropRoundMessage(channel, round, game, closedEmbed, guildId, round.roundId);
-              }
-            }
-          }
-          
-          console.log(`[DROP] Closed round ${round.roundId} - insufficient participants (${participantCount}/${round.minDroppers})`);
-          finalizedCount++;
         }
       }
     }
@@ -27631,6 +27653,15 @@ client.on('ready', async () => {
       const activeRounds = await dbDropRounds.getAllActiveRounds();
       for (const round of activeRounds) {
         await processDropRound(round.guildId, round.roundId);
+      }
+      // Recovery: automation should always have exactly one LIVE round while the game is ACTIVE
+      const activeGames = await dbDropGames.getActiveDropGames();
+      for (const game of activeGames) {
+        const guildLive = await dbDropRounds.getActiveRounds(game.guildId);
+        if (guildLive.length === 0) {
+          console.warn(`[DROP] Recovery: ACTIVE game in guild ${game.guildId} has no LIVE round; creating one`);
+          await createNextDropRound(game.guildId, game);
+        }
       }
     } catch (error) {
       console.error('[DROP] Error checking drop rounds:', error.message);
