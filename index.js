@@ -90,6 +90,8 @@ const dbDropRounds = require('./db/drop-rounds');
 const dropHelpers = require('./utils/drop-helpers');
 const dbActivityAggregations = require('./db/activity-aggregations');
 const dbSwapTransactions = require('./db/swap-transactions');
+const nftRoleVerificationHandlers = require('./handlers/nft-role-verification');
+const { runNftRoleSync } = require('./jobs/sync-nft-role-verifications');
 
 // Validate dbFootball module is loaded correctly
 if (!dbFootball || typeof dbFootball !== 'object') {
@@ -7180,6 +7182,20 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ content: `Error: ${error.message}` });
       } else {
         await interaction.reply({ content: `Error: ${error.message}` });
+      }
+    }
+  } else if (commandName === 'nft-role-verification') {
+    try {
+      await nftRoleVerificationHandlers.handleNftRoleVerificationCommand(interaction, client);
+    } catch (error) {
+      console.error('[NFT-ROLE] Command error:', error.message);
+      const msg = `Error: ${error.message}`;
+      if (interaction.deferred) {
+        await interaction.editReply({ content: msg, flags: [MessageFlags.Ephemeral] }).catch(() => {});
+      } else if (interaction.replied) {
+        await interaction.followUp({ content: msg, flags: [MessageFlags.Ephemeral] }).catch(() => {});
+      } else {
+        await interaction.reply({ content: msg, flags: [MessageFlags.Ephemeral] }).catch(() => {});
       }
     }
   } else if (commandName === 'test-football-api') {
@@ -21227,6 +21243,10 @@ client.on('interactionCreate', async (interaction) => {
 // Select menu interaction handler for staking pools
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isStringSelectMenu()) return;
+
+  if (await nftRoleVerificationHandlers.handleNftRoleRuleSelectMenu(interaction)) {
+    return;
+  }
   
   const { customId } = interaction;
   const guildId = interaction.guildId;
@@ -27719,6 +27739,16 @@ client.on('ready', async () => {
   console.log('Auction expiration check scheduled (every minute)');
   console.log('Lottery draw check scheduled (every minute)');
   console.log('Lottery embed update scheduled (every 10 minutes)');
+  
+  // NFT role verification: wallet + VA dual check (daily)
+  setInterval(async () => {
+    try {
+      await runNftRoleSync(client);
+    } catch (error) {
+      console.error('[NFT-ROLE-SYNC] Scheduled run error:', error.message);
+    }
+  }, 24 * 60 * 60 * 1000);
+  console.log('NFT role verification sync scheduled (every 24 hours)');
   
   // Set up periodic check for staking pool reward distributions
   setInterval(async () => {

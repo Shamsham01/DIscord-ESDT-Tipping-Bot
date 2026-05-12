@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { REST, Routes, ApplicationCommandOptionType } = require('discord.js');
+const { REST, Routes, ApplicationCommandOptionType, ChannelType } = require('discord.js');
 const fetch = require('node-fetch');
 
 // Add debug logging and validation
@@ -1671,6 +1671,97 @@ const commands = [
             }
         ],
         default_member_permissions: '0'
+    },
+    {
+        name: 'nft-role-verification',
+        description: 'Admin: grant roles when wallet + VA NFT rules match (daily sync)',
+        options: [
+            {
+                type: ApplicationCommandOptionType.Subcommand,
+                name: 'create',
+                description: 'Create rule: role, notification channel, collections',
+                options: [
+                    {
+                        name: 'role',
+                        description: 'Discord role to grant when both wallet and VA qualify',
+                        type: ApplicationCommandOptionType.Role,
+                        required: true
+                    },
+                    {
+                        name: 'notification-channel',
+                        description: 'Channel for setup confirmation and sync grant/remove notices',
+                        type: ApplicationCommandOptionType.Channel,
+                        channel_types: [
+                            ChannelType.GuildText,
+                            ChannelType.GuildAnnouncement,
+                            ChannelType.PublicThread,
+                            ChannelType.PrivateThread
+                        ],
+                        required: true
+                    },
+                    {
+                        name: 'collections',
+                        description: 'Comma-separated MultiversX collection tickers',
+                        type: ApplicationCommandOptionType.String,
+                        required: true
+                    },
+                    {
+                        name: 'match-mode',
+                        description: 'Require any one collection or all listed collections',
+                        type: ApplicationCommandOptionType.String,
+                        required: false,
+                        choices: [
+                            { name: 'Any collection qualifies', value: 'any' },
+                            { name: 'All collections required', value: 'all' }
+                        ]
+                    },
+                    {
+                        name: 'min-count',
+                        description: 'Minimum NFT count per collection (default 1)',
+                        type: ApplicationCommandOptionType.Integer,
+                        required: false,
+                        min_value: 1
+                    }
+                ]
+            },
+            {
+                type: ApplicationCommandOptionType.Subcommand,
+                name: 'list',
+                description: 'List rules and toggle via menu (delete uses delete subcommand)'
+            },
+            {
+                type: ApplicationCommandOptionType.Subcommand,
+                name: 'delete',
+                description: 'Delete a rule by UUID from /nft-role-verification list',
+                options: [
+                    {
+                        name: 'rule-id',
+                        description: 'Rule id (UUID)',
+                        type: ApplicationCommandOptionType.String,
+                        required: true
+                    }
+                ]
+            },
+            {
+                type: ApplicationCommandOptionType.Subcommand,
+                name: 'toggle',
+                description: 'Enable or disable a rule by UUID',
+                options: [
+                    {
+                        name: 'rule-id',
+                        description: 'Rule id (UUID)',
+                        type: ApplicationCommandOptionType.String,
+                        required: true
+                    }
+                ]
+            },
+            {
+                type: ApplicationCommandOptionType.Subcommand,
+                name: 'run-now',
+                description: 'Run verification sync for this server now'
+            }
+        ],
+        default_member_permissions: '8'
     },
 ];
 

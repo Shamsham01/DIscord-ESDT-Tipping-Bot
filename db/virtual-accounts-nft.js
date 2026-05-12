@@ -11,6 +11,22 @@ function nftBalanceKey(collection, nonce) {
   return `${collection}\u0000${Number(nonce)}`;
 }
 
+/** Locked units in active marketplace listings for this balance row (collection + nonce). */
+function getLockedInListingsForNft(nft, activeListings) {
+  const listingsForThisNFT = (activeListings || []).filter(
+    listing => listing.collection === nft.collection && listing.nonce === nft.nonce
+  );
+  return listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
+}
+
+/** Locked units in active auctions for this balance row. */
+function getLockedInAuctionsForNft(nft, activeAuctions) {
+  const auctionsForNft = (activeAuctions || []).filter(
+    a => a.collection === nft.collection && Number(a.nftNonce) === Number(nft.nonce)
+  );
+  return auctionsForNft.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+}
+
 /**
  * Same rules as the staking NFT picker: staking_pool_balances is the source of truth when VA rows
  * are out of sync. Blocks moves (withdraw or cross-guild transfer) when staked, fully listed, or fully in auction.
@@ -47,18 +63,12 @@ function getWithdrawBlockReason(nft, stakedKeys, activeListings, activeAuctions)
   }
 
   const totalBalance = nft.amount || 1;
-  const listingsForThisNFT = activeListings.filter(
-    listing => listing.collection === nft.collection && listing.nonce === nft.nonce
-  );
-  const lockedInListings = listingsForThisNFT.reduce((sum, listing) => sum + (listing.amount || 1), 0);
+  const lockedInListings = getLockedInListingsForNft(nft, activeListings);
   if (lockedInListings >= totalBalance) {
     return 'This NFT is listed for sale. Cancel the listing before withdrawing or transferring it.';
   }
 
-  const auctionsForNft = activeAuctions.filter(
-    a => a.collection === nft.collection && Number(a.nftNonce) === Number(nft.nonce)
-  );
-  const lockedInAuctions = auctionsForNft.reduce((sum, auction) => sum + (auction.amount || 1), 0);
+  const lockedInAuctions = getLockedInAuctionsForNft(nft, activeAuctions);
   if (lockedInAuctions >= totalBalance) {
     return 'This NFT is in an active auction. Wait for the auction to end or cancel it before withdrawing or transferring it.';
   }
@@ -126,6 +136,53 @@ async function getUserNFTBalanceByIdentifier(guildId, userId, identifier) {
     return data || null;
   } catch (error) {
     console.error('[DB] Error getting user NFT balance by identifier:', error);
+    throw error;
+  }
+}
+
+/**
+ * Per-collection eligible quantities for role rules: VA rows in listed collections,
+ * including staked NFTs, minus units locked in active listings and auctions.
+ * @returns {Promise<Record<string, number>>}
+ */
+async function countEligibleVirtualInventoryForRoleRule(guildId, userId, collectionTickers) {
+  const tickers = [...new Set((collectionTickers || []).filter(Boolean))];
+  const counts = {};
+  tickers.forEach(t => {
+    counts[t] = 0;
+  });
+  if (tickers.length === 0) {
+    return counts;
+  }
+
+  const balances = await getUserNFTBalances(guildId, userId, null, true);
+  const filtered = balances.filter(b => tickers.includes(b.collection));
+  const activeListings = await getUserListings(guildId, userId, 'ACTIVE');
+  const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId);
+
+  for (const nft of filtered) {
+    const totalBalance = nft.amount || 1;
+    const lockedL = getLockedInListingsForNft(nft, activeListings);
+    const lockedA = getLockedInAuctionsForNft(nft, activeAuctions);
+    const effective = Math.max(0, totalBalance - lockedL - lockedA);
+    if (effective > 0 && counts[nft.collection] !== undefined) {
+      counts[nft.collection] += effective;
+    }
+  }
+  return counts;
+}
+
+async function getDistinctUserIdsWithNftBalances(guildId) {
+  try {
+    const { data, error } = await supabase
+      .from('virtual_account_nft_balances')
+      .select('user_id')
+      .eq('guild_id', guildId);
+    if (error) throw error;
+    const ids = [...new Set((data || []).map(r => r.user_id).filter(Boolean))];
+    return ids;
+  } catch (error) {
+    console.error('[DB] Error getting distinct VA NFT user ids:', error);
     throw error;
   }
 }
@@ -1075,6 +1132,10 @@ async function getServerNFTSummary(guildId) {
 module.exports = {
   // Balance Management
   getUserNFTBalances,
+  getLockedInListingsForNft,
+  getLockedInAuctionsForNft,
+  countEligibleVirtualInventoryForRoleRule,
+  getDistinctUserIdsWithNftBalances,
   validateNFTsForWithdrawal,
   getUserNFTBalance,
   getUserCollections,
