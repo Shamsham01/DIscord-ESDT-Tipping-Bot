@@ -850,3 +850,6 @@ CREATE TABLE IF NOT EXISTS guild_nft_role_rules (
 CREATE INDEX IF NOT EXISTS idx_guild_nft_role_rules_guild ON guild_nft_role_rules (guild_id);
 CREATE INDEX IF NOT EXISTS idx_guild_nft_role_rules_guild_enabled ON guild_nft_role_rules (guild_id, enabled);
 
+-- Bot uses anon key; RLS without policies blocks writes. Keep aligned with other server-only tables.
+ALTER TABLE guild_nft_role_rules DISABLE ROW LEVEL SECURITY;
+
