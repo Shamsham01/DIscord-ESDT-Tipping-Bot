@@ -26783,6 +26783,9 @@ async function handleHelpCommand(interaction, page = 1) {
             '`/subscribe-activity` 🔴 Admin - Subscribe to activities from other servers',
             '`/unsubscribe-activity` 🔴 Admin - Unsubscribe from activity feeds'
           ],
+          '🪪 NFT role verification': [
+            '`/nft-role-verification` 🔴 Admin - Wallet + VA NFT rules for roles: `create`, `list`, `delete`, `toggle`, `run-now`'
+          ],
           '🔧 Utilities & Debug': [
             '`/update-token-metadata` 🔴 Admin - Update token info',
             '`/blockchain-status` 🔴 Admin - Check blockchain listener',

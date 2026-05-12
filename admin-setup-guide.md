@@ -64,6 +64,14 @@ If the bot responds with an embed, permissions are correctly set.
 
 ***
 
+## NFT holder roles (optional)
+
+To automatically grant a Discord role when members hold specific MultiversX NFTs **both** on their **linked wallet** and in their **Virtual Account**, use **`/nft-role-verification`**. The bot needs **Manage Roles** and its role must be **above** the role it assigns.
+
+Full setup, match modes, and subcommands: **[NFT Role Verification](nft-role-verification.md)**.
+
+***
+
 ## Creating Your First Project
 
 A **project** represents a wallet that can send tokens, NFTs, and SFTs to users. You can have multiple projects per server.

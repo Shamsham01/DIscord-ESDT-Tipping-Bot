@@ -77,6 +77,7 @@ Set it and forget it:
 * **Auto-Detection** - Instantly detects deposits and credits user accounts
 * **Multi-Server Support** - One bot instance manages unlimited Discord servers
 * **Real-Time Updates** - Balance updates happen instantly as transactions are detected
+* **NFT role verification** - Admins can tie Discord roles to MultiversX collections using both linked wallets and Virtual Account inventory (daily sync + optional `run-now`)
 
 ### 🔔 **Activity Subscriptions**
 

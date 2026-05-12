@@ -441,6 +441,50 @@ Useful for remembering which competition code was used for football betting.
 
 ---
 
+## NFT role verification
+
+Automatically grant or remove a Discord role when members satisfy **both** linked-wallet NFT counts (MultiversX API) **and** Virtual Account holdings for the same collections (staked counts included; active listing/auction locks excluded). A **daily** job runs server-wide; use **`run-now`** for an immediate pass in the current server.
+
+### `/nft-role-verification create`
+
+**Usage**: `/nft-role-verification create role notification-channel collections [match-mode] [min-count]`
+
+**Parameters**:
+- `role` (Required): Discord role to grant when eligible
+- `notification-channel` (Required): Channel for setup confirmation and sync grant/remove notices
+- `collections` (Required): Comma-separated collection tickers
+- `match-mode` (Optional): `any` (default) or `all`
+- `min-count` (Optional): Minimum count per collection (default `1`)
+
+After insert, the bot posts a confirmation embed in the notification channel.
+
+### `/nft-role-verification list`
+
+**Usage**: `/nft-role-verification list`
+
+Lists rules (with UUIDs) and provides a select menu to toggle enabled/disabled (up to 25 rules).
+
+### `/nft-role-verification delete`
+
+**Usage**: `/nft-role-verification delete rule-id`
+
+**Parameters**:
+- `rule-id` (Required): Rule UUID from `list`
+
+### `/nft-role-verification toggle`
+
+**Usage**: `/nft-role-verification toggle rule-id`
+
+Flips `enabled` for the rule.
+
+### `/nft-role-verification run-now`
+
+**Usage**: `/nft-role-verification run-now`
+
+Runs the sync immediately for this guild and returns a short summary.
+
+---
+
 ## Command Permissions
 
 All admin commands require **Administrator** permissions in the Discord server.
