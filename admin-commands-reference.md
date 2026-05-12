@@ -469,13 +469,16 @@ Lists rules (with UUIDs) and provides a select menu to toggle enabled/disabled (
 **Usage**: `/nft-role-verification delete rule-id`
 
 **Parameters**:
-- `rule-id` (Required): Rule UUID from `list`
+- `rule-id` (Required): Rule UUID — pick from **autocomplete** (`RoleName · first8…last8`) or paste the full id from `list`.
 
 ### `/nft-role-verification toggle`
 
 **Usage**: `/nft-role-verification toggle rule-id`
 
 Flips `enabled` for the rule.
+
+**Parameters**:
+- `rule-id` (Required): Rule UUID — pick from **autocomplete** (`RoleName · first8…last8`) or paste the full id from `list`.
 
 ### `/nft-role-verification run-now`
 

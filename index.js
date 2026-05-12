@@ -92,6 +92,7 @@ const dbActivityAggregations = require('./db/activity-aggregations');
 const dbSwapTransactions = require('./db/swap-transactions');
 const nftRoleVerificationHandlers = require('./handlers/nft-role-verification');
 const { runNftRoleSync } = require('./jobs/sync-nft-role-verifications');
+const dbNftRoleRules = require('./db/nft-role-verification');
 
 // Validate dbFootball module is loaded correctly
 if (!dbFootball || typeof dbFootball !== 'object') {
@@ -14461,6 +14462,58 @@ client.on('interactionCreate', async (interaction) => {
     } catch (error) {
       await safeRespond(interaction, []);
     }
+    return;
+  }
+
+  // NFT role verification — rule-id autocomplete (delete / toggle)
+  if (interaction.commandName === 'nft-role-verification') {
+    const sub = interaction.options.getSubcommand(false);
+    let focused;
+    try {
+      focused = interaction.options.getFocused(true);
+    } catch (_) {
+      await safeRespond(interaction, []);
+      return;
+    }
+    if ((sub === 'delete' || sub === 'toggle') && focused.name === 'rule-id') {
+      try {
+        const guildId = interaction.guildId;
+        const focusedRaw = interaction.options.getFocused();
+        const focusedVal = (focusedRaw?.value != null ? String(focusedRaw.value) : '').trim().toLowerCase();
+        if (!guildId) {
+          await safeRespond(interaction, []);
+          return;
+        }
+        const rules = await dbNftRoleRules.listRulesForGuild(guildId);
+        const guild = interaction.guild;
+        if (guild) {
+          await guild.roles.fetch().catch(() => {});
+        }
+        const choices = [];
+        for (const rule of rules) {
+          const id = String(rule.id);
+          const role = guild?.roles.cache.get(rule.discordRoleId);
+          const roleLabel = role?.name || `Role ${String(rule.discordRoleId).slice(-6)}`;
+          const shortId = id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-8)}` : id;
+          let name = `${roleLabel} · ${shortId}`;
+          if (name.length > 100) {
+            name = name.slice(0, 97) + '…';
+          }
+          const haystack = `${id} ${roleLabel} ${shortId}`.toLowerCase();
+          if (focusedVal && !haystack.includes(focusedVal)) {
+            continue;
+          }
+          choices.push({ name, value: id });
+        }
+        choices.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+        await safeRespond(interaction, choices.slice(0, 25));
+      } catch (error) {
+        console.error('[AUTOCOMPLETE] nft-role-verification rule-id:', error.message);
+        await safeRespond(interaction, []);
+      }
+      return;
+    }
+    await safeRespond(interaction, []);
     return;
   }
 

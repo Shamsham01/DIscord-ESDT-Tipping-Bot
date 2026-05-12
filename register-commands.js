@@ -1736,9 +1736,10 @@ const commands = [
                 options: [
                     {
                         name: 'rule-id',
-                        description: 'Rule id (UUID)',
+                        description: 'Pick a rule (autocomplete) or paste full UUID',
                         type: ApplicationCommandOptionType.String,
-                        required: true
+                        required: true,
+                        autocomplete: true
                     }
                 ]
             },
@@ -1749,9 +1750,10 @@ const commands = [
                 options: [
                     {
                         name: 'rule-id',
-                        description: 'Rule id (UUID)',
+                        description: 'Pick a rule (autocomplete) or paste full UUID',
                         type: ApplicationCommandOptionType.String,
-                        required: true
+                        required: true,
+                        autocomplete: true
                     }
                 ]
             },

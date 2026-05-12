@@ -66,7 +66,7 @@ Deletes a rule by **UUID** (copy from `list` output).
 
 **Parameters**
 
-- `rule-id` — Full rule id.
+- `rule-id` — Full rule id (use **autocomplete**: `RoleName · first8…last8`, or paste from `list`).
 
 ### `toggle`
 
@@ -74,7 +74,7 @@ Enables or disables a rule by UUID (same as using the list menu toggle).
 
 **Parameters**
 
-- `rule-id` — Full rule id.
+- `rule-id` — Full rule id (use **autocomplete**: `RoleName · first8…last8`, or paste from `list`).
 
 ### `run-now`
 
