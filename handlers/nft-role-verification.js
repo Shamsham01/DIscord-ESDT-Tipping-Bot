@@ -191,7 +191,11 @@ async function handleNftRoleVerificationCommand(interaction, client) {
       return;
     }
     await interaction.editReply({
-      content: `Sync finished. Rules: ${summary.rules}, granted: ${summary.granted}, removed: ${summary.revoked}, errors: ${summary.errors}.`
+      content: `Sync finished. Rules: ${summary.rules}, granted: ${summary.granted}, removed: ${summary.revoked}, errors: ${summary.errors}` +
+        (summary.walletCheckSkipped
+          ? `, wallet checks skipped (API/rate limit): ${summary.walletCheckSkipped}`
+          : '') +
+        '.'
     });
     return;
   }
