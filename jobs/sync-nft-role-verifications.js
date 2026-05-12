@@ -25,78 +25,105 @@ async function waitMvxSlot() {
 }
 
 /**
- * GET /accounts/{address}/collections/{collection} with spacing, retries on 429/5xx.
- * On unrecoverable error returns verified:false — caller must NOT revoke roles (unknown state).
- * @returns {Promise<{ verified: boolean, count: number }>}
- */
-async function getMvxCollectionCount(walletAddress, collectionTicker) {
-  await waitMvxSlot();
-  const url = `https://api.multiversx.com/accounts/${encodeURIComponent(walletAddress)}/collections/${encodeURIComponent(collectionTicker)}`;
-  const maxAttempts = 5;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        timeout: 15000
-      });
-
-      if (response.status === 404) {
-        return { verified: true, count: 0 };
-      }
-
-      if (response.status === 429 || response.status >= 500) {
-        const retryAfterSec = parseInt(response.headers.get('retry-after') || '0', 10);
-        const fromHeader =
-          retryAfterSec > 0 ? Math.min(retryAfterSec * 1000, MVX_MAX_RETRY_AFTER_MS) : 0;
-        const backoff = Math.max(
-          fromHeader,
-          MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS * (attempt + 1),
-          2000
-        );
-        console.warn(
-          `[NFT-ROLE-SYNC] MvX HTTP ${response.status} for ${collectionTicker}, waiting ${backoff}ms (attempt ${attempt}/${maxAttempts})`
-        );
-        await sleep(backoff);
-        await waitMvxSlot();
-        continue;
-      }
-
-      if (!response.ok) {
-        console.warn(`[NFT-ROLE-SYNC] MvX HTTP ${response.status} for ${collectionTicker} (no retry)`);
-        return { verified: false, count: 0 };
-      }
-
-      const data = await response.json();
-      const count = parseInt(data.count ?? 0, 10) || 0;
-      return { verified: true, count };
-    } catch (err) {
-      console.warn(`[NFT-ROLE-SYNC] MvX fetch error ${collectionTicker}:`, err.message);
-      if (attempt === maxAttempts) {
-        return { verified: false, count: 0 };
-      }
-      await sleep(1000 * attempt);
-      await waitMvxSlot();
-    }
-  }
-  return { verified: false, count: 0 };
-}
-
-/**
- * Fetch on-chain collection counts for a wallet.
+ * Wallet leg: count on-chain NFT/SFT per collection using one paginated stream:
+ * GET /accounts/{address}/nfts?collections=t1,t2,... (matches explorer-style holdings; fewer MvX calls than per-collection /collections/{t}).
+ * On unrecoverable error returns walletLegVerified:false — caller must NOT revoke roles (unknown state).
  * @returns {Promise<{ counts: Record<string, number>, walletLegVerified: boolean }>}
  */
 async function fetchWalletCollectionCounts(walletAddress, collectionTickers) {
   const tickers = [...new Set((collectionTickers || []).filter(Boolean))];
   const counts = {};
-  for (const c of tickers) {
-    const { verified, count } = await getMvxCollectionCount(walletAddress, c);
-    if (!verified) {
+  tickers.forEach(t => {
+    counts[t] = 0;
+  });
+  if (tickers.length === 0) {
+    return { counts, walletLegVerified: true };
+  }
+
+  const collectionsQuery = tickers.map(t => encodeURIComponent(t)).join(',');
+  const pageSize = 100;
+  const maxPages = 100;
+  let from = 0;
+
+  for (let page = 0; page < maxPages; page++) {
+    await waitMvxSlot();
+    const url = `https://api.multiversx.com/accounts/${encodeURIComponent(walletAddress)}/nfts?collections=${collectionsQuery}&from=${from}&size=${pageSize}`;
+
+    let items = null;
+    let pageOk = false;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          timeout: 20000
+        });
+
+        if (response.status === 429 || response.status >= 500) {
+          const retryAfterSec = parseInt(response.headers.get('retry-after') || '0', 10);
+          const fromHeader =
+            retryAfterSec > 0 ? Math.min(retryAfterSec * 1000, MVX_MAX_RETRY_AFTER_MS) : 0;
+          const backoff = Math.max(
+            fromHeader,
+            MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS * (attempt + 1),
+            2000
+          );
+          console.warn(
+            `[NFT-ROLE-SYNC] MvX HTTP ${response.status} nfts page from=${from}, waiting ${backoff}ms (${attempt}/5)`
+          );
+          await sleep(backoff);
+          await waitMvxSlot();
+          continue;
+        }
+
+        if (!response.ok) {
+          console.warn(`[NFT-ROLE-SYNC] MvX nfts HTTP ${response.status} for wallet (from=${from})`);
+          return { counts, walletLegVerified: false };
+        }
+
+        const responseData = await response.json();
+        items = Array.isArray(responseData) ? responseData : responseData.data || [];
+        if (!Array.isArray(items)) {
+          console.warn('[NFT-ROLE-SYNC] MvX nfts unexpected JSON shape');
+          return { counts, walletLegVerified: false };
+        }
+        pageOk = true;
+        break;
+      } catch (err) {
+        console.warn(`[NFT-ROLE-SYNC] MvX nfts fetch error:`, err.message);
+        if (attempt === 5) {
+          return { counts, walletLegVerified: false };
+        }
+        await sleep(1000 * attempt);
+        await waitMvxSlot();
+      }
+    }
+
+    if (!pageOk) {
       return { counts, walletLegVerified: false };
     }
-    counts[c] = count;
+
+    const tickerSet = new Set(tickers);
+    for (const item of items) {
+      const c = item.collection;
+      if (!c || !tickerSet.has(c)) {
+        continue;
+      }
+      const type = item.type || '';
+      let add = 1;
+      if (type === 'SemiFungibleESDT' || type === 'MetaESDT') {
+        const bal = parseInt(String(item.balance ?? item.value ?? 1), 10);
+        add = Number.isFinite(bal) && bal > 0 ? bal : 1;
+      }
+      counts[c] += add;
+    }
+
+    if (items.length < pageSize) {
+      break;
+    }
+    from += pageSize;
   }
+
   return { counts, walletLegVerified: true };
 }
 
@@ -219,6 +246,8 @@ async function runNftRoleSync(client, opts = {}) {
         const grantedLines = [];
         const revokedLines = [];
         const tickers = rule.collectionTickers || [];
+        let revokeDiagSamples = 0;
+        const REVOKE_DIAG_MAX = 8;
 
         for (const userId of candidateIds) {
           try {
@@ -230,12 +259,14 @@ async function runNftRoleSync(client, opts = {}) {
             const walletAddress = walletsMap[userId];
             let walletPass = false;
             let skipRoleChange = false;
+            let wCountsForLog = null;
 
             if (walletAddress && typeof walletAddress === 'string' && walletAddress.startsWith('erd1')) {
               const { counts: wCounts, walletLegVerified } = await fetchWalletCollectionCounts(
                 walletAddress,
                 tickers
               );
+              wCountsForLog = wCounts;
               if (!walletLegVerified) {
                 // Rate limit / API error: do not grant AND do not revoke (would wrongly strip valid holders)
                 skipRoleChange = true;
@@ -274,6 +305,16 @@ async function runNftRoleSync(client, opts = {}) {
               grantedLines.push(`<@${userId}> — role granted`);
               summary.granted += 1;
             } else if (!eligible && hasRole) {
+              if (revokeDiagSamples < REVOKE_DIAG_MAX) {
+                revokeDiagSamples += 1;
+                const wPart =
+                  wCountsForLog != null
+                    ? JSON.stringify(wCountsForLog)
+                    : '(no linked erd1 wallet — wallet leg counts as fail)';
+                console.warn(
+                  `[NFT-ROLE-SYNC] revoke_diag rule=${rule.id} user=${userId} walletPass=${walletPass} vaPass=${vaPass} wCounts=${wPart} vaCounts=${JSON.stringify(vaCounts)}`
+                );
+              }
               await member.roles.remove(role, 'NFT role verification (wallet + VA)');
               revokedLines.push(`<@${userId}> — role removed`);
               summary.revoked += 1;
