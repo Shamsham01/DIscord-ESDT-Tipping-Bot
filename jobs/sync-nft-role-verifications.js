@@ -9,8 +9,10 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/** MultiversX public API: stay under ~2 req/s for this job (other bot code also calls MvX). */
-const MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS = 550;
+/** MultiversX public API: max 1 req/s for this job only (daily sync may take many minutes). */
+const MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS = 1000;
+/** Do not sleep longer than this on 429 Retry-After (header often sends 60s; we still retry). */
+const MVX_MAX_RETRY_AFTER_MS = 30000;
 let nextMvxSlot = 0;
 
 async function waitMvxSlot() {
@@ -46,10 +48,12 @@ async function getMvxCollectionCount(walletAddress, collectionTicker) {
 
       if (response.status === 429 || response.status >= 500) {
         const retryAfterSec = parseInt(response.headers.get('retry-after') || '0', 10);
+        const fromHeader =
+          retryAfterSec > 0 ? Math.min(retryAfterSec * 1000, MVX_MAX_RETRY_AFTER_MS) : 0;
         const backoff = Math.max(
-          retryAfterSec * 1000,
-          MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS * attempt * 2,
-          1000
+          fromHeader,
+          MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS * (attempt + 1),
+          2000
         );
         console.warn(
           `[NFT-ROLE-SYNC] MvX HTTP ${response.status} for ${collectionTicker}, waiting ${backoff}ms (attempt ${attempt}/${maxAttempts})`

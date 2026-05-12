@@ -12,7 +12,7 @@ Admins can define **rules** that tie a Discord **role** to MultiversX **NFT coll
 
 Each rule checks **two** things for every candidate member:
 
-1. **Wallet leg** — The member must have a **registered wallet** (`/set-wallet`). The bot uses the [MultiversX public API](https://api.multiversx.com) to count NFTs in the configured collections on that address. Calls are **throttled** (~2/sec) with **retries** on rate limits. If the API still cannot be read for that member in this run, their role is **not changed** (no grant and **no revoke** on ambiguity).
+1. **Wallet leg** — The member must have a **registered wallet** (`/set-wallet`). The bot uses the [MultiversX public API](https://api.multiversx.com) to count NFTs in the configured collections on that address. Calls are **paced at most one per second** for this feature only (daily sync can take many minutes), with **retries** on rate limits. If the API still cannot be read for that member in this run, their role is **not changed** (no grant and **no revoke** on ambiguity).
 2. **Virtual Account (VA) leg** — The member must hold enough of the same collections in their **NFT Virtual Account**, counting **staked** NFTs. Balance that is **fully locked** in an active **marketplace listing** or **auction** does **not** count toward the VA leg.
 
 The member gets the role only when **both** legs satisfy the same **match mode** and **minimum count** (see below).
