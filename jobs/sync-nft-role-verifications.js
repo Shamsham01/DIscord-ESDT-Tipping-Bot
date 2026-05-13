@@ -4,6 +4,7 @@ const dbServerData = require('../db/server-data');
 const dbNftRoleRules = require('../db/nft-role-verification');
 const dbVirtualAccountsNft = require('../db/virtual-accounts-nft');
 const { evaluateRuleAgainstCounts } = require('../utils/nft-role-rule-evaluator');
+const { formatNftRuleMemberDiag } = require('../utils/nft-role-verification-diagnostics');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -135,11 +136,11 @@ function chunkLines(lines, maxPerChunk = 12) {
   return chunks.length ? chunks : [[]];
 }
 
-async function sendChunksToChannel(channel, title, lines) {
+async function sendChunksToChannel(channel, title, lines, maxPerChunk = 12) {
   if (!channel || lines.length === 0) {
     return;
   }
-  const chunks = chunkLines(lines, 12);
+  const chunks = chunkLines(lines, maxPerChunk);
   for (let i = 0; i < chunks.length; i++) {
     const embed = new EmbedBuilder()
       .setTitle(title + (chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : ''))
@@ -187,8 +188,16 @@ async function runNftRoleSync(client, opts = {}) {
     granted: 0,
     revoked: 0,
     errors: 0,
-    walletCheckSkipped: 0
+    walletCheckSkipped: 0,
+    /** @type {string[]} Sample diagnostic blocks for /run-now ephemeral embed */
+    grantDiagBlocks: [],
+    /** @type {string[]} Sample diagnostic blocks for /run-now ephemeral embed */
+    revokeDiagBlocks: []
   };
+
+  const MAX_RUN_NOW_SAMPLES = 8;
+  /** Each notification entry is multi-line — keep chunks small */
+  const EMBED_CHUNKSIZE = 4;
 
   try {
     let rules = await dbNftRoleRules.listEnabledRulesGlobally();
@@ -302,7 +311,23 @@ async function runNftRoleSync(client, opts = {}) {
 
             if (eligible && !hasRole) {
               await member.roles.add(role, 'NFT role verification (wallet + VA)');
-              grantedLines.push(`<@${userId}> — role granted`);
+              const grantBlock = formatNftRuleMemberDiag({
+                granted: true,
+                userId,
+                walletAddress,
+                walletPass: true,
+                vaPass: true,
+                walletLegVerified: true,
+                wCounts: wCountsForLog || {},
+                vaCounts,
+                collectionTickers: tickers,
+                matchMode: rule.matchMode,
+                minCountPerCollection: rule.minCountPerCollection
+              });
+              grantedLines.push(grantBlock);
+              if (summary.grantDiagBlocks.length < MAX_RUN_NOW_SAMPLES) {
+                summary.grantDiagBlocks.push(grantBlock);
+              }
               summary.granted += 1;
             } else if (!eligible && hasRole) {
               if (revokeDiagSamples < REVOKE_DIAG_MAX) {
@@ -316,7 +341,23 @@ async function runNftRoleSync(client, opts = {}) {
                 );
               }
               await member.roles.remove(role, 'NFT role verification (wallet + VA)');
-              revokedLines.push(`<@${userId}> — role removed`);
+              const revokeBlock = formatNftRuleMemberDiag({
+                granted: false,
+                userId,
+                walletAddress,
+                walletPass,
+                vaPass,
+                walletLegVerified: true,
+                wCounts: wCountsForLog || {},
+                vaCounts,
+                collectionTickers: tickers,
+                matchMode: rule.matchMode,
+                minCountPerCollection: rule.minCountPerCollection
+              });
+              revokedLines.push(revokeBlock);
+              if (summary.revokeDiagBlocks.length < MAX_RUN_NOW_SAMPLES) {
+                summary.revokeDiagBlocks.push(revokeBlock);
+              }
               summary.revoked += 1;
             }
           } catch (e) {
@@ -332,14 +373,16 @@ async function runNftRoleSync(client, opts = {}) {
             await sendChunksToChannel(
               notifyChannel,
               `NFT role sync — granted (${shortId}…)`,
-              grantedLines
+              grantedLines,
+              EMBED_CHUNKSIZE
             );
           }
           if (revokedLines.length) {
             await sendChunksToChannel(
               notifyChannel,
               `NFT role sync — removed (${shortId}…)`,
-              revokedLines
+              revokedLines,
+              EMBED_CHUNKSIZE
             );
           }
         }

@@ -190,13 +190,55 @@ async function handleNftRoleVerificationCommand(interaction, client) {
       await interaction.editReply({ content: 'Sync already running; try again shortly.' });
       return;
     }
-    await interaction.editReply({
-      content: `Sync finished. Rules: ${summary.rules}, granted: ${summary.granted}, removed: ${summary.revoked}, errors: ${summary.errors}` +
-        (summary.walletCheckSkipped
-          ? `, wallet checks skipped (API/rate limit): ${summary.walletCheckSkipped}`
-          : '') +
-        '.'
-    });
+
+    let desc =
+      `**Rules scanned:** ${summary.rules}\n` +
+      `**Granted:** ${summary.granted} · **Removed:** ${summary.revoked} · **Errors:** ${summary.errors}`;
+    if (summary.walletCheckSkipped > 0) {
+      desc += `\n**Wallet API unresolved** (members left unchanged): ${summary.walletCheckSkipped}`;
+    }
+
+    const revokeDiag = summary.revokeDiagBlocks || [];
+    const grantDiag = summary.grantDiagBlocks || [];
+
+    const diagSections = [];
+
+    if (revokeDiag.length > 0) {
+      const lines = [`**Removal diagnostics** (_Wallet_ = MultiversX API · _VA_ = Supabase)`];
+      if (summary.revoked > revokeDiag.length) {
+        lines.push(`_Showing ${revokeDiag.length} of ${summary.revoked} removals — see the notification channel for the rest._`);
+      }
+      lines.push(revokeDiag.join('\n---\n'));
+      diagSections.push(lines.join('\n'));
+    } else if (summary.revoked > 0) {
+      diagSections.push(`**Removals:** ${summary.revoked} — see the rule’s notification channel for per-member diagnostics.`);
+    }
+
+    if (grantDiag.length > 0) {
+      const lines = ['**Grant diagnostics**'];
+      if (summary.granted > grantDiag.length) {
+        lines.push(`_Showing ${grantDiag.length} of ${summary.granted} grants — remainder in notification channel._`);
+      }
+      lines.push(grantDiag.join('\n---\n'));
+      diagSections.push(lines.join('\n'));
+    }
+
+    if (diagSections.length > 0) {
+      desc += '\n\n' + diagSections.join('\n\n━━━━━━━━\n\n');
+    }
+
+    const maxDesc = 4000;
+    if (desc.length > maxDesc) {
+      desc = desc.slice(0, maxDesc - 60).trimEnd() + '\n… _(truncated for Discord)_';
+    }
+
+    const summaryEmbed = new EmbedBuilder()
+      .setTitle('NFT role verification — sync finished')
+      .setDescription(desc || '_No changes._')
+      .setColor((summary.revoked || 0) > 0 ? 0xe67e22 : 0x57f287)
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [summaryEmbed] });
     return;
   }
 }
