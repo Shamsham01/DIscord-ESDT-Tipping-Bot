@@ -26837,7 +26837,9 @@ async function handleHelpCommand(interaction, page = 1) {
             '`/unsubscribe-activity` 🔴 Admin - Unsubscribe from activity feeds'
           ],
           '🪪 NFT role verification': [
-            '`/nft-role-verification` 🔴 Admin - NFT rules for roles: `create` (creates rule or patches eligibility via rule-id), `list`, `delete`, `toggle`, `run-now`'
+            '`/nft-role-verification create` 🔴 Admin — new rule (**role**, **notification-channel**, **collections**); default **eligibility** `wallet_or_va` (MvX wallet **or** VA). Set **rule-id** + **eligibility** to patch an existing rule (omit other fields).',
+            '`/nft-role-verification list` 🔴 • `delete` 🔴 • `toggle` 🔴 • `run-now` 🔴 — list UUIDs/toggle/disable rules or sync now.',
+            'Bot needs **Manage Roles** OAuth/permission; bot role **above** roles it assigns. Daily sync applies grants/removals.'
           ],
           '🔧 Utilities & Debug': [
             '`/update-token-metadata` 🔴 Admin - Update token info',
