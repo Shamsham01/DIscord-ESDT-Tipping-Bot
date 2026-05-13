@@ -36,12 +36,37 @@ async function handleNftRoleVerificationCommand(interaction, client) {
 
   if (sub === 'create') {
     await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-    const role = interaction.options.getRole('role', true);
-    const channel = interaction.options.getChannel('notification-channel', true);
-    const collectionsRaw = interaction.options.getString('collections', true);
+    const eligibilityChoice = interaction.options.getString('eligibility') || 'wallet_or_va';
+    const patchRuleId = (interaction.options.getString('rule-id') || '').trim();
+
+    if (patchRuleId) {
+      const existingPatch = await dbNftRoleRules.getRuleById(guildId, patchRuleId);
+      if (!existingPatch) {
+        await interaction.editReply({ content: 'Rule not found for this server (check **rule-id**).' });
+        return;
+      }
+      const updatedPatch = await dbNftRoleRules.setRuleEligibilityMode(guildId, patchRuleId, eligibilityChoice);
+      await interaction.editReply({
+        content: `Updated rule \`${patchRuleId}\`: eligibility → **${describeEligibilityMode(
+          updatedPatch.eligibilityMode
+        ).replace(/\*\*/g, '')}**. Run **/nft-role-verification run-now** to sync.`
+      });
+      return;
+    }
+
+    const role = interaction.options.getRole('role');
+    const channel = interaction.options.getChannel('notification-channel');
+    const collectionsRaw = interaction.options.getString('collections');
+    if (!role || !channel || collectionsRaw == null || String(collectionsRaw).trim() === '') {
+      await interaction.editReply({
+        content:
+          'To **create** a rule, provide **role**, **notification-channel**, and **collections**. To **only change eligibility** on an existing rule, set **rule-id** and choose **eligibility** (other fields omitted).'
+      });
+      return;
+    }
+
     const matchMode = interaction.options.getString('match-mode') || 'any';
     const minCount = interaction.options.getInteger('min-count') || 1;
-    const eligibilityChoice = interaction.options.getString('eligibility') || 'wallet_and_va';
 
     if (role.managed || role.id === interaction.guildId) {
       await interaction.editReply({ content: 'Pick a normal role (not @everyone or bot-managed roles).' });
@@ -190,21 +215,6 @@ async function handleNftRoleVerificationCommand(interaction, client) {
     return;
   }
 
-  if (sub === 'set-eligibility') {
-    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-    const ruleId = interaction.options.getString('rule-id', true);
-    const modeRaw = interaction.options.getString('mode', true);
-    const existing = await dbNftRoleRules.getRuleById(guildId, ruleId);
-    if (!existing) {
-      await interaction.editReply({ content: 'Rule not found for this server.' });
-      return;
-    }
-    const updated = await dbNftRoleRules.setRuleEligibilityMode(guildId, ruleId, modeRaw);
-    await interaction.editReply({
-      content: `Rule \`${ruleId}\` eligibility is now **${describeEligibilityMode(updated.eligibilityMode).replace(/\*\*/g, '')}**. Run \`/nft-role-verification run-now\`.`
-    });
-    return;
-  }
 
   if (sub === 'run-now') {
     await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });

@@ -18,7 +18,7 @@ Below is a list of all available commands for the ESDT Tipping Bot, grouped by c
 
 ## 🪪 NFT role verification (Admins)
 
-- **/nft-role-verification create** — Create a rule: Discord role + notification channel + comma-separated collection tickers; optional match mode (`any` / `all`) and min count. Posts a confirmation embed in the channel.
+- **/nft-role-verification create** — Create rule (role + notification channel + collections; optional eligibility, default **wallet_or_va**) **or** update eligibility only with optional **rule-id** + eligibility. Confirmation embed posts on new rules only.
 - **/nft-role-verification list** — List rules (UUIDs) and toggle enabled/disabled via select menu (up to 25 rules).
 - **/nft-role-verification delete** — Delete a rule by UUID (`rule-id`); **autocomplete** lists rules as `RoleName · first8…last8`.
 - **/nft-role-verification toggle** — Enable or disable a rule by UUID; same **autocomplete** as delete.

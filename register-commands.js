@@ -1679,17 +1679,26 @@ const commands = [
             {
                 type: ApplicationCommandOptionType.Subcommand,
                 name: 'create',
-                description: 'Create rule: role, notification channel, collections',
+                description: 'Create a new NFT role rule OR update eligibility on an existing rule (rule-id)',
                 options: [
                     {
+                        name: 'rule-id',
+                        description:
+                            'Optional — set to update eligibility only (no new rule). Omit to create new (requires role/channel/collections).',
+                        type: ApplicationCommandOptionType.String,
+                        required: false,
+                        autocomplete: true
+                    },
+                    {
                         name: 'role',
-                        description: 'Discord role to grant when NFT eligibility rules qualify',
+                        description: 'Required when creating a new rule — Discord role to grant when eligible',
                         type: ApplicationCommandOptionType.Role,
-                        required: true
+                        required: false
                     },
                     {
                         name: 'notification-channel',
-                        description: 'Channel for setup confirmation and sync grant/remove notices',
+                        description:
+                            'Required when creating — channel for setup confirmation + sync notices (omit when only rule-id is set)',
                         type: ApplicationCommandOptionType.Channel,
                         channel_types: [
                             ChannelType.GuildText,
@@ -1697,13 +1706,14 @@ const commands = [
                             ChannelType.PublicThread,
                             ChannelType.PrivateThread
                         ],
-                        required: true
+                        required: false
                     },
                     {
                         name: 'collections',
-                        description: 'Comma-separated MultiversX collection tickers',
+                        description:
+                            'Required when creating — comma-separated MultiversX collection tickers (omit when updating via rule-id only)',
                         type: ApplicationCommandOptionType.String,
-                        required: true
+                        required: false
                     },
                     {
                         name: 'match-mode',
@@ -1724,7 +1734,7 @@ const commands = [
                     },
                     {
                         name: 'eligibility',
-                        description: 'What must pass: both wallet AND VA (default), or either, or wallet-only…',
+                        description: 'Wallet vs VA (default: wallet OR Virtual Account). Used on create + when updating rule-id.',
                         type: ApplicationCommandOptionType.String,
                         required: false,
                         choices: [
@@ -1775,38 +1785,6 @@ const commands = [
                         type: ApplicationCommandOptionType.String,
                         required: true,
                         autocomplete: true
-                    }
-                ]
-            },
-            {
-                type: ApplicationCommandOptionType.Subcommand,
-                name: 'set-eligibility',
-                description: 'Change how MvX wallet vs Virtual Account combine for an existing rule',
-                options: [
-                    {
-                        name: 'rule-id',
-                        description: 'Pick a rule (autocomplete) or paste full UUID',
-                        type: ApplicationCommandOptionType.String,
-                        required: true,
-                        autocomplete: true
-                    },
-                    {
-                        name: 'mode',
-                        description: 'Qualification logic for this rule',
-                        type: ApplicationCommandOptionType.String,
-                        required: true,
-                        choices: [
-                            {
-                                name: 'Both linked wallet AND Virtual Account must qualify',
-                                value: 'wallet_and_va'
-                            },
-                            {
-                                name: 'Linked wallet OR Virtual Account qualifies (recommended)',
-                                value: 'wallet_or_va'
-                            },
-                            { name: 'Linked wallet only (ignore VA entirely)', value: 'wallet_only' },
-                            { name: 'Virtual Account only', value: 'va_only' }
-                        ]
                     }
                 ]
             },

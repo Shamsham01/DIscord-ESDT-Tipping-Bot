@@ -13,14 +13,14 @@ Each rule has an **`eligibility_mode`** (`wallet_and_va`, `wallet_or_va`, `walle
 
 | Mode | Meaning |
 | --- | --- |
-| **`wallet_and_va`** *(default)* | MvX-linked wallet **and** Virtual Account must satisfy the collection rule. |
-| **`wallet_or_va`** *(common for hodlers)* | Satisfy **either** the MvX wallet leg **or** the VA leg. If VA already qualifies, the bot **skips MvX paging** for that member (fewer API calls). |
+| **`wallet_and_va`** | MvX-linked wallet **and** Virtual Account must satisfy the collection rule. |
+| **`wallet_or_va`** *(default on **slash create**, recommended)* | Satisfy **either** the MvX wallet leg **or** the VA leg. If VA already qualifies, the bot **skips MvX paging** for that member (fewer API calls). |
 | **`wallet_only`** | Only the linked wallet (MvX) counts; VA is ignored. |
 | **`va_only`** | Only VA (Supabase) counts; MvX is not queried. |
 
 **Match mode (`any` / `all`)** and **minimum count per collection** apply **per leg that runs** — e.g. with `wallet_or_va`, the member passes if **either** leg meets the thresholds.
 
-Legacy rules without the column behave as **`wallet_and_va`** when the migration default is applied.
+Legacy rows keep DB default **`wallet_and_va`** unless you patch them via **`create`** → **`rule-id`** (below).
 
 ## Wallet vs Virtual Account legs
 
@@ -51,16 +51,21 @@ All subcommands are under **`/nft-role-verification`**.
 
 ### `create`
 
-Creates a rule and sends the setup confirmation to the notification channel.
+**New rule** — Provide **`role`**, **`notification-channel`**, **`collections`**, optional **`match-mode`**, **`min-count`**, and **`eligibility`**. Slash default for **`eligibility`** is **`wallet_or_va`** (both strict still available via explicit choice).
+
+**Update eligibility only** — Set **`rule-id`** (autocomplete); set **`eligibility`** to the new mode and **omit** role, notification channel, and collections. Saves one subcommand versus recreating rules.
+
+Confirmation embed posts to the channel only on **new** rule creation.
 
 **Parameters**
 
-- `role` — Discord role to grant when eligible.
-- `notification-channel` — Text, announcement, or thread channel for setup + sync messages. The bot needs **View Channel**, **Send Messages**, and **Embed Links** there.
-- `collections` — Comma-separated MultiversX **collection tickers** (same identifiers as VA and API).
-- `match-mode` (optional) — `any` (default) or `all`.
-- `min-count` (optional) — Minimum NFT count per collection (integer ≥ 1, default `1`).
-- `eligibility` (optional) — `wallet_and_va` (default), `wallet_or_va`, `wallet_only`, or `va_only`.
+- `rule-id` (optional) — If set: **updates eligibility** for this rule UUID (use **autocomplete**). Other create fields omitted.
+- `role` — Required **unless** patching via `rule-id` only.
+- `notification-channel` — Required **unless** patching via `rule-id` only.
+- `collections` — Required **unless** patching via `rule-id` only.
+- `match-mode` (optional) — `any` (default) or `all` (creates only).
+- `min-count` (optional) — Minimum NFT count per collection (integer ≥ 1, default `1`, creates only).
+- `eligibility` (optional, default **`wallet_or_va`** on create / patch path) — `wallet_and_va`, `wallet_or_va`, `wallet_only`, or `va_only`.
 
 ### `list`
 
@@ -82,16 +87,8 @@ Enables or disables a rule by UUID (same as using the list menu toggle).
 
 - `rule-id` — Full rule id (use **autocomplete**, or paste from `list`).
 
-### `set-eligibility`
 
-Updates **how MvX wallet vs VA combine** for an existing rule (no need to recreate the rule).
 
-**Parameters**
-
-- `rule-id` — Full rule id (autocomplete).
-- `mode` — `wallet_and_va`, `wallet_or_va`, `wallet_only`, or `va_only`.
-
-### `run-now`
 
 Runs the verification sync **immediately** for the **current server** only (useful after changing rules or for testing). Replies with a short summary (rules processed, grants, revokes, errors).
 
@@ -106,4 +103,4 @@ Runs the verification sync **immediately** for the **current server** only (usef
 - For **on-wallet-only** holders without VA inventory mirrored in Supabase, use **`wallet_or_va`** or **`wallet_only`**.
 - **`wallet_and_va`** is strict; if VA is wrong or stale, deserving members will not be granted roles.
 - MvX-linked **wallet counts** still require **`/set-wallet`** for that Discord user unless the rule is **`va_only`**.
-- Run **`run-now`** after changing **`eligibility_mode`** via **`set-eligibility`** so grants catch up faster than the daily job.
+- Run **`run-now`** after changing **`eligibility_mode`** (**`create`** with **`rule-id`**) so grants catch up faster than the daily job.

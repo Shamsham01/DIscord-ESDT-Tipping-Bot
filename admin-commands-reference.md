@@ -443,20 +443,24 @@ Useful for remembering which competition code was used for football betting.
 
 ## NFT role verification
 
-Automatically grant or remove a Discord role when members satisfy **both** linked-wallet NFT counts (MultiversX API) **and** Virtual Account holdings for the same collections (staked counts included; active listing/auction locks excluded). A **daily** job runs server-wide; use **`run-now`** for an immediate pass in the current server.
+Rules tie a **role** to MultiversX **NFT collections** with configurable **eligibility modes** (`wallet_or_va`, `wallet_and_va`, etc.). Sync runs daily and supports **`run-now`**.
 
 ### `/nft-role-verification create`
 
-**Usage**: `/nft-role-verification create role notification-channel collections [match-mode] [min-count]`
+**New rule**: `/nft-role-verification create role notification-channel collections [match-mode] [min-count] [eligibility]`
+
+**Patch eligibility only**: `/nft-role-verification create rule-id:<uuid> [eligibility]` (omit role, channel, collections)
 
 **Parameters**:
-- `role` (Required): Discord role to grant when eligible
-- `notification-channel` (Required): Channel for setup confirmation and sync grant/remove notices
-- `collections` (Required): Comma-separated collection tickers
+- `rule-id` (Optional): UUID — autocomplete. If **set**, updates **only** `eligibility_mode` on that rule (`eligibility` defaults to **`wallet_or_va`** unless you pick otherwise).
+- `role` — Required **when creating** — Discord role to grant when eligible
+- `notification-channel` — Required **when creating** — channel for setup confirmation and sync notices
+- `collections` — Required **when creating** — comma-separated collection tickers
 - `match-mode` (Optional): `any` (default) or `all`
 - `min-count` (Optional): Minimum count per collection (default `1`)
+- `eligibility` (Optional): Slash default **`wallet_or_va`**; alternatives `wallet_and_va`, `wallet_only`, `va_only`
 
-After insert, the bot posts a confirmation embed in the notification channel.
+After inserting a **new** rule, the bot posts a confirmation embed in the notification channel.
 
 ### `/nft-role-verification list`
 
