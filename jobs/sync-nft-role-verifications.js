@@ -10,8 +10,8 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/** MultiversX public API: max 1 req/s for this job only (daily sync may take many minutes). */
-const MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS = 1000;
+/** MultiversX public API: pace NFT wallet checks (~1 req / 1.5s) — too many MvX hits also starves other bot features sharing the quota. */
+const MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS = 1500;
 /** Do not sleep longer than this on 429 Retry-After (header often sends 60s; we still retry). */
 const MVX_MAX_RETRY_AFTER_MS = 30000;
 let nextMvxSlot = 0;
