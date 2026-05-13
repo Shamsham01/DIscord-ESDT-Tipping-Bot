@@ -443,6 +443,8 @@ Useful for remembering which competition code was used for football betting.
 
 ## NFT role verification
 
+**Before using these commands:** grant the bot **Manage Roles** (default OAuth invite in **[Getting started → Invite the bot](getting-started/README.md)**) and ensure the bot’s role sits **above** any role it assigns.
+
 Rules tie a **role** to MultiversX **NFT collections** with configurable **eligibility modes** (`wallet_or_va`, `wallet_and_va`, etc.). Sync runs daily and supports **`run-now`**.
 
 ### `/nft-role-verification create`

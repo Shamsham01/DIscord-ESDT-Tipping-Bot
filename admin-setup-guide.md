@@ -29,6 +29,7 @@ Before you start, ensure the bot has the following permissions in the channels w
 3. **Embed Links** - Bot needs to create rich embeds for games and activities
 4. **Create Public Threads** - Required for games and activities (bot creates threads)
 5. **Send Messages in Threads** - Bot needs to post in threads
+6. **Manage Roles** - Required only if admins use **`/nft-role-verification`** (NFT holder roles); the bot’s highest role must be **above** the Discord role(s) it assigns
 
 ### How to Set Permissions
 
@@ -44,6 +45,7 @@ Before you start, ensure the bot has the following permissions in the channels w
    * ✅ Read Message History
    * ✅ Create Public Threads
    * ✅ Send Messages in Threads
+   * ✅ Manage Roles (for **NFT role verification**, if enabled)
 
 #### Option 2: Channel-Specific Permissions
 
@@ -66,9 +68,9 @@ If the bot responds with an embed, permissions are correctly set.
 
 ## NFT holder roles (optional)
 
-To automatically grant a Discord role when members hold specific MultiversX NFTs **both** on their **linked wallet** and in their **Virtual Account**, use **`/nft-role-verification`**. The bot needs **Manage Roles** and its role must be **above** the role it assigns.
+Admins tie a Discord role to MultiversX **NFT collection tickers** with **`/nft-role-verification`**. Each rule chooses **how** linked-wallet (MvX) counts and **Virtual Account** inventory combine—for example **`wallet_or_va`** (default on **`create`**) vs strict **`wallet_and_va`**. Confirm the bot has **`Manage Roles`** OAuth / channel permissions and ranks **above** the role being managed.
 
-Full setup, match modes, and subcommands: **[NFT Role Verification](nft-role-verification.md)**.
+See **[NFT Role Verification](nft-role-verification.md)** for eligibility modes, Supabase migration, and **`rule-id`**-only **`create`** for quick eligibility tweaks.
 
 ***
 

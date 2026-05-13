@@ -22,9 +22,9 @@ Below is a list of all available commands for the ESDT Tipping Bot, grouped by c
 - **/nft-role-verification list** — List rules (UUIDs) and toggle enabled/disabled via select menu (up to 25 rules).
 - **/nft-role-verification delete** — Delete a rule by UUID (`rule-id`); **autocomplete** lists rules as `RoleName · first8…last8`.
 - **/nft-role-verification toggle** — Enable or disable a rule by UUID; same **autocomplete** as delete.
-- **/nft-role-verification run-now** — Run wallet + VA verification sync for this server immediately.
+- **/nft-role-verification run-now** — Run eligibility sync immediately (MvX + VA diagnostics when applicable).
 
-Members need **both** a linked wallet (`/set-wallet`) and qualifying **Virtual Account** NFT inventory (listed/auctioned VA balance excluded; staked counts included). The bot assigns or removes the role on a **daily** schedule as well.
+Each rule configures how **linked-wallet** MvX holdings and **Virtual Account** NFT inventory combine (default **`wallet_or_va`** on **`create`**). See **[NFT Role Verification](nft-role-verification.md)**. A **daily** job applies grants/removals as well.
 
 ---
 

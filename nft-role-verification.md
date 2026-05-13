@@ -87,14 +87,13 @@ Enables or disables a rule by UUID (same as using the list menu toggle).
 
 - `rule-id` — Full rule id (use **autocomplete**, or paste from `list`).
 
-
-
+### `run-now`
 
 Runs the verification sync **immediately** for the **current server** only (useful after changing rules or for testing). Replies with a short summary (rules processed, grants, revokes, errors).
 
 ## Bot and Supabase requirements
 
-- The bot must be able **Manage Roles** and its **highest role** must be **above** the role it assigns.
+- The bot needs the **Manage Roles** permission (invite default in **[Getting started → Invite the bot](../getting-started/README.md)**) and its **highest role** must be **above** the role it assigns.
 - Do **not** use integration-managed roles.
 - The `guild_nft_role_rules` table includes **`eligibility_mode`** (`TEXT`, default **`wallet_and_va`**). Apply the repo migration **`20260514_guild_nft_role_rules_eligibility_mode.sql`** (or mirror it in hosted Supabase).
 

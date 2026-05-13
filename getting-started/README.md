@@ -3,7 +3,7 @@
 ### 0. Invite the Bot & Set Channel Permissions
 
 * **Invite the bot to your server:**
-  * [Invite Link](https://discord.com/oauth2/authorize?client_id=1391865587185225868\&permissions=1126314371573824\&integration_type=0\&scope=bot+applications.commands)
+  * [Invite Link](https://discord.com/oauth2/authorize?client_id=1391865587185225868\&permissions=1126314640009280\&integration_type=0\&scope=bot+applications.commands) *(permissions include **Manage Roles** for optional NFT-holder role rules.)*
 * **Set up channel permissions:**
   1. Go to your desired channel's settings > **Permissions** > **Advanced Permissions**.
   2. Under **Roles/Members**, add the bot (e.g., `ESDT Tipping Bot`).
@@ -13,9 +13,11 @@
      * ✅ Embed Links
      * ✅ Create Public Threads
      * ✅ Send Messages in Threads
+     * ✅ Manage Roles _(required only if admins use **`/nft-role-verification`**; the bot’s role must rank **above** any role it grants)_
   4. Ensure that users/roles who should interact with the bot can use **slash commands** in that channel.
 
-> ⚠️ **These permissions are required for the bot to function properly!**
+> ⚠️ **These permissions are required for the bot to function properly!**  
+> Invite links should include **`Manage Roles`** in OAuth scopes when admins rely on NFT role verification—the default invite in this guide adds it.
 >
 > **Note:** The "Create Public Threads" permission is essential for football betting, auctions, listings and lotteries features, as the bot creates threads for most activities.
 

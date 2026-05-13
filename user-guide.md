@@ -35,7 +35,7 @@ Use the `/set-wallet` command:
 * Must start with `erd1`
 * Must be exactly 62 characters
 
-If your server uses **NFT holder roles** (admins configure this with `/nft-role-verification`), your registered wallet is used together with your **Virtual Account** NFT balance to decide role access—see the [NFT Role Verification](nft-role-verification.md) page in the docs.
+If your server uses **NFT holder roles** (admins configure this with **`/nft-role-verification`**), eligibility can depend on linked-wallet MvX holdings, Virtual Account NFT inventory, or a combination (**`wallet_or_va`** is the **`create`** default)—see **[NFT Role Verification](nft-role-verification.md)**.
 
 ### Step 3: Confirmation
 
