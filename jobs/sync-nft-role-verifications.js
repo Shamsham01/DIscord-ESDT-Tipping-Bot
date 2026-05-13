@@ -4,16 +4,19 @@ const dbServerData = require('../db/server-data');
 const dbNftRoleRules = require('../db/nft-role-verification');
 const dbVirtualAccountsNft = require('../db/virtual-accounts-nft');
 const { evaluateRuleAgainstCounts } = require('../utils/nft-role-rule-evaluator');
-const { formatNftRuleMemberDiag } = require('../utils/nft-role-verification-diagnostics');
+const { formatNftRuleMemberDiag, discordIdentityFromMember } = require('../utils/nft-role-verification-diagnostics');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/** MultiversX public API: pace NFT wallet checks (~1 req / 1.5s) — too many MvX hits also starves other bot features sharing the quota. */
-const MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS = 1500;
-/** Do not sleep longer than this on 429 Retry-After (header often sends 60s; we still retry). */
-const MVX_MAX_RETRY_AFTER_MS = 30000;
+/** MvX NFT wallet paging: spacing between outbound requests so public API quota is not blown (other bot jobs share the host). */
+const MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS = 3000;
+/** HTTP timeout per MvX NFT page fetch. */
+const MVX_FETCH_TIMEOUT_MS = 30000;
+/** Obey Retry-After up to this cap before falling back to exponential waits. */
+const MVX_MAX_RETRY_AFTER_MS = 60000;
+const MVX_FETCH_MAX_ATTEMPTS = 8;
 let nextMvxSlot = 0;
 
 async function waitMvxSlot() {
@@ -34,14 +37,17 @@ async function waitMvxSlot() {
 async function fetchWalletCollectionCounts(walletAddress, collectionTickers) {
   const tickers = [...new Set((collectionTickers || []).filter(Boolean))];
   const counts = {};
+  const canonicalLower = new Map();
   tickers.forEach(t => {
-    counts[t] = 0;
+    const s = String(t);
+    canonicalLower.set(s.toLowerCase(), s);
+    counts[s] = 0;
   });
   if (tickers.length === 0) {
     return { counts, walletLegVerified: true };
   }
 
-  const collectionsQuery = tickers.map(t => encodeURIComponent(t)).join(',');
+  const collectionsQuery = [...canonicalLower.values()].map(t => encodeURIComponent(t)).join(',');
   const pageSize = 100;
   const maxPages = 100;
   let from = 0;
@@ -52,25 +58,25 @@ async function fetchWalletCollectionCounts(walletAddress, collectionTickers) {
 
     let items = null;
     let pageOk = false;
-    for (let attempt = 1; attempt <= 5; attempt++) {
+    for (let attempt = 1; attempt <= MVX_FETCH_MAX_ATTEMPTS; attempt++) {
       try {
         const response = await fetch(url, {
           method: 'GET',
           headers: { Accept: 'application/json' },
-          timeout: 20000
+          timeout: MVX_FETCH_TIMEOUT_MS
         });
 
         if (response.status === 429 || response.status >= 500) {
           const retryAfterSec = parseInt(response.headers.get('retry-after') || '0', 10);
           const fromHeader =
             retryAfterSec > 0 ? Math.min(retryAfterSec * 1000, MVX_MAX_RETRY_AFTER_MS) : 0;
-          const backoff = Math.max(
-            fromHeader,
-            MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS * (attempt + 1),
-            2000
+          const exp = Math.floor(2200 * Math.pow(2, Math.min(attempt - 1, 5)));
+          const backoff = Math.min(
+            MVX_MAX_RETRY_AFTER_MS + 12000,
+            Math.max(fromHeader + 900, attempt * MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS + exp)
           );
           console.warn(
-            `[NFT-ROLE-SYNC] MvX HTTP ${response.status} nfts page from=${from}, waiting ${backoff}ms (${attempt}/5)`
+            `[NFT-ROLE-SYNC] MvX HTTP ${response.status} nfts page from=${from}, waiting ${backoff}ms (${attempt}/${MVX_FETCH_MAX_ATTEMPTS})`
           );
           await sleep(backoff);
           await waitMvxSlot();
@@ -92,10 +98,14 @@ async function fetchWalletCollectionCounts(walletAddress, collectionTickers) {
         break;
       } catch (err) {
         console.warn(`[NFT-ROLE-SYNC] MvX nfts fetch error:`, err.message);
-        if (attempt === 5) {
+        if (attempt === MVX_FETCH_MAX_ATTEMPTS) {
           return { counts, walletLegVerified: false };
         }
-        await sleep(1000 * attempt);
+        const netBackoff = Math.min(
+          MVX_MAX_RETRY_AFTER_MS,
+          3500 + Math.floor(MVX_ACCOUNT_COLLECTION_MIN_INTERVAL_MS * Math.pow(1.8, attempt))
+        );
+        await sleep(netBackoff);
         await waitMvxSlot();
       }
     }
@@ -104,10 +114,10 @@ async function fetchWalletCollectionCounts(walletAddress, collectionTickers) {
       return { counts, walletLegVerified: false };
     }
 
-    const tickerSet = new Set(tickers);
     for (const item of items) {
-      const c = item.collection;
-      if (!c || !tickerSet.has(c)) {
+      const lk = item.collection ? String(item.collection).toLowerCase() : '';
+      const canon = lk ? canonicalLower.get(lk) : '';
+      if (!canon) {
         continue;
       }
       const type = item.type || '';
@@ -116,7 +126,7 @@ async function fetchWalletCollectionCounts(walletAddress, collectionTickers) {
         const bal = parseInt(String(item.balance ?? item.value ?? 1), 10);
         add = Number.isFinite(bal) && bal > 0 ? bal : 1;
       }
-      counts[c] += add;
+      counts[canon] += add;
     }
 
     if (items.length < pageSize) {
@@ -197,7 +207,7 @@ async function runNftRoleSync(client, opts = {}) {
 
   const MAX_RUN_NOW_SAMPLES = 8;
   /** Each notification entry is multi-line — keep chunks small */
-  const EMBED_CHUNKSIZE = 4;
+  const EMBED_CHUNKSIZE = 3;
 
   try {
     let rules = await dbNftRoleRules.listEnabledRulesGlobally();
@@ -264,7 +274,14 @@ async function runNftRoleSync(client, opts = {}) {
             if (!member || member.user.bot) {
               continue;
             }
+            if (member.guild?.id !== gid) {
+              console.warn(
+                `[NFT-ROLE-SYNC] skipping user=${userId}: resolved guild=${member.guild?.id ?? '?'}, expected=${gid}`
+              );
+              continue;
+            }
 
+            const discordIdentity = discordIdentityFromMember(member);
             const walletAddress = walletsMap[userId];
             let walletPass = false;
             let skipRoleChange = false;
@@ -314,6 +331,8 @@ async function runNftRoleSync(client, opts = {}) {
               const grantBlock = formatNftRuleMemberDiag({
                 granted: true,
                 userId,
+                guildSnowflakeId: gid,
+                discordIdentity,
                 walletAddress,
                 walletPass: true,
                 vaPass: true,
@@ -344,6 +363,8 @@ async function runNftRoleSync(client, opts = {}) {
               const revokeBlock = formatNftRuleMemberDiag({
                 granted: false,
                 userId,
+                guildSnowflakeId: gid,
+                discordIdentity,
                 walletAddress,
                 walletPass,
                 vaPass,

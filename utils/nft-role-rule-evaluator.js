@@ -6,6 +6,22 @@
  * @param {number} minCountPerCollection
  * @returns {boolean}
  */
+function countAtTickerIc(countsByCollection, ticker) {
+  const req = String(ticker);
+  const by = countsByCollection || {};
+  if (Object.prototype.hasOwnProperty.call(by, req)) {
+    return Number(by[req]) || 0;
+  }
+  const lk = req.toLowerCase();
+  let sum = 0;
+  for (const [k, v] of Object.entries(by)) {
+    if (String(k).toLowerCase() === lk) {
+      sum += Number(v) || 0;
+    }
+  }
+  return sum;
+}
+
 function evaluateRuleAgainstCounts(countsByCollection, collectionTickers, matchMode, minCountPerCollection) {
   const tickers = (collectionTickers || []).filter(Boolean);
   if (tickers.length === 0) {
@@ -14,11 +30,12 @@ function evaluateRuleAgainstCounts(countsByCollection, collectionTickers, matchM
   const min = Math.max(1, parseInt(String(minCountPerCollection), 10) || 1);
   const mode = matchMode === 'all' ? 'all' : 'any';
   if (mode === 'all') {
-    return tickers.every(t => (countsByCollection[t] || 0) >= min);
+    return tickers.every(t => countAtTickerIc(countsByCollection, t) >= min);
   }
-  return tickers.some(t => (countsByCollection[t] || 0) >= min);
+  return tickers.some(t => countAtTickerIc(countsByCollection, t) >= min);
 }
 
 module.exports = {
-  evaluateRuleAgainstCounts
+  evaluateRuleAgainstCounts,
+  countAtTickerIc
 };

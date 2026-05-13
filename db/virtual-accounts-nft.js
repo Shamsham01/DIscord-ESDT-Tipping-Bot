@@ -148,25 +148,30 @@ async function getUserNFTBalanceByIdentifier(guildId, userId, identifier) {
 async function countEligibleVirtualInventoryForRoleRule(guildId, userId, collectionTickers) {
   const tickers = [...new Set((collectionTickers || []).filter(Boolean))];
   const counts = {};
+  const canonicalLower = new Map();
   tickers.forEach(t => {
-    counts[t] = 0;
+    const s = String(t);
+    canonicalLower.set(s.toLowerCase(), s);
+    counts[s] = 0;
   });
   if (tickers.length === 0) {
     return counts;
   }
 
   const balances = await getUserNFTBalances(guildId, userId, null, true);
-  const filtered = balances.filter(b => tickers.includes(b.collection));
+  const filtered = balances.filter(b => canonicalLower.has(String(b.collection || '').toLowerCase()));
   const activeListings = await getUserListings(guildId, userId, 'ACTIVE');
   const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId);
 
   for (const nft of filtered) {
+    const lk = String(nft.collection || '').toLowerCase();
+    const canon = canonicalLower.get(lk);
     const totalBalance = nft.amount || 1;
     const lockedL = getLockedInListingsForNft(nft, activeListings);
     const lockedA = getLockedInAuctionsForNft(nft, activeAuctions);
     const effective = Math.max(0, totalBalance - lockedL - lockedA);
-    if (effective > 0 && counts[nft.collection] !== undefined) {
-      counts[nft.collection] += effective;
+    if (effective > 0 && canon) {
+      counts[canon] += effective;
     }
   }
   return counts;
