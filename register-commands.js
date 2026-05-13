@@ -1684,7 +1684,7 @@ const commands = [
                     {
                         name: 'rule-id',
                         description:
-                            'Optional — set to update eligibility only (no new rule). Omit to create new (requires role/channel/collections).',
+                            'Rule UUID when updating eligibility only (omit for new rule; autocomplete)',
                         type: ApplicationCommandOptionType.String,
                         required: false,
                         autocomplete: true
@@ -1698,7 +1698,7 @@ const commands = [
                     {
                         name: 'notification-channel',
                         description:
-                            'Required when creating — channel for setup confirmation + sync notices (omit when only rule-id is set)',
+                            'Channel for setup + sync (required when creating; omit when only rule-id is set)',
                         type: ApplicationCommandOptionType.Channel,
                         channel_types: [
                             ChannelType.GuildText,
@@ -1711,7 +1711,7 @@ const commands = [
                     {
                         name: 'collections',
                         description:
-                            'Required when creating — comma-separated MultiversX collection tickers (omit when updating via rule-id only)',
+                            'Comma-separated MvX tickers (required when creating; omit when only rule-id is set)',
                         type: ApplicationCommandOptionType.String,
                         required: false
                     },
