@@ -1,4 +1,5 @@
 const supabase = require('../supabase-client');
+const { coerceEligibilityMode } = require('../utils/nft-role-eligibility-mode');
 
 function mapRow(row) {
   if (!row) return null;
@@ -10,6 +11,7 @@ function mapRow(row) {
     collectionTickers: row.collection_tickers || [],
     matchMode: row.match_mode,
     minCountPerCollection: row.min_count_per_collection,
+    eligibilityMode: coerceEligibilityMode(row.eligibility_mode),
     enabled: row.enabled,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -17,6 +19,7 @@ function mapRow(row) {
 }
 
 async function createRule(guildId, fields) {
+  const eligibilityMode = coerceEligibilityMode(fields.eligibilityMode);
   const { data, error } = await supabase
     .from('guild_nft_role_rules')
     .insert({
@@ -26,6 +29,7 @@ async function createRule(guildId, fields) {
       collection_tickers: fields.collectionTickers,
       match_mode: fields.matchMode,
       min_count_per_collection: fields.minCountPerCollection,
+      eligibility_mode: eligibilityMode,
       enabled: fields.enabled !== false
     })
     .select()
@@ -80,6 +84,19 @@ async function setRuleEnabled(guildId, ruleId, enabled) {
   return mapRow(data);
 }
 
+async function setRuleEligibilityMode(guildId, ruleId, eligibilityMode) {
+  const mode = coerceEligibilityMode(eligibilityMode);
+  const { data, error } = await supabase
+    .from('guild_nft_role_rules')
+    .update({ eligibility_mode: mode, updated_at: new Date().toISOString() })
+    .eq('guild_id', guildId)
+    .eq('id', ruleId)
+    .select()
+    .single();
+  if (error) throw error;
+  return mapRow(data);
+}
+
 async function deleteRule(guildId, ruleId) {
   const { error } = await supabase
     .from('guild_nft_role_rules')
@@ -96,5 +113,6 @@ module.exports = {
   listRulesForGuild,
   listEnabledRulesGlobally,
   setRuleEnabled,
+  setRuleEligibilityMode,
   deleteRule
 };

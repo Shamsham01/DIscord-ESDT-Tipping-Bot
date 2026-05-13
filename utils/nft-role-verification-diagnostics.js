@@ -3,6 +3,7 @@
  */
 
 const { countAtTickerIc } = require('./nft-role-rule-evaluator');
+const { coerceEligibilityMode, eligibilityUsesVa, eligibilityUsesWallet, describeEligibilityMode } = require('./nft-role-eligibility-mode');
 
 /**
  * Strip backticks so usernames/newlines can't break fenced-style embed lines.
@@ -54,7 +55,7 @@ function formatCollectionMarks(tickers, countsByCollection, minCount) {
 }
 
 /**
- * @param {{ granted: boolean, userId: string, guildSnowflakeId?: string|null, discordIdentity?: { userId: string, username?: string|null, globalName?: string|null, nickname?: string|null }|null, walletAddress?: string|null, walletPass: boolean, vaPass: boolean, walletLegVerified?: boolean, wCounts: Record<string, number>|null|undefined, vaCounts: Record<string, number>|null|undefined, collectionTickers: string[], matchMode: string, minCountPerCollection: number|string }} opts
+ * @param {{ granted: boolean, userId: string, eligibilityMode?: unknown, walletFetched?: boolean, guildSnowflakeId?: string|null, discordIdentity?: { userId: string, username?: string|null, globalName?: string|null, nickname?: string|null }|null, walletAddress?: string|null, walletPass: boolean, vaPass: boolean, walletLegVerified?: boolean, wCounts: Record<string, number>|null|undefined, vaCounts: Record<string, number>|null|undefined, collectionTickers: string[], matchMode: string, minCountPerCollection: number|string }} opts
  * @returns {string} Multiline plaintext (one revoke/grant diagnostic block).
  */
 function formatNftRuleMemberDiag(opts) {
@@ -63,6 +64,8 @@ function formatNftRuleMemberDiag(opts) {
     userId,
     guildSnowflakeId,
     discordIdentity,
+    eligibilityMode: emRaw,
+    walletFetched = true,
     walletAddress,
     walletPass,
     vaPass,
@@ -74,11 +77,16 @@ function formatNftRuleMemberDiag(opts) {
     minCountPerCollection
   } = opts;
 
+  const emode = coerceEligibilityMode(emRaw);
   const tickers = [...new Set((collectionTickers || []).filter(Boolean))];
   const min = Math.max(1, parseInt(String(minCountPerCollection), 10) || 1);
   const mode = matchMode === 'all' ? 'all' : 'any';
   const countsW = wCounts || {};
   const countsV = vaCounts || {};
+  const hasLinked = walletAddress && typeof walletAddress === 'string' && walletAddress.startsWith('erd1');
+  /** Member must link a wallet for rules that rely on MvX counts (excluding wallet_or_va when Va already qualifies). */
+  const walletLinkageRequired =
+    eligibilityUsesWallet(emode) && !(emode === 'wallet_or_va' && vaPass === true && !walletFetched);
 
   const identityLine = `${formatDiscordWhoLine({
     userId,
@@ -87,17 +95,23 @@ function formatNftRuleMemberDiag(opts) {
     nickname: discordIdentity?.nickname ?? null
   })}${_guildFootnote(guildSnowflakeId)}`;
 
-  const mentionLine = `<@${userId}> — role **${granted ? 'granted' : 'removed'}** · match **${mode}** · min **${min}** per collection · both Wallet + VA legs must qualify`;
-
-  const hasLinked = walletAddress && typeof walletAddress === 'string' && walletAddress.startsWith('erd1');
+  const mentionLine = `<@${userId}> — role **${granted ? 'granted' : 'removed'}** · collections **${mode}**, min **${min}**/collection · _${describeEligibilityMode(emode)}_`;
 
   let walletSection;
-  if (!hasLinked) {
+  if (emode === 'va_only') {
+    walletSection = '**Wallet** (MvX API): _(not evaluated — VA-only eligibility rule)._';
+  } else if (emode === 'wallet_or_va' && vaPass && !walletFetched) {
+    walletSection =
+      '**Wallet** (MvX API): _(not consulted — VA leg already qualifies; **wallet-or-Virtual-Account** mode)._';
+  } else if (!hasLinked && walletLinkageRequired) {
     walletSection = [
-      `**Wallet** (MvX API): ⚠️ \`erd1\` wallet not linked — counts treated as zero — leg ❌`,
+      `**Wallet** (MvX API): ⚠️ \`erd1\` wallet not linked via \`/set-wallet\` — treated as zero — leg ❌`,
       `└ Collections: ${formatCollectionMarks(tickers, {}, min)}`
     ].join('\n');
-  } else if (!walletLegVerified) {
+  } else if (!hasLinked && !walletLinkageRequired) {
+    walletSection =
+      '**Wallet** (MvX API): _(skipped — VA satisfied under wallet-or-VA mode; MvX counts not needed)._';
+  } else if (hasLinked && !walletLegVerified) {
     walletSection =
       `**Wallet** (MvX API): ⚠️ could not verify (rate limit/error) — **no role change applied for this member in this pass**`;
   } else {
@@ -107,10 +121,14 @@ function formatNftRuleMemberDiag(opts) {
     ].join('\n');
   }
 
-  const vaSection =
-    tickers.length > 0
-      ? `**VA** (Supabase): leg ${vaPass ? '✅' : '❌'} · ${formatCollectionMarks(tickers, countsV, min)}`
-      : `**VA** (Supabase): leg ${vaPass ? '✅' : '❌'}`;
+  let vaSection;
+  if (!eligibilityUsesVa(emode)) {
+    vaSection = '**VA** (Supabase): _(not evaluated — wallet-only eligibility rule)._';
+  } else if (tickers.length > 0) {
+    vaSection = `**VA** (Supabase): leg ${vaPass ? '✅' : '❌'} · ${formatCollectionMarks(tickers, countsV, min)}`;
+  } else {
+    vaSection = `**VA** (Supabase): leg ${vaPass ? '✅' : '❌'}`;
+  }
 
   return [identityLine, mentionLine, walletSection, vaSection].join('\n');
 }

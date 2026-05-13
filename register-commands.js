@@ -1674,7 +1674,7 @@ const commands = [
     },
     {
         name: 'nft-role-verification',
-        description: 'Admin: grant roles when wallet + VA NFT rules match (daily sync)',
+        description: 'Admin: grant roles based on NFT rules (MvX wallet and/or VA; daily sync)',
         options: [
             {
                 type: ApplicationCommandOptionType.Subcommand,
@@ -1683,7 +1683,7 @@ const commands = [
                 options: [
                     {
                         name: 'role',
-                        description: 'Discord role to grant when both wallet and VA qualify',
+                        description: 'Discord role to grant when NFT eligibility rules qualify',
                         type: ApplicationCommandOptionType.Role,
                         required: true
                     },
@@ -1721,6 +1721,27 @@ const commands = [
                         type: ApplicationCommandOptionType.Integer,
                         required: false,
                         min_value: 1
+                    },
+                    {
+                        name: 'eligibility',
+                        description: 'What must pass: both wallet AND VA (default), or either, or wallet-only…',
+                        type: ApplicationCommandOptionType.String,
+                        required: false,
+                        choices: [
+                            {
+                                name: 'Both linked wallet AND Virtual Account (strict)',
+                                value: 'wallet_and_va'
+                            },
+                            {
+                                name: 'Linked wallet OR Virtual Account (recommended for hodlers)',
+                                value: 'wallet_or_va'
+                            },
+                            { name: 'Linked wallet (MvX) only — ignore VA counts', value: 'wallet_only' },
+                            {
+                                name: 'Virtual Account (Supabase) only — skip MvX',
+                                value: 'va_only'
+                            }
+                        ]
                     }
                 ]
             },
@@ -1754,6 +1775,38 @@ const commands = [
                         type: ApplicationCommandOptionType.String,
                         required: true,
                         autocomplete: true
+                    }
+                ]
+            },
+            {
+                type: ApplicationCommandOptionType.Subcommand,
+                name: 'set-eligibility',
+                description: 'Change how MvX wallet vs Virtual Account combine for an existing rule',
+                options: [
+                    {
+                        name: 'rule-id',
+                        description: 'Pick a rule (autocomplete) or paste full UUID',
+                        type: ApplicationCommandOptionType.String,
+                        required: true,
+                        autocomplete: true
+                    },
+                    {
+                        name: 'mode',
+                        description: 'Qualification logic for this rule',
+                        type: ApplicationCommandOptionType.String,
+                        required: true,
+                        choices: [
+                            {
+                                name: 'Both linked wallet AND Virtual Account must qualify',
+                                value: 'wallet_and_va'
+                            },
+                            {
+                                name: 'Linked wallet OR Virtual Account qualifies (recommended)',
+                                value: 'wallet_or_va'
+                            },
+                            { name: 'Linked wallet only (ignore VA entirely)', value: 'wallet_only' },
+                            { name: 'Virtual Account only', value: 'va_only' }
+                        ]
                     }
                 ]
             },

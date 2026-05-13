@@ -1,28 +1,33 @@
 ---
 description: >-
-  Automatically grant or remove a Discord role when members satisfy both
-  MultiversX wallet NFT holdings and Virtual Account inventory rules.
+  Automatically grant or remove Discord roles based on NFT collection rules tied to MvX-linked wallets and/or Virtual Account inventory.
 ---
 
 # NFT role verification
 
-Admins can define **rules** that tie a Discord **role** to MultiversX **NFT collections**. The bot evaluates members on a **daily** schedule (and on demand with **`run-now`**) and manages the role for you.
+Admins define **rules** that tie a **role** to MultiversX **NFT collections**. The bot runs on a **daily** schedule (and **`/nft-role-verification run-now`**) over **candidate members**.
 
-## How eligibility works (both must pass)
+## Eligibility modes (per rule)
 
-Each rule checks **two** things for every candidate member:
+Each rule has an **`eligibility_mode`** (`wallet_and_va`, `wallet_or_va`, `wallet_only`, `va_only`):
 
-1. **Wallet leg** — The member must have a **registered wallet** (`/set-wallet`). The bot uses the [MultiversX public API](https://api.multiversx.com) to count NFTs in the configured collections on that address. Requests are **paced** (spacing between pages, exponential backoff on 429/5xx). If the API still cannot be read for that member in this run, their role is **not changed** (no grant and **no revoke** on ambiguity). Collection ticker matching ignores **ASCII case**.
-2. **Virtual Account (VA) leg** — The member must hold enough of the same collections in their **NFT Virtual Account**, counting **staked** NFTs. Balance that is **fully locked** in an active **marketplace listing** or **auction** does **not** count toward the VA leg.
+| Mode | Meaning |
+| --- | --- |
+| **`wallet_and_va`** *(default)* | MvX-linked wallet **and** Virtual Account must satisfy the collection rule. |
+| **`wallet_or_va`** *(common for hodlers)* | Satisfy **either** the MvX wallet leg **or** the VA leg. If VA already qualifies, the bot **skips MvX paging** for that member (fewer API calls). |
+| **`wallet_only`** | Only the linked wallet (MvX) counts; VA is ignored. |
+| **`va_only`** | Only VA (Supabase) counts; MvX is not queried. |
 
-The member gets the role only when **both** legs satisfy the same **match mode** and **minimum count** (see below).
+**Match mode (`any` / `all`)** and **minimum count per collection** apply **per leg that runs** — e.g. with `wallet_or_va`, the member passes if **either** leg meets the thresholds.
 
-## Match mode and minimum count
+Legacy rules without the column behave as **`wallet_and_va`** when the migration default is applied.
 
-- **`any`** — At least **one** of the listed collections must meet the minimum count (per collection) on **each** leg (wallet and VA separately).
-- **`all`** — **Every** listed collection must meet the minimum count on **each** leg.
+## Wallet vs Virtual Account legs
 
-**Minimum count** applies per collection (default: `1`).
+1. **Wallet (MvX)** — Uses `/set-wallet` for the Discord user. Counts NFTs/SFTs via [MultiversX API](https://api.multiversx.com) `/accounts/{address}/nfts?collections=...`. Requests are paced with backoff on 429/5xx. **If MvX cannot be verified** for a decision that depends on the wallet leg, that member may be left **unchanged**. Collection matching is **ASCII case-insensitive**.
+2. **Virtual Account** — Uses Supabase NFT VA balances (**staked** counts; excludes balance fully locked in **active listing/auction** when applicable logic runs).
+
+Notifications and diag embeds show which legs were evaluated and ✅/❌ per collection ticker.
 
 ## Who is checked
 
@@ -55,6 +60,7 @@ Creates a rule and sends the setup confirmation to the notification channel.
 - `collections` — Comma-separated MultiversX **collection tickers** (same identifiers as VA and API).
 - `match-mode` (optional) — `any` (default) or `all`.
 - `min-count` (optional) — Minimum NFT count per collection (integer ≥ 1, default `1`).
+- `eligibility` (optional) — `wallet_and_va` (default), `wallet_or_va`, `wallet_only`, or `va_only`.
 
 ### `list`
 
@@ -74,7 +80,16 @@ Enables or disables a rule by UUID (same as using the list menu toggle).
 
 **Parameters**
 
-- `rule-id` — Full rule id (use **autocomplete**: `RoleName · first8…last8`, or paste from `list`).
+- `rule-id` — Full rule id (use **autocomplete**, or paste from `list`).
+
+### `set-eligibility`
+
+Updates **how MvX wallet vs VA combine** for an existing rule (no need to recreate the rule).
+
+**Parameters**
+
+- `rule-id` — Full rule id (autocomplete).
+- `mode` — `wallet_and_va`, `wallet_or_va`, `wallet_only`, or `va_only`.
 
 ### `run-now`
 
@@ -84,10 +99,11 @@ Runs the verification sync **immediately** for the **current server** only (usef
 
 - The bot must be able **Manage Roles** and its **highest role** must be **above** the role it assigns.
 - Do **not** use integration-managed roles.
-- The `guild_nft_role_rules` table must allow the bot’s Supabase client to read/write rows (same pattern as other guild tables; if you use RLS, add policies or use a service role for the bot).
+- The `guild_nft_role_rules` table includes **`eligibility_mode`** (`TEXT`, default **`wallet_and_va`**). Apply the repo migration **`20260514_guild_nft_role_rules_eligibility_mode.sql`** (or mirror it in hosted Supabase).
 
 ## Operational tips
 
-- Members must run **`/set-wallet`** or the wallet leg never passes.
-- NFTs only on-chain and **never deposited** to the VA will fail the VA leg.
-- Use **`run-now`** after creating or editing rules if you do not want to wait for the next daily run.
+- For **on-wallet-only** holders without VA inventory mirrored in Supabase, use **`wallet_or_va`** or **`wallet_only`**.
+- **`wallet_and_va`** is strict; if VA is wrong or stale, deserving members will not be granted roles.
+- MvX-linked **wallet counts** still require **`/set-wallet`** for that Discord user unless the rule is **`va_only`**.
+- Run **`run-now`** after changing **`eligibility_mode`** via **`set-eligibility`** so grants catch up faster than the daily job.

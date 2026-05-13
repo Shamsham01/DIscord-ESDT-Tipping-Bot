@@ -842,6 +842,9 @@ CREATE TABLE IF NOT EXISTS guild_nft_role_rules (
     collection_tickers TEXT[] NOT NULL DEFAULT '{}',
     match_mode TEXT NOT NULL DEFAULT 'any' CHECK (match_mode IN ('any', 'all')),
     min_count_per_collection INTEGER NOT NULL DEFAULT 1 CHECK (min_count_per_collection >= 1),
+    eligibility_mode TEXT NOT NULL DEFAULT 'wallet_and_va' CHECK (
+        eligibility_mode IN ('wallet_and_va', 'wallet_only', 'va_only', 'wallet_or_va')
+    ),
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()

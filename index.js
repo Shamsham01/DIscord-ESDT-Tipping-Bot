@@ -14475,7 +14475,7 @@ client.on('interactionCreate', async (interaction) => {
       await safeRespond(interaction, []);
       return;
     }
-    if ((sub === 'delete' || sub === 'toggle') && focused.name === 'rule-id') {
+    if ((sub === 'delete' || sub === 'toggle' || sub === 'set-eligibility') && focused.name === 'rule-id') {
       try {
         const guildId = interaction.guildId;
         const focusedRaw = interaction.options.getFocused();
@@ -26837,7 +26837,7 @@ async function handleHelpCommand(interaction, page = 1) {
             '`/unsubscribe-activity` 🔴 Admin - Unsubscribe from activity feeds'
           ],
           '🪪 NFT role verification': [
-            '`/nft-role-verification` 🔴 Admin - Wallet + VA NFT rules for roles: `create`, `list`, `delete`, `toggle`, `run-now`'
+            '`/nft-role-verification` 🔴 Admin - NFT rules for roles: `create`, `list`, `delete`, `toggle`, `set-eligibility`, `run-now`'
           ],
           '🔧 Utilities & Debug': [
             '`/update-token-metadata` 🔴 Admin - Update token info',

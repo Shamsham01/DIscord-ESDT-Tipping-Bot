@@ -9,6 +9,7 @@ const {
 } = require('discord.js');
 const dbNftRoleRules = require('../db/nft-role-verification');
 const { runNftRoleSync } = require('../jobs/sync-nft-role-verifications');
+const { describeEligibilityMode } = require('../utils/nft-role-eligibility-mode');
 
 const SELECT_CUSTOM_ID = 'nft-role-rule-manage';
 
@@ -40,6 +41,7 @@ async function handleNftRoleVerificationCommand(interaction, client) {
     const collectionsRaw = interaction.options.getString('collections', true);
     const matchMode = interaction.options.getString('match-mode') || 'any';
     const minCount = interaction.options.getInteger('min-count') || 1;
+    const eligibilityChoice = interaction.options.getString('eligibility') || 'wallet_and_va';
 
     if (role.managed || role.id === interaction.guildId) {
       await interaction.editReply({ content: 'Pick a normal role (not @everyone or bot-managed roles).' });
@@ -77,17 +79,21 @@ async function handleNftRoleVerificationCommand(interaction, client) {
       collectionTickers,
       matchMode: matchMode === 'all' ? 'all' : 'any',
       minCountPerCollection: minCount,
+      eligibilityMode: eligibilityChoice,
       enabled: true
     });
+
+    const modeHumanPlain = describeEligibilityMode(rule.eligibilityMode).replace(/\*\*/g, '');
 
     const setupEmbed = new EmbedBuilder()
       .setTitle('NFT role verification created')
       .setDescription(
-        'Members need **both** a linked wallet (`/set-wallet`) that satisfies the collection rule **and** matching **Virtual Account** inventory (listed/auctioned VA balance excluded; staked counts).'
+        '_Eligibility_ controls how MvX-linked wallet holdings and Virtual Account inventory combine.'
       )
       .addFields(
         { name: 'Rule ID', value: `\`${rule.id}\``, inline: true },
         { name: 'Role', value: `<@&${role.id}>`, inline: true },
+        { name: 'Eligibility', value: modeHumanPlain, inline: false },
         { name: 'Collections', value: collectionTickers.join(', ') || '—', inline: false },
         { name: 'Match', value: rule.matchMode, inline: true },
         { name: 'Min per collection', value: String(rule.minCountPerCollection), inline: true },
@@ -125,6 +131,7 @@ async function handleNftRoleVerificationCommand(interaction, client) {
             (r, i) =>
               `**${i + 1}.** \`${r.id}\` — <@&${r.discordRoleId}> — ${r.enabled ? 'on' : 'off'}\n` +
               `Collections: ${(r.collectionTickers || []).join(', ')}\n` +
+              `Eligibility: ${describeEligibilityMode(r.eligibilityMode).replace(/\*\*/g, '')}\n` +
               `Match: **${r.matchMode}**, min: **${r.minCountPerCollection}**`
           )
           .join('\n\n')
@@ -180,6 +187,22 @@ async function handleNftRoleVerificationCommand(interaction, client) {
     }
     await dbNftRoleRules.setRuleEnabled(guildId, ruleId, !existing.enabled);
     await interaction.editReply({ content: `Rule \`${ruleId}\` is now **${!existing.enabled ? 'enabled' : 'disabled'}**.` });
+    return;
+  }
+
+  if (sub === 'set-eligibility') {
+    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+    const ruleId = interaction.options.getString('rule-id', true);
+    const modeRaw = interaction.options.getString('mode', true);
+    const existing = await dbNftRoleRules.getRuleById(guildId, ruleId);
+    if (!existing) {
+      await interaction.editReply({ content: 'Rule not found for this server.' });
+      return;
+    }
+    const updated = await dbNftRoleRules.setRuleEligibilityMode(guildId, ruleId, modeRaw);
+    await interaction.editReply({
+      content: `Rule \`${ruleId}\` eligibility is now **${describeEligibilityMode(updated.eligibilityMode).replace(/\*\*/g, '')}**. Run \`/nft-role-verification run-now\`.`
+    });
     return;
   }
 

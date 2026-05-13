@@ -5,6 +5,13 @@ const dbNftRoleRules = require('../db/nft-role-verification');
 const dbVirtualAccountsNft = require('../db/virtual-accounts-nft');
 const { evaluateRuleAgainstCounts } = require('../utils/nft-role-rule-evaluator');
 const { formatNftRuleMemberDiag, discordIdentityFromMember } = require('../utils/nft-role-verification-diagnostics');
+const {
+  coerceEligibilityMode,
+  eligibilityUsesVa,
+  shouldFetchWalletNft,
+  computeEligibility,
+  skipMemberOnWalletAmbiguity
+} = require('../utils/nft-role-eligibility-mode');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -283,27 +290,50 @@ async function runNftRoleSync(client, opts = {}) {
 
             const discordIdentity = discordIdentityFromMember(member);
             const walletAddress = walletsMap[userId];
-            let walletPass = false;
-            let skipRoleChange = false;
-            let wCountsForLog = null;
+            const eligibilityMode = coerceEligibilityMode(rule.eligibilityMode);
 
-            if (walletAddress && typeof walletAddress === 'string' && walletAddress.startsWith('erd1')) {
-              const { counts: wCounts, walletLegVerified } = await fetchWalletCollectionCounts(
-                walletAddress,
-                tickers
+            let vaCounts = {};
+            let vaPass = false;
+            if (eligibilityUsesVa(eligibilityMode)) {
+              vaCounts = await dbVirtualAccountsNft.countEligibleVirtualInventoryForRoleRule(gid, userId, tickers);
+              vaPass = evaluateRuleAgainstCounts(
+                vaCounts,
+                tickers,
+                rule.matchMode,
+                rule.minCountPerCollection
               );
-              wCountsForLog = wCounts;
-              if (!walletLegVerified) {
-                // Rate limit / API error: do not grant AND do not revoke (would wrongly strip valid holders)
-                skipRoleChange = true;
-                summary.walletCheckSkipped += 1;
-              } else {
-                walletPass = evaluateRuleAgainstCounts(
-                  wCounts,
-                  tickers,
-                  rule.matchMode,
-                  rule.minCountPerCollection
+            }
+
+            const needWalletMvX = shouldFetchWalletNft(eligibilityMode, vaPass);
+            let walletPass = false;
+            let walletLegVerified = true;
+            let wCountsForLog = null;
+            /** True only when MvX paging was invoked (erd1-linked). Used for ambiguity / diagnostics. */
+            let walletMvXRan = false;
+            let skipRoleChange = false;
+
+            if (needWalletMvX) {
+              if (walletAddress && typeof walletAddress === 'string' && walletAddress.startsWith('erd1')) {
+                walletMvXRan = true;
+                const { counts: wCounts, walletLegVerified: wlOk } = await fetchWalletCollectionCounts(
+                  walletAddress,
+                  tickers
                 );
+                wCountsForLog = wCounts;
+                walletLegVerified = wlOk;
+                if (!walletLegVerified && skipMemberOnWalletAmbiguity(eligibilityMode, vaPass)) {
+                  skipRoleChange = true;
+                  summary.walletCheckSkipped += 1;
+                } else if (walletLegVerified) {
+                  walletPass = evaluateRuleAgainstCounts(
+                    wCounts,
+                    tickers,
+                    rule.matchMode,
+                    rule.minCountPerCollection
+                  );
+                }
+              } else {
+                walletPass = false;
               }
             }
 
@@ -311,32 +341,22 @@ async function runNftRoleSync(client, opts = {}) {
               continue;
             }
 
-            const vaCounts = await dbVirtualAccountsNft.countEligibleVirtualInventoryForRoleRule(
-              gid,
-              userId,
-              tickers
-            );
-            const vaPass = evaluateRuleAgainstCounts(
-              vaCounts,
-              tickers,
-              rule.matchMode,
-              rule.minCountPerCollection
-            );
-
-            const eligible = walletPass && vaPass;
+            const eligible = computeEligibility(walletPass, vaPass, eligibilityMode);
             const hasRole = member.roles.cache.has(rule.discordRoleId);
 
             if (eligible && !hasRole) {
-              await member.roles.add(role, 'NFT role verification (wallet + VA)');
+              await member.roles.add(role, `NFT role verification (${eligibilityMode})`);
               const grantBlock = formatNftRuleMemberDiag({
                 granted: true,
                 userId,
                 guildSnowflakeId: gid,
                 discordIdentity,
+                eligibilityMode,
+                walletFetched: walletMvXRan,
                 walletAddress,
-                walletPass: true,
-                vaPass: true,
-                walletLegVerified: true,
+                walletPass,
+                vaPass,
+                walletLegVerified,
                 wCounts: wCountsForLog || {},
                 vaCounts,
                 collectionTickers: tickers,
@@ -359,16 +379,18 @@ async function runNftRoleSync(client, opts = {}) {
                   `[NFT-ROLE-SYNC] revoke_diag rule=${rule.id} user=${userId} walletPass=${walletPass} vaPass=${vaPass} wCounts=${wPart} vaCounts=${JSON.stringify(vaCounts)}`
                 );
               }
-              await member.roles.remove(role, 'NFT role verification (wallet + VA)');
+              await member.roles.remove(role, `NFT role verification (${eligibilityMode})`);
               const revokeBlock = formatNftRuleMemberDiag({
                 granted: false,
                 userId,
                 guildSnowflakeId: gid,
                 discordIdentity,
+                eligibilityMode,
+                walletFetched: walletMvXRan,
                 walletAddress,
                 walletPass,
                 vaPass,
-                walletLegVerified: true,
+                walletLegVerified,
                 wCounts: wCountsForLog || {},
                 vaCounts,
                 collectionTickers: tickers,
