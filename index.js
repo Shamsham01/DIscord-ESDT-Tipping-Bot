@@ -455,21 +455,119 @@ async function waitForMultiversXTransactionTerminalOutcome(txHash) {
 // Pending swap quotes (key: guildId:userId:messageId)
 const pendingSwapQuotes = new Map();
 
+const NFT_BULK_TRANSFER_LIMIT = 50;
+
+function isBulkTransferableNft(nft) {
+  const tokenType = nft.tokenType || 'NFT';
+  const amount = nft.amount || 1;
+  return tokenType !== 'SFT' && amount <= 1;
+}
+
+function buildNftFullTokenIdentifier(nft) {
+  if (nft.identifier && nft.identifier.includes('-') && nft.identifier.split('-').length >= 3) {
+    return nft.identifier;
+  }
+  return `${nft.identifier || nft.collection}-${(nft.nonce || 0).toString().padStart(4, '0')}`;
+}
+
+// Estimate on-chain transactions for mass withdraw/refund using bulk NFT batches (50 NFTs per tx).
+function calculateMassWithdrawTransactionCount(accountsWithBalances) {
+  let esdtTransactionCount = 0;
+  let nftBulkTransactionCount = 0;
+  let sftTransactionCount = 0;
+  let nftItemCount = 0;
+  let sftItemCount = 0;
+
+  for (const account of accountsWithBalances) {
+    for (const [, balance] of Object.entries(account.balances || {})) {
+      if (new BigNumber(balance || '0').isGreaterThan(0)) {
+        esdtTransactionCount++;
+      }
+    }
+
+    if (account.nftBalances && account.nftBalances.length > 0) {
+      let bulkableNftCount = 0;
+      for (const nft of account.nftBalances) {
+        if (isBulkTransferableNft(nft)) {
+          bulkableNftCount++;
+          nftItemCount++;
+        } else {
+          sftTransactionCount++;
+          sftItemCount++;
+        }
+      }
+      if (bulkableNftCount > 0) {
+        nftBulkTransactionCount += Math.ceil(bulkableNftCount / NFT_BULK_TRANSFER_LIMIT);
+      }
+    }
+  }
+
+  return {
+    totalTransactions: esdtTransactionCount + nftBulkTransactionCount + sftTransactionCount,
+    esdtTransactionCount,
+    nftBulkTransactionCount,
+    sftTransactionCount,
+    nftItemCount,
+    sftItemCount,
+    nftTransactionCount: nftBulkTransactionCount + sftTransactionCount
+  };
+}
+
+function formatMassWithdrawTransactionSummary(txCounts, options = {}) {
+  const { includeItemCounts = true } = options;
+  const parts = [`${txCounts.esdtTransactionCount} ESDT tx`];
+
+  if (txCounts.nftBulkTransactionCount > 0) {
+    const nftPart = includeItemCounts && txCounts.nftItemCount > 0
+      ? `${txCounts.nftBulkTransactionCount} NFT bulk tx (${txCounts.nftItemCount} NFTs)`
+      : `${txCounts.nftBulkTransactionCount} NFT bulk tx`;
+    parts.push(nftPart);
+  }
+
+  if (txCounts.sftTransactionCount > 0) {
+    const sftPart = includeItemCounts && txCounts.sftItemCount > 0
+      ? `${txCounts.sftTransactionCount} SFT tx (${txCounts.sftItemCount} SFTs)`
+      : `${txCounts.sftTransactionCount} SFT tx`;
+    parts.push(sftPart);
+  }
+
+  return parts.join(' + ');
+}
+
 // Helper function to create error embed for insufficient balances
-async function createBalanceErrorEmbed(guildId, balanceCheck, commandName) {
+async function createBalanceErrorEmbed(guildId, balanceCheck, commandName, options = {}) {
+  const userFacingWithdrawCommands = new Set(['/withdraw-esdt', '/withdraw-nft', '/withdraw-nft-bulk']);
+  const simplified = options.simplified ?? userFacingWithdrawCommands.has(commandName);
+
   const embed = new EmbedBuilder()
-    .setTitle('❌ Insufficient Community Fund Balances')
-    .setDescription(`Cannot proceed with **${commandName}** due to insufficient balances in the Community Fund wallet.`)
     .setColor(0xFF0000)
     .setTimestamp()
     .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
-  
+
+  if (simplified) {
+    embed
+      .setTitle('❌ Withdrawals Unavailable')
+      .setDescription(
+        `**${commandName}** cannot be processed right now.\n\n` +
+        'The Community Fund wallet needs to be topped up before withdrawals can go through. ' +
+        'Please contact a server admin and ask them to enable withdrawals.\n\n' +
+        'Admins can run `/check-community-fund-balance` to see what is needed.'
+      );
+    return embed;
+  }
+
+  embed
+    .setTitle('❌ Insufficient Community Fund Balances')
+    .setDescription(`Cannot proceed with **${commandName}** due to insufficient balances in the Community Fund wallet.`);
+
   // Format REWARD balances to 2 decimal places
   const formatReward = (value) => {
     const num = parseFloat(value || '0');
     return isNaN(num) ? '0.00' : num.toFixed(2);
   };
-  
+
+  const numberOfTransfers = balanceCheck.numberOfTransfers || 1;
+
   // Calculate totals and differences
   const onChainReward = parseFloat(balanceCheck.rewardBalanceOnChain || '0');
   const virtualAccountReward = parseFloat(balanceCheck.rewardBalanceVirtualAccount || '0');
@@ -478,19 +576,19 @@ async function createBalanceErrorEmbed(guildId, balanceCheck, commandName) {
   const difference = onChainReward - totalInVirtualAccounts;
   const usageFeeReward = parseFloat(balanceCheck.requiredReward || '0');
   const neededToWithdraw = Math.max(0, -difference) + Math.ceil(usageFeeReward * 100) / 100; // Round up usage fee
-  
-  // Add simplified balance information
+
+  // Add detailed balance information for admin-facing commands
   embed.addFields([
     { name: '💰 EGLD Balance', value: `${balanceCheck.egldBalance} EGLD`, inline: true },
     { name: '📊 Required EGLD', value: `${balanceCheck.requiredEgld} EGLD`, inline: true },
     { name: '✅ EGLD Status', value: new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(balanceCheck.requiredEgld)) ? '✅ Sufficient' : '❌ Insufficient', inline: true },
     { name: '💼 Total in Wallet (On-Chain)', value: `${formatReward(balanceCheck.rewardBalanceOnChain)} REWARD`, inline: false },
-    { name: '📦 Total in Virtual Accounts', value: `${formatReward(totalInVirtualAccounts)} REWARD\n• Virtual Accounts: ${formatReward(virtualAccountReward)}\n• House Balance: ${formatReward(houseBalanceReward)}`, inline: false },
+    { name: '📦 REWARD Liability (VA + House)', value: `${formatReward(totalInVirtualAccounts)} REWARD\n• Virtual Accounts: ${formatReward(virtualAccountReward)}\n• House Balance: ${formatReward(houseBalanceReward)}`, inline: false },
     { name: '📊 Difference', value: `${formatReward(difference)} REWARD`, inline: true },
-    { name: '💵 1 Transfer Usage Fee', value: `${formatReward(Math.ceil(usageFeeReward * 100) / 100)} REWARD`, inline: true },
-    { name: '⚠️ Needed to Perform Withdraw', value: `${formatReward(neededToWithdraw)} REWARD`, inline: true }
+    { name: `💵 Usage Fee (${numberOfTransfers} transfer${numberOfTransfers === 1 ? '' : 's'})`, value: `${formatReward(Math.ceil(usageFeeReward * 100) / 100)} REWARD`, inline: true },
+    { name: '⚠️ Needed to Enable', value: `${formatReward(neededToWithdraw)} REWARD`, inline: true }
   ]);
-  
+
   // Add informational note about transferring REWARD
   if (balanceCheck.walletAddress && neededToWithdraw > 0) {
     embed.addFields({
@@ -499,7 +597,7 @@ async function createBalanceErrorEmbed(guildId, balanceCheck, commandName) {
       inline: false
     });
   }
-  
+
   // Add other errors (non-REWARD related, like EGLD issues)
   const otherErrors = balanceCheck.errors?.filter(e => !e.includes('REWARD')) || [];
   if (otherErrors.length > 0) {
@@ -509,20 +607,20 @@ async function createBalanceErrorEmbed(guildId, balanceCheck, commandName) {
       inline: false
     });
   }
-  
+
   // Get QR code URL if available
   try {
     const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
     const communityFundProjectName = getCommunityFundProjectName();
     const qrCodeUrl = communityFundQRData?.[communityFundProjectName];
-    
+
     if (qrCodeUrl) {
       embed.setThumbnail(qrCodeUrl);
     }
   } catch (error) {
     console.error('[BALANCE-CHECK] Error getting QR code:', error.message);
   }
-  
+
   return embed;
 }
 
@@ -977,8 +1075,10 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
     // Get all user wallets
     const userWallets = await getUserWallets(guildId);
     
-    // Prepare refund queue (ESDT tokens + NFT/SFT tokens)
-    const refundQueue = [];
+    // Prepare refund queues (ESDT tokens + bulk NFT batches + individual SFT transfers)
+    const esdtRefundQueue = [];
+    const nftBulkRefundsByUser = new Map();
+    const sftRefundQueue = [];
     for (const account of accountsWithBalances) {
       const userWallet = userWallets[account.userId];
       if (!userWallet || !userWallet.startsWith('erd1') || userWallet.length !== 62) {
@@ -990,7 +1090,7 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
       for (const [tokenTicker, balance] of Object.entries(account.balances || {})) {
         const balanceBN = new BigNumber(balance);
         if (balanceBN.isGreaterThan(0)) {
-          refundQueue.push({
+          esdtRefundQueue.push({
             type: 'ESDT',
             userId: account.userId,
             username: account.username || `User ${account.userId}`,
@@ -1002,10 +1102,10 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
         }
       }
       
-      // Add each NFT/SFT as a separate refund
+      // Group bulkable NFTs per user; SFTs stay as individual transfers
       if (account.nftBalances && account.nftBalances.length > 0) {
         for (const nft of account.nftBalances) {
-          refundQueue.push({
+          const nftRefund = {
             type: 'NFT',
             userId: account.userId,
             username: account.username || `User ${account.userId}`,
@@ -1016,111 +1116,112 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
             amount: nft.amount || 1,
             tokenType: nft.tokenType || 'NFT',
             nftName: nft.nftName
-          });
+          };
+
+          if (isBulkTransferableNft(nft)) {
+            if (!nftBulkRefundsByUser.has(account.userId)) {
+              nftBulkRefundsByUser.set(account.userId, {
+                userId: account.userId,
+                username: nftRefund.username,
+                wallet: userWallet,
+                nfts: []
+              });
+            }
+            nftBulkRefundsByUser.get(account.userId).nfts.push(nftRefund);
+          } else {
+            sftRefundQueue.push(nftRefund);
+          }
         }
       }
     }
+
+    const txCounts = calculateMassWithdrawTransactionCount(accountsWithBalances);
+    const totalRefundItems = esdtRefundQueue.length
+      + txCounts.nftItemCount
+      + txCounts.sftItemCount;
     
-    console.log(`[MASS-REFUND] Prepared ${refundQueue.length} refund transactions`);
+    console.log(`[MASS-REFUND] Prepared ${totalRefundItems} refund item(s) across ${txCounts.totalTransactions} on-chain transaction(s)`);
     
     if (progressCallback) {
       await progressCallback({
         stage: 'prepared',
-        total: refundQueue.length,
-        message: `Prepared ${refundQueue.length} refund transactions`
+        total: totalRefundItems,
+        message: `Prepared ${totalRefundItems} refund item(s) across ${txCounts.totalTransactions} on-chain transaction(s)`
       });
     }
     
-    // Process refunds one by one
+    // Process refunds
     const results = [];
     let successfulRefunds = 0;
     let failedRefunds = 0;
-    
-    for (let i = 0; i < refundQueue.length; i++) {
-      const refund = refundQueue[i];
-      const progress = i + 1;
-      
-      const refundDescription = refund.type === 'ESDT' 
-        ? `${refund.amount} ${refund.tokenTicker}`
-        : `${refund.amount}x ${refund.tokenType} ${refund.identifier || refund.collection}`;
-      
-      console.log(`[MASS-REFUND] Processing refund ${progress}/${refundQueue.length}: ${refundDescription} to ${refund.username} (${refund.wallet})`);
-      
+    let progressCounter = 0;
+    const dbVirtualAccountsNFT = require('./db/virtual-accounts-nft');
+    const projects = await getProjects(guildId);
+    const project = projects[communityFundProject];
+
+    const reportProgress = async (refundDescription, currentRefund) => {
+      progressCounter++;
       if (progressCallback) {
         await progressCallback({
           stage: 'processing',
-          current: progress,
-          total: refundQueue.length,
-          currentRefund: refund,
-          message: `Processing refund ${progress}/${refundQueue.length}: ${refundDescription} to ${refund.username}`
+          current: progressCounter,
+          total: totalRefundItems,
+          currentRefund,
+          message: `Processing refund ${progressCounter}/${totalRefundItems}: ${refundDescription}`
         });
       }
+    };
+
+    for (let i = 0; i < esdtRefundQueue.length; i++) {
+      const refund = esdtRefundQueue[i];
+      const refundDescription = `${refund.amount} ${refund.tokenTicker}`;
       
+      console.log(`[MASS-REFUND] Processing ESDT refund ${i + 1}/${esdtRefundQueue.length}: ${refundDescription} to ${refund.username} (${refund.wallet})`);
+      await reportProgress(`${refundDescription} to ${refund.username}`, refund);
+
       try {
-        if (refund.type === 'ESDT') {
-          // Process ESDT token refund
-          // Get token decimals
-          const storedDecimals = await getStoredTokenDecimals(guildId, refund.tokenTicker);
-          if (storedDecimals === null) {
-            throw new Error(`Token metadata missing for ${refund.tokenTicker}`);
-          }
-          
-          // Resolve token identifier from ticker/identifier BEFORE transfer
-          const tokenIdentifier = await resolveTokenIdentifier(guildId, refund.tokenTicker);
-          
-          // Validate identifier format
-          const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
-          if (!esdtIdentifierRegex.test(tokenIdentifier)) {
-            throw new Error(`Invalid token identifier for refund: "${refund.tokenTicker}" -> "${tokenIdentifier}". Must be full identifier format.`);
-          }
-          
-          // Perform blockchain transfer
-          const transferResult = await transferESDTFromCommunityFund(
-            refund.wallet,
+        const storedDecimals = await getStoredTokenDecimals(guildId, refund.tokenTicker);
+        if (storedDecimals === null) {
+          throw new Error(`Token metadata missing for ${refund.tokenTicker}`);
+        }
+
+        const tokenIdentifier = await resolveTokenIdentifier(guildId, refund.tokenTicker);
+        const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+        if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+          throw new Error(`Invalid token identifier for refund: "${refund.tokenTicker}" -> "${tokenIdentifier}". Must be full identifier format.`);
+        }
+
+        const transferResult = await transferESDTFromCommunityFund(
+          refund.wallet,
+          tokenIdentifier,
+          refund.amount,
+          communityFundProject,
+          guildId
+        );
+
+        if (transferResult.success && transferResult.txHash) {
+          const deductResult = await virtualAccounts.deductFundsFromAccount(
+            guildId,
+            refund.userId,
             tokenIdentifier,
             refund.amount,
-            communityFundProject,
-            guildId
+            'mass_refund',
+            `Mass refund - server deletion`
           );
-          
-          if (transferResult.success && transferResult.txHash) {
-            // Deduct from virtual account (using identifier)
-            const deductResult = await virtualAccounts.deductFundsFromAccount(
-              guildId,
-              refund.userId,
-              tokenIdentifier,
-              refund.amount,
-              'mass_refund',
-              `Mass refund - server deletion`
-            );
-            
-            if (deductResult.success) {
-              successfulRefunds++;
-              results.push({
-                type: 'ESDT',
-                userId: refund.userId,
-                username: refund.username,
-                wallet: refund.wallet,
-                tokenTicker: refund.tokenTicker,
-                amount: refund.amount,
-                txHash: transferResult.txHash,
-                success: true
-              });
-              console.log(`[MASS-REFUND] ✅ Success: ${refund.amount} ${refund.tokenTicker} refunded to ${refund.username} (tx: ${transferResult.txHash})`);
-            } else {
-              failedRefunds++;
-              results.push({
-                type: 'ESDT',
-                userId: refund.userId,
-                username: refund.username,
-                wallet: refund.wallet,
-                tokenTicker: refund.tokenTicker,
-                amount: refund.amount,
-                error: `Failed to update virtual account: ${deductResult.error}`,
-                success: false
-              });
-              console.error(`[MASS-REFUND] ❌ Failed: Could not update virtual account for ${refund.username}`);
-            }
+
+          if (deductResult.success) {
+            successfulRefunds++;
+            results.push({
+              type: 'ESDT',
+              userId: refund.userId,
+              username: refund.username,
+              wallet: refund.wallet,
+              tokenTicker: refund.tokenTicker,
+              amount: refund.amount,
+              txHash: transferResult.txHash,
+              success: true
+            });
+            console.log(`[MASS-REFUND] ✅ Success: ${refund.amount} ${refund.tokenTicker} refunded to ${refund.username} (tx: ${transferResult.txHash})`);
           } else {
             failedRefunds++;
             results.push({
@@ -1130,112 +1231,215 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
               wallet: refund.wallet,
               tokenTicker: refund.tokenTicker,
               amount: refund.amount,
-              error: transferResult.errorMessage || 'Transaction failed',
+              error: `Failed to update virtual account: ${deductResult.error}`,
               success: false
             });
-            console.error(`[MASS-REFUND] ❌ Failed: Transaction failed for ${refund.username} - ${transferResult.errorMessage || 'Unknown error'}`);
+            console.error(`[MASS-REFUND] ❌ Failed: Could not update virtual account for ${refund.username}`);
           }
-        } else if (refund.type === 'NFT') {
-          // Process NFT/SFT refund
-          const dbVirtualAccountsNFT = require('./db/virtual-accounts-nft');
-          
-          // Construct full token identifier (includes nonce)
-          // Use identifier from refund if it's already full format, otherwise construct from identifier and nonce
-          const fullTokenIdentifier = refund.identifier && refund.identifier.includes('-') && refund.identifier.split('-').length >= 3
-            ? refund.identifier
-            : `${refund.identifier || refund.collection}-${(refund.nonce || 0).toString().padStart(4, '0')}`;
-          
-          // Perform blockchain transfer
-          const transferResult = await transferNFTFromCommunityFund(
-            refund.wallet,
-            fullTokenIdentifier, // Full identifier includes nonce
-            communityFundProject,
-            guildId,
-            refund.amount,
-            refund.tokenType
-          );
-          
-          if (transferResult.success && transferResult.txHash) {
-            // Remove NFT/SFT from virtual account
-            try {
-              await dbVirtualAccountsNFT.removeNFTFromAccount(
-                guildId,
-                refund.userId,
-                refund.collection,
-                refund.nonce,
-                refund.amount
-              );
-              
-              successfulRefunds++;
-              results.push({
-                type: 'NFT',
-                userId: refund.userId,
-                username: refund.username,
-                wallet: refund.wallet,
-                collection: refund.collection,
-                identifier: refund.identifier,
-                nonce: refund.nonce,
-                amount: refund.amount,
-                tokenType: refund.tokenType,
-                nftName: refund.nftName,
-                txHash: transferResult.txHash,
-                success: true
-              });
-              console.log(`[MASS-REFUND] ✅ Success: ${refund.amount}x ${refund.tokenType} ${refund.identifier} refunded to ${refund.username} (tx: ${transferResult.txHash})`);
-            } catch (removeError) {
-              failedRefunds++;
-              results.push({
-                type: 'NFT',
-                userId: refund.userId,
-                username: refund.username,
-                wallet: refund.wallet,
-                collection: refund.collection,
-                identifier: refund.identifier,
-                nonce: refund.nonce,
-                amount: refund.amount,
-                tokenType: refund.tokenType,
-                error: `Failed to update virtual account: ${removeError.message}`,
-                success: false
-              });
-              console.error(`[MASS-REFUND] ❌ Failed: Could not update virtual account for ${refund.username}: ${removeError.message}`);
-            }
-          } else {
-            failedRefunds++;
-            results.push({
-              type: 'NFT',
-              userId: refund.userId,
-              username: refund.username,
-              wallet: refund.wallet,
-              collection: refund.collection,
-              identifier: refund.identifier,
-              nonce: refund.nonce,
-              amount: refund.amount,
-              tokenType: refund.tokenType,
-              error: transferResult.errorMessage || 'Transaction failed',
-              success: false
-            });
-            console.error(`[MASS-REFUND] ❌ Failed: Transaction failed for ${refund.username} - ${transferResult.errorMessage || 'Unknown error'}`);
-          }
-        }
-        
-        // Small delay between transactions to avoid rate limiting
-        if (i < refundQueue.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
+        } else {
+          failedRefunds++;
+          results.push({
+            type: 'ESDT',
+            userId: refund.userId,
+            username: refund.username,
+            wallet: refund.wallet,
+            tokenTicker: refund.tokenTicker,
+            amount: refund.amount,
+            error: transferResult.errorMessage || 'Transaction failed',
+            success: false
+          });
+          console.error(`[MASS-REFUND] ❌ Failed: Transaction failed for ${refund.username} - ${transferResult.errorMessage || 'Unknown error'}`);
         }
       } catch (error) {
         failedRefunds++;
-        const errorResult = refund.type === 'ESDT' 
-          ? {
-              type: 'ESDT',
-              userId: refund.userId,
-              username: refund.username,
-              wallet: refund.wallet,
-              tokenTicker: refund.tokenTicker,
-              amount: refund.amount,
-              error: error.message,
-              success: false
+        results.push({
+          type: 'ESDT',
+          userId: refund.userId,
+          username: refund.username,
+          wallet: refund.wallet,
+          tokenTicker: refund.tokenTicker,
+          amount: refund.amount,
+          error: error.message,
+          success: false
+        });
+        console.error(`[MASS-REFUND] ❌ Error processing ESDT refund for ${refund.username}:`, error.message);
+      }
+
+      if (i < esdtRefundQueue.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+
+    const processIndividualNftRefund = async (refund) => {
+      const refundDescription = `${refund.amount}x ${refund.tokenType} ${refund.identifier || refund.collection}`;
+      console.log(`[MASS-REFUND] Processing ${refund.tokenType} refund: ${refundDescription} to ${refund.username} (${refund.wallet})`);
+      await reportProgress(`${refundDescription} to ${refund.username}`, refund);
+
+      const fullTokenIdentifier = buildNftFullTokenIdentifier(refund);
+      const transferResult = await transferNFTFromCommunityFund(
+        refund.wallet,
+        fullTokenIdentifier,
+        communityFundProject,
+        guildId,
+        refund.amount,
+        refund.tokenType
+      );
+
+      if (transferResult.success && transferResult.txHash) {
+        try {
+          await dbVirtualAccountsNFT.removeNFTFromAccount(
+            guildId,
+            refund.userId,
+            refund.collection,
+            refund.nonce,
+            refund.amount
+          );
+
+          successfulRefunds++;
+          results.push({
+            type: 'NFT',
+            userId: refund.userId,
+            username: refund.username,
+            wallet: refund.wallet,
+            collection: refund.collection,
+            identifier: refund.identifier,
+            nonce: refund.nonce,
+            amount: refund.amount,
+            tokenType: refund.tokenType,
+            nftName: refund.nftName,
+            txHash: transferResult.txHash,
+            success: true
+          });
+          console.log(`[MASS-REFUND] ✅ Success: ${refundDescription} refunded to ${refund.username} (tx: ${transferResult.txHash})`);
+        } catch (removeError) {
+          failedRefunds++;
+          results.push({
+            type: 'NFT',
+            userId: refund.userId,
+            username: refund.username,
+            wallet: refund.wallet,
+            collection: refund.collection,
+            identifier: refund.identifier,
+            nonce: refund.nonce,
+            amount: refund.amount,
+            tokenType: refund.tokenType,
+            error: `Failed to update virtual account: ${removeError.message}`,
+            success: false
+          });
+          console.error(`[MASS-REFUND] ❌ Failed: Could not update virtual account for ${refund.username}: ${removeError.message}`);
+        }
+      } else {
+        failedRefunds++;
+        results.push({
+          type: 'NFT',
+          userId: refund.userId,
+          username: refund.username,
+          wallet: refund.wallet,
+          collection: refund.collection,
+          identifier: refund.identifier,
+          nonce: refund.nonce,
+          amount: refund.amount,
+          tokenType: refund.tokenType,
+          error: transferResult.errorMessage || 'Transaction failed',
+          success: false
+        });
+        console.error(`[MASS-REFUND] ❌ Failed: Transaction failed for ${refund.username} - ${transferResult.errorMessage || 'Unknown error'}`);
+      }
+    };
+
+    if (!project || !project.walletPem) {
+      throw new Error(`Community Fund project "${communityFundProject}" is missing wallet configuration`);
+    }
+
+    for (const [, userRefundData] of nftBulkRefundsByUser) {
+      const { userId, username, wallet, nfts } = userRefundData;
+
+      for (let batchStart = 0; batchStart < nfts.length; batchStart += NFT_BULK_TRANSFER_LIMIT) {
+        const batch = nfts.slice(batchStart, batchStart + NFT_BULK_TRANSFER_LIMIT);
+        const batchDescription = `${batch.length} NFT(s) bulk transfer to ${username}`;
+        console.log(`[MASS-REFUND] Processing bulk NFT refund: ${batchDescription} (${wallet})`);
+
+        try {
+          const tokenIdentifiers = batch.map(buildNftFullTokenIdentifier);
+          const transferResult = await transferMultipleNFTs(
+            wallet,
+            tokenIdentifiers,
+            project.walletPem,
+            API_BASE_URL,
+            API_TOKEN
+          );
+
+          if (transferResult.success && transferResult.txHash) {
+            for (const refund of batch) {
+              const itemDescription = `${refund.nftName || refund.identifier || refund.collection} to ${username}`;
+              try {
+                await dbVirtualAccountsNFT.removeNFTFromAccount(
+                  guildId,
+                  refund.userId,
+                  refund.collection,
+                  refund.nonce,
+                  1
+                );
+                successfulRefunds++;
+                results.push({
+                  type: 'NFT',
+                  userId: refund.userId,
+                  username: refund.username,
+                  wallet: refund.wallet,
+                  collection: refund.collection,
+                  identifier: refund.identifier,
+                  nonce: refund.nonce,
+                  amount: 1,
+                  tokenType: refund.tokenType,
+                  nftName: refund.nftName,
+                  txHash: transferResult.txHash,
+                  success: true
+                });
+                await reportProgress(itemDescription, refund);
+              } catch (removeError) {
+                failedRefunds++;
+                results.push({
+                  type: 'NFT',
+                  userId: refund.userId,
+                  username: refund.username,
+                  wallet: refund.wallet,
+                  collection: refund.collection,
+                  identifier: refund.identifier,
+                  nonce: refund.nonce,
+                  amount: 1,
+                  tokenType: refund.tokenType,
+                  error: `Failed to update virtual account: ${removeError.message}`,
+                  success: false
+                });
+                await reportProgress(`${itemDescription} (failed)`, refund);
+                console.error(`[MASS-REFUND] ❌ Failed: Could not update virtual account for ${refund.username}: ${removeError.message}`);
+              }
             }
-          : {
+            console.log(`[MASS-REFUND] ✅ Success: Bulk NFT refund of ${batch.length} item(s) to ${username} (tx: ${transferResult.txHash})`);
+          } else {
+            for (const refund of batch) {
+              failedRefunds++;
+              results.push({
+                type: 'NFT',
+                userId: refund.userId,
+                username: refund.username,
+                wallet: refund.wallet,
+                collection: refund.collection,
+                identifier: refund.identifier,
+                nonce: refund.nonce,
+                amount: 1,
+                tokenType: refund.tokenType,
+                error: transferResult.errorMessage || 'Bulk transaction failed',
+                success: false
+              });
+              await reportProgress(`${refund.nftName || refund.identifier || refund.collection} to ${username} (failed)`, refund);
+            }
+            console.error(`[MASS-REFUND] ❌ Failed: Bulk NFT transaction failed for ${username} - ${transferResult.errorMessage || 'Unknown error'}`);
+          }
+        } catch (error) {
+          for (const refund of batch) {
+            failedRefunds++;
+            results.push({
               type: 'NFT',
               userId: refund.userId,
               username: refund.username,
@@ -1243,22 +1447,56 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
               collection: refund.collection,
               identifier: refund.identifier,
               nonce: refund.nonce,
-              amount: refund.amount,
+              amount: 1,
               tokenType: refund.tokenType,
               error: error.message,
               success: false
-            };
-        results.push(errorResult);
-        console.error(`[MASS-REFUND] ❌ Error processing refund for ${refund.username}:`, error.message);
+            });
+            await reportProgress(`${refund.nftName || refund.identifier || refund.collection} to ${username} (failed)`, refund);
+          }
+          console.error(`[MASS-REFUND] ❌ Error processing bulk NFT refund for ${username}:`, error.message);
+        }
+
+        if (batchStart + NFT_BULK_TRANSFER_LIMIT < nfts.length) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
       }
     }
-    
-    console.log(`[MASS-REFUND] Completed: ${successfulRefunds} successful, ${failedRefunds} failed out of ${refundQueue.length} total`);
-    
+
+    for (let i = 0; i < sftRefundQueue.length; i++) {
+      const refund = sftRefundQueue[i];
+      try {
+        await processIndividualNftRefund(refund);
+      } catch (error) {
+        failedRefunds++;
+        results.push({
+          type: 'NFT',
+          userId: refund.userId,
+          username: refund.username,
+          wallet: refund.wallet,
+          collection: refund.collection,
+          identifier: refund.identifier,
+          nonce: refund.nonce,
+          amount: refund.amount,
+          tokenType: refund.tokenType,
+          error: error.message,
+          success: false
+        });
+        console.error(`[MASS-REFUND] ❌ Error processing SFT refund for ${refund.username}:`, error.message);
+      }
+
+      if (i < sftRefundQueue.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+
+    console.log(`[MASS-REFUND] Completed: ${successfulRefunds} successful, ${failedRefunds} failed out of ${totalRefundItems} item(s) across ${txCounts.totalTransactions} transaction(s)`);
+
     return {
       success: failedRefunds === 0,
       totalAccounts: accountsWithBalances.length,
-      totalRefunds: refundQueue.length,
+      totalRefunds: totalRefundItems,
+      totalTransactions: txCounts.totalTransactions,
       successfulRefunds: successfulRefunds,
       failedRefunds: failedRefunds,
       results: results
@@ -6037,32 +6275,27 @@ client.on('interactionCreate', async (interaction) => {
         const accountsWithBalances = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
         
         if (accountsWithBalances.length > 0) {
-          // Calculate total balances and transaction count (ESDT + NFT/SFT)
-          let totalRefunds = 0;
+          const txCounts = calculateMassWithdrawTransactionCount(accountsWithBalances);
           const balanceSummary = {};
-          let nftCount = 0;
-          
+          let nftItemCount = 0;
+
           for (const account of accountsWithBalances) {
-            // Count ESDT token refunds
             for (const [token, balance] of Object.entries(account.balances || {})) {
-              totalRefunds++;
-              if (!balanceSummary[token]) {
-                balanceSummary[token] = new BigNumber(0);
+              if (new BigNumber(balance || '0').isGreaterThan(0)) {
+                if (!balanceSummary[token]) {
+                  balanceSummary[token] = new BigNumber(0);
+                }
+                balanceSummary[token] = balanceSummary[token].plus(new BigNumber(balance));
               }
-              balanceSummary[token] = balanceSummary[token].plus(new BigNumber(balance));
             }
-            
-            // Count NFT/SFT refunds
+
             if (account.nftBalances && account.nftBalances.length > 0) {
-              for (const nft of account.nftBalances) {
-                totalRefunds++;
-                nftCount++;
-              }
+              nftItemCount += account.nftBalances.length;
             }
           }
 
-          // Check Community Fund balances (totalRefunds transfers needed - includes NFT/SFT)
-          const balanceCheck = await checkCommunityFundBalances(guildId, totalRefunds);
+          // Check Community Fund balances using bulk NFT transaction estimates
+          const balanceCheck = await checkCommunityFundBalances(guildId, txCounts.totalTransactions);
           if (!balanceCheck.sufficient) {
             const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/delete-project');
             await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
@@ -6073,10 +6306,13 @@ client.on('interactionCreate', async (interaction) => {
             .map(([token, amount]) => `${amount.toString()} ${token}`)
             .join(', ');
           
-          const nftSummaryText = nftCount > 0 ? `\nNFT/SFT tokens: **${nftCount}**` : '';
+          const nftSummaryText = nftItemCount > 0
+            ? `\nNFT/SFT items: **${nftItemCount}** (${formatMassWithdrawTransactionSummary(txCounts, { includeItemCounts: false })})`
+            : '';
+          const txSummaryText = formatMassWithdrawTransactionSummary(txCounts);
 
           await interaction.editReply({ 
-            content: `🔄 **Initiating Mass Refund...**\n\nThis project is set as the Community Fund and there are **${accountsWithBalances.length}** accounts with balances.\nTotal refunds to process: **${totalRefunds}** (${totalRefunds - nftCount} ESDT tokens${nftCount > 0 ? ` + ${nftCount} NFT/SFT tokens` : ''})\nESDT amounts: ${balanceSummaryText || 'None'}${nftSummaryText}\n\nProcessing refunds one by one. This may take several minutes...`, 
+            content: `🔄 **Initiating Mass Refund...**\n\nThis project is set as the Community Fund and there are **${accountsWithBalances.length}** accounts with balances.\nEstimated on-chain transactions: **${txCounts.totalTransactions}** (${txSummaryText})\nRefund items: **${txCounts.esdtTransactionCount + nftItemCount}** (${txCounts.esdtTransactionCount} ESDT token balance(s)${nftItemCount > 0 ? ` + ${nftItemCount} NFT/SFT item(s)` : ''})\nESDT amounts: ${balanceSummaryText || 'None'}${nftSummaryText}\n\nProcessing refunds now. This may take several minutes...`, 
             flags: [MessageFlags.Ephemeral] 
           });
 
@@ -6271,32 +6507,27 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
-        // Calculate total balances and transaction count (ESDT + NFT/SFT)
-        let totalRefunds = 0;
+        const txCounts = calculateMassWithdrawTransactionCount(accountsWithBalances);
         const balanceSummary = {};
-        let nftCount = 0;
-        
+        let nftItemCount = 0;
+
         for (const account of accountsWithBalances) {
-          // Count ESDT token refunds
           for (const [token, balance] of Object.entries(account.balances || {})) {
-            totalRefunds++;
-            if (!balanceSummary[token]) {
-              balanceSummary[token] = new BigNumber(0);
+            if (new BigNumber(balance || '0').isGreaterThan(0)) {
+              if (!balanceSummary[token]) {
+                balanceSummary[token] = new BigNumber(0);
+              }
+              balanceSummary[token] = balanceSummary[token].plus(new BigNumber(balance));
             }
-            balanceSummary[token] = balanceSummary[token].plus(new BigNumber(balance));
           }
-          
-          // Count NFT/SFT refunds
+
           if (account.nftBalances && account.nftBalances.length > 0) {
-            for (const nft of account.nftBalances) {
-              totalRefunds++;
-              nftCount++;
-            }
+            nftItemCount += account.nftBalances.length;
           }
         }
 
-        // Check Community Fund balances (totalRefunds transfers needed)
-        const balanceCheck = await checkCommunityFundBalances(guildId, totalRefunds);
+        // Check Community Fund balances using bulk NFT transaction estimates
+        const balanceCheck = await checkCommunityFundBalances(guildId, txCounts.totalTransactions);
         if (!balanceCheck.sufficient) {
           const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/delete-all-server-data');
           await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
@@ -6308,10 +6539,13 @@ client.on('interactionCreate', async (interaction) => {
           .map(([token, amount]) => `${amount.toString()} ${token}`)
           .join(', ');
         
-        const nftSummaryText = nftCount > 0 ? `\nNFT/SFT tokens: **${nftCount}**` : '';
+        const nftSummaryText = nftItemCount > 0
+          ? `\nNFT/SFT items: **${nftItemCount}** (${formatMassWithdrawTransactionSummary(txCounts, { includeItemCounts: false })})`
+          : '';
+        const txSummaryText = formatMassWithdrawTransactionSummary(txCounts);
 
         await interaction.editReply({ 
-          content: `🔄 **Initiating Mass Refund...**\n\nFound **${accountsWithBalances.length}** accounts with balances.\nTotal refunds to process: **${totalRefunds}** (${totalRefunds - nftCount} ESDT tokens${nftCount > 0 ? ` + ${nftCount} NFT/SFT tokens` : ''})\nESDT amounts: ${balanceSummaryText || 'None'}${nftSummaryText}\n\nProcessing refunds one by one. This may take several minutes...`, 
+          content: `🔄 **Initiating Mass Refund...**\n\nFound **${accountsWithBalances.length}** accounts with balances.\nEstimated on-chain transactions: **${txCounts.totalTransactions}** (${txSummaryText})\nRefund items: **${txCounts.esdtTransactionCount + nftItemCount}** (${txCounts.esdtTransactionCount} ESDT token balance(s)${nftItemCount > 0 ? ` + ${nftItemCount} NFT/SFT item(s)` : ''})\nESDT amounts: ${balanceSummaryText || 'None'}${nftSummaryText}\n\nProcessing refunds now. This may take several minutes...`, 
           flags: [MessageFlags.Ephemeral] 
         });
 
@@ -10755,43 +10989,26 @@ client.on('interactionCreate', async (interaction) => {
       const guildId = interaction.guildId;
       const numberOfTransfers = interaction.options.getInteger('transfers') || 1;
       
-      // Calculate total transactions needed for mass withdraws (ESDT + NFT/SFT)
+      // Calculate total on-chain transactions for mass withdraws (ESDT + bulk NFT batches + SFT)
       const accountsWithBalances = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
-      let totalMassWithdrawTransactions = 0;
-      let esdtTransactionCount = 0;
-      let nftTransactionCount = 0;
-      
-      for (const account of accountsWithBalances) {
-        // Count ESDT token transactions
-        for (const [token, balance] of Object.entries(account.balances || {})) {
-          const balanceBN = new BigNumber(balance || '0');
-          if (balanceBN.isGreaterThan(0)) {
-            totalMassWithdrawTransactions++;
-            esdtTransactionCount++;
-          }
-        }
-        
-        // Count NFT/SFT transactions
-        if (account.nftBalances && account.nftBalances.length > 0) {
-          for (const nft of account.nftBalances) {
-            totalMassWithdrawTransactions++;
-            nftTransactionCount++;
-          }
-        }
-      }
+      const txCounts = calculateMassWithdrawTransactionCount(accountsWithBalances);
       
       // Check Community Fund balances for specified number of transfers
       const balanceCheck = await checkCommunityFundBalances(guildId, numberOfTransfers);
       
       // Also check balances for ALL mass withdraw transactions
       let massWithdrawBalanceCheck = null;
-      if (totalMassWithdrawTransactions > 0) {
-        massWithdrawBalanceCheck = await checkCommunityFundBalances(guildId, totalMassWithdrawTransactions);
+      if (txCounts.totalTransactions > 0) {
+        massWithdrawBalanceCheck = await checkCommunityFundBalances(guildId, txCounts.totalTransactions);
       }
+      
+      const massWithdrawSummary = txCounts.totalTransactions > 0
+        ? `\n\n📊 **Mass Withdraw Analysis:**\n• Estimated on-chain transactions: **${txCounts.totalTransactions}**\n• Breakdown: ${formatMassWithdrawTransactionSummary(txCounts)}\n• Refund items: **${txCounts.esdtTransactionCount + txCounts.nftItemCount + txCounts.sftItemCount}** (${txCounts.esdtTransactionCount} ESDT + ${txCounts.nftItemCount} NFT + ${txCounts.sftItemCount} SFT)\n• Accounts with balances: **${accountsWithBalances.length}**`
+        : '';
       
       const embed = new EmbedBuilder()
         .setTitle(balanceCheck.sufficient ? '✅ Community Fund Balances Sufficient' : '❌ Community Fund Balances Insufficient')
-        .setDescription(`Balance check for **${numberOfTransfers}** transfer(s)${totalMassWithdrawTransactions > 0 ? `\n\n📊 **Mass Withdraw Analysis:**\n• Total transactions needed: **${totalMassWithdrawTransactions}** (${esdtTransactionCount} ESDT + ${nftTransactionCount} NFT/SFT)\n• Accounts with balances: **${accountsWithBalances.length}**` : ''}`)
+        .setDescription(`Balance check for **${numberOfTransfers}** transfer(s)${massWithdrawSummary}`)
         .setColor(balanceCheck.sufficient ? 0x00FF00 : 0xFF0000)
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
@@ -10851,7 +11068,7 @@ client.on('interactionCreate', async (interaction) => {
       ];
       
       // Add mass withdraw analysis if there are balances
-      if (totalMassWithdrawTransactions > 0 && massWithdrawBalanceCheck) {
+      if (txCounts.totalTransactions > 0 && massWithdrawBalanceCheck) {
         const massRequiredEgld = parseFloat(massWithdrawBalanceCheck.requiredEgld || '0');
         const massRequiredReward = parseFloat(massWithdrawBalanceCheck.requiredReward || '0');
         const massEgldStatus = new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(massRequiredEgld)) ? '✅ Sufficient' : '❌ Insufficient';
@@ -10859,14 +11076,14 @@ client.on('interactionCreate', async (interaction) => {
         
         fields.push(
           { name: '━━━━━━━━━━━━━━━━━━━━', value: '**Mass Withdraw Analysis**', inline: false },
-          { name: '📊 Total Transactions Needed', value: `**${totalMassWithdrawTransactions}**\n• ${esdtTransactionCount} ESDT tokens\n• ${nftTransactionCount} NFT/SFT tokens`, inline: true },
+          { name: '📊 Estimated On-Chain Transactions', value: `**${txCounts.totalTransactions}**\n${formatMassWithdrawTransactionSummary(txCounts)}`, inline: true },
           { name: '💰 Required EGLD (All)', value: `${massRequiredEgld} EGLD`, inline: true },
           { name: '✅ EGLD Status (All)', value: massEgldStatus, inline: true },
           { name: '💵 Required REWARD (All)', value: `${formatReward(Math.ceil(massRequiredReward * 100) / 100)} REWARD`, inline: true },
           { name: '✅ REWARD Status (All)', value: massRewardStatus, inline: true },
           { name: '📈 Max Transactions Possible', value: `**${maxTransactionsPossible}** transactions\n• Limited by: ${maxTransactionsByEGLD < maxTransactionsByREWARD ? 'EGLD' : 'REWARD'}`, inline: true }
         );
-      } else if (totalMassWithdrawTransactions === 0) {
+      } else if (txCounts.totalTransactions === 0) {
         fields.push(
           { name: '📊 Mass Withdraw Status', value: '✅ No virtual account balances found\nNo mass withdraws needed.', inline: false }
         );
@@ -11494,7 +11711,7 @@ client.on('interactionCreate', async (interaction) => {
       // Check Community Fund balances (1 transfer for withdraw)
       const balanceCheck = await checkCommunityFundBalances(guildId, 1);
       if (!balanceCheck.sufficient) {
-        const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/withdraw');
+        const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/withdraw-esdt');
         await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
         return;
       }
@@ -13904,14 +14121,33 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       const updates = {};
+      let topupWei = null;
+      let topupHuman = null;
       
-      // Handle topup
+      // Validate top-up amount and owner balance (deduction happens after other validations pass)
       const topup = interaction.options.getString('topup_staking_pool');
       if (topup) {
+        const topupBN = new BigNumber(topup);
+        if (topupBN.isNaN() || topupBN.isLessThanOrEqualTo(0)) {
+          await interaction.editReply({ content: '❌ Top-up amount must be a positive number.', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
+
         const tokenDecimals = pool.rewardTokenDecimals || 18;
-        const topupWei = new BigNumber(topup).multipliedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(0);
-        const newSupply = new BigNumber(pool.currentSupplyWei).plus(new BigNumber(topupWei)).toString();
-        updates.currentSupplyWei = newSupply;
+        topupHuman = topupBN.toString();
+        topupWei = topupBN.multipliedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(0);
+
+        const userBalance = await virtualAccounts.getUserBalance(guildId, userId, pool.rewardTokenIdentifier);
+        const balanceBN = new BigNumber(userBalance || '0');
+        const rewardTokenTicker = pool.rewardTokenTicker || pool.rewardTokenIdentifier.split('-')[0];
+
+        if (balanceBN.isLessThan(topupBN)) {
+          await interaction.editReply({
+            content: `❌ **Insufficient balance for pool top-up!**\n\nYou need **${topupBN.minus(balanceBN).toString()} ${rewardTokenTicker}** more in your virtual account.`,
+            flags: [MessageFlags.Ephemeral]
+          });
+          return;
+        }
       }
       
       // Handle reward change
@@ -14002,6 +14238,29 @@ client.on('interactionCreate', async (interaction) => {
         updates.traitFilters = null;
       }
       
+      // Apply top-up deduction before updating pool supply
+      if (topupWei) {
+        const rewardTokenTicker = pool.rewardTokenTicker || pool.rewardTokenIdentifier.split('-')[0];
+        const deductResult = await virtualAccounts.deductFundsFromAccount(
+          guildId,
+          userId,
+          pool.rewardTokenIdentifier,
+          topupHuman,
+          `Staking pool top-up (${topupHuman} ${rewardTokenTicker})`
+        );
+
+        if (!deductResult.success) {
+          await interaction.editReply({
+            content: `❌ **Pool top-up failed!**\n\n${deductResult.error || 'Could not deduct funds from your virtual account.'}`,
+            flags: [MessageFlags.Ephemeral]
+          });
+          return;
+        }
+
+        updates.currentSupplyWei = new BigNumber(pool.currentSupplyWei).plus(new BigNumber(topupWei)).toString();
+        console.log(`[STAKING] Deducted pool top-up: ${topupHuman} ${rewardTokenTicker} from user ${userId} for pool ${poolId}`);
+      }
+
       // Apply updates
       if (Object.keys(updates).length === 0) {
         await interaction.editReply({ content: '❌ No updates specified.', flags: [MessageFlags.Ephemeral] });
@@ -14084,7 +14343,13 @@ client.on('interactionCreate', async (interaction) => {
       // Update embed
       await updateStakingPoolEmbed(guildId, poolId);
       
-      await interaction.editReply({ content: '✅ Staking pool updated successfully!', flags: [MessageFlags.Ephemeral] });
+      let successMessage = '✅ Staking pool updated successfully!';
+      if (topupHuman) {
+        const rewardTokenTicker = pool.rewardTokenTicker || pool.rewardTokenIdentifier.split('-')[0];
+        successMessage += `\n\n💵 **Top-up applied:** ${topupHuman} ${rewardTokenTicker} deducted from your virtual account and added to pool supply.`;
+      }
+
+      await interaction.editReply({ content: successMessage, flags: [MessageFlags.Ephemeral] });
       
     } catch (error) {
       console.error('[STAKING] Error updating staking pool:', error);
