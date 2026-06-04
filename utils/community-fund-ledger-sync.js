@@ -253,9 +253,40 @@ async function aggregateVirtualAccountEsdtBalances(guildId) {
   return aggregateVirtualAccountEsdtBalancesHuman(guildId);
 }
 
+/**
+ * LIVE/PROCESSING lottery prize pools (authoritative locked amount shown on lottery embeds).
+ * Ticket purchases increment prize_pool_wei; house-funded seeds do too — summing tickets misses the seed.
+ */
+async function aggregateLiveLotteryPrizePoolsWei(guildId) {
+  const totals = new Map();
+
+  const { data, error } = await supabase
+    .from('lotteries')
+    .select('prize_pool_wei, token_identifier, status')
+    .eq('guild_id', guildId)
+    .in('status', ['LIVE', 'PROCESSING']);
+
+  if (error) throw error;
+
+  for (const row of data || []) {
+    if (!row.token_identifier || !row.prize_pool_wei) continue;
+    const poolWei = new BigNumber(row.prize_pool_wei || '0');
+    if (poolWei.isZero()) continue;
+    addToMap(totals, normalizeTokenLookupKey(row.token_identifier), poolWei.toString());
+  }
+
+  return totals;
+}
+
 /** ESDT removed from VA but still owed (RPS, football, lottery, staking pool supply). */
 async function aggregateEscrowEsdtWei(guildId, metadata, indexes, onChainDecimalsByKey, getTokenDecimals) {
   const weiTotals = new Map();
+  const breakdown = {
+    lottery: new Map(),
+    football: new Map(),
+    rps: new Map(),
+    staking: new Map()
+  };
 
   const { data: footballRows, error: footballError } = await supabase
     .from('football_bets')
@@ -269,19 +300,15 @@ async function aggregateEscrowEsdtWei(guildId, metadata, indexes, onChainDecimal
     const tokenData = row.token_data || {};
     const identifier = tokenData.identifier || tokenData.token;
     if (!identifier || !row.amount_wei) continue;
-    addToMap(weiTotals, normalizeTokenLookupKey(identifier), row.amount_wei);
+    const key = normalizeTokenLookupKey(identifier);
+    addToMap(weiTotals, key, row.amount_wei);
+    addToMap(breakdown.football, key, row.amount_wei);
   }
 
-  const { data: lotteryRows, error: lotteryError } = await supabase
-    .from('lottery_tickets')
-    .select('ticket_price_wei, token_identifier')
-    .eq('guild_id', guildId)
-    .eq('status', 'LIVE');
-
-  if (lotteryError) throw lotteryError;
-  for (const row of lotteryRows || []) {
-    if (!row.token_identifier || !row.ticket_price_wei) continue;
-    addToMap(weiTotals, normalizeTokenLookupKey(row.token_identifier), row.ticket_price_wei);
+  const lotteryPools = await aggregateLiveLotteryPrizePoolsWei(guildId);
+  for (const [token, amount] of lotteryPools) {
+    addToMap(weiTotals, token, amount);
+    addToMap(breakdown.lottery, token, amount);
   }
 
   const { data: stakingRows, error: stakingError } = await supabase
@@ -293,7 +320,9 @@ async function aggregateEscrowEsdtWei(guildId, metadata, indexes, onChainDecimal
   if (stakingError) throw stakingError;
   for (const row of stakingRows || []) {
     if (!row.reward_token_identifier || !row.current_supply_wei) continue;
-    addToMap(weiTotals, normalizeTokenLookupKey(row.reward_token_identifier), row.current_supply_wei);
+    const key = normalizeTokenLookupKey(row.reward_token_identifier);
+    addToMap(weiTotals, key, row.current_supply_wei);
+    addToMap(breakdown.staking, key, row.current_supply_wei);
   }
 
   const { data: rpsRows, error: rpsError } = await supabase
@@ -320,9 +349,10 @@ async function aggregateEscrowEsdtWei(guildId, metadata, indexes, onChainDecimal
   );
   for (const [token, amount] of rpsWei.weiMap) {
     addToMap(weiTotals, token, amount);
+    addToMap(breakdown.rps, token, amount);
   }
 
-  return { weiTotals, rpsUnresolved: rpsWei.unresolved };
+  return { weiTotals, rpsUnresolved: rpsWei.unresolved, breakdown };
 }
 
 async function aggregateLedgerNftBalances(guildId) {
@@ -561,6 +591,13 @@ async function syncCommunityFundLedger(guildId, options = {}) {
     ])
   ];
 
+  const escrowBreakdownLines = await formatEscrowBreakdownLines(
+    escrowResult.breakdown,
+    indexes,
+    onChainDecimalsByKey,
+    getTokenDecimals
+  );
+
   return {
     inSync,
     walletAddress,
@@ -574,8 +611,10 @@ async function syncCommunityFundLedger(guildId, options = {}) {
       missingDecimalsCount: esdtMismatchesEnriched.missingDecimalsCount + esdtMatchedEnriched.missingDecimalsCount,
       surplusCount,
       deficitCount,
-      liabilityNote: 'Ledger = VA totals (human→wei) + house PNL (wei) + escrow (RPS, football, lottery, staking). Auction bid reservations stay inside VA totals.',
-      unresolvedDecimals
+      liabilityNote: 'Ledger = VA totals (human→wei) + house PNL (wei) + escrow (lottery prize pools, RPS, football, staking). Lottery uses prize_pool_wei (includes house-seeded pools), not per-ticket sums.',
+      unresolvedDecimals,
+      escrowBreakdown: escrowResult.breakdown,
+      escrowBreakdownLines
     },
     nft: {
       matchedCount: nftComparison.matched.length,
@@ -598,6 +637,30 @@ function formatEsdtMismatchLine(m) {
 
 function formatEsdtMatchedLine(m) {
   return `• **${m.displayLabel}** — **${m.ledgerHuman}** ✓`;
+}
+
+async function formatEscrowBreakdownLines(breakdown, indexes, onChainDecimalsByKey, getTokenDecimals) {
+  const categoryLabels = {
+    lottery: 'Lottery prize pool',
+    football: 'Football bets',
+    rps: 'RPS stakes',
+    staking: 'Staking pool supply'
+  };
+  const lines = [];
+
+  for (const [category, label] of Object.entries(categoryLabels)) {
+    const map = breakdown?.[category];
+    if (!map || map.size === 0) continue;
+
+    for (const [tokenKey, weiAmount] of map) {
+      const meta = await resolveTokenMeta(tokenKey, indexes, onChainDecimalsByKey, getTokenDecimals);
+      const suffix = meta.ticker || '';
+      const human = formatHumanAmount(weiAmount.toString(), meta.decimals, { suffix });
+      lines.push(`• **${label}** — **${human}**`);
+    }
+  }
+
+  return lines;
 }
 
 /** Build Discord embed fields (human-readable ESDT amounts, 1024-char safe). */
@@ -633,6 +696,14 @@ function buildLedgerSyncMismatchFields(syncResult) {
     fields.push({
       name: '📐 Ledger formula',
       value: truncateEmbedField(esdt.liabilityNote),
+      inline: false
+    });
+  }
+
+  if (esdt.escrowBreakdownLines?.length > 0) {
+    fields.push({
+      name: '🔒 Activity escrow (in ledger)',
+      value: truncateEmbedField(esdt.escrowBreakdownLines.join('\n')),
       inline: false
     });
   }
@@ -697,6 +768,7 @@ module.exports = {
   aggregateVirtualAccountEsdtBalancesHuman,
   aggregateHousePnlByToken,
   aggregateEscrowEsdtWei,
+  aggregateLiveLotteryPrizePoolsWei,
   buildLedgerSyncMismatchFields,
   truncateEmbedField,
   formatHumanAmount,
