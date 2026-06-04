@@ -10925,8 +10925,8 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle(syncResult.inSync ? '✅ Ledger In Sync' : '❌ Ledger Mismatch Detected')
         .setDescription(
           syncResult.inSync
-            ? 'Virtual account + house ledger totals match Community Fund on-chain holdings (ESDT, NFT, and SFT). Amounts use **token_metadata** decimals (human-readable).'
-            : 'Ledger (VA + house) vs Community Fund wallet — amounts are **human-readable** using Supabase **token_metadata** decimals (comparison is done in atomic units). Surplus on wallet often means tokens not yet assigned to virtual accounts.'
+            ? 'Ledger liability (VA + house + activity escrow) matches Community Fund on-chain holdings. Amounts display using **token_metadata** decimals.'
+            : 'Ledger liability vs Community Fund wallet. VA balances are stored as **human** amounts in Supabase and converted to atomic for comparison; house PNL and escrow use **wei**. Surplus on wallet = tokens not yet allocated to any liability bucket.'
         )
         .setColor(syncResult.inSync ? 0x00FF00 : 0xFF0000)
         .setTimestamp()

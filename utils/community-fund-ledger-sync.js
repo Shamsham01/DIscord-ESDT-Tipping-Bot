@@ -152,6 +152,67 @@ function classifyEsdtMismatch(expectedWei, actualWei) {
   return 'amount';
 }
 
+function buildTickerToIdentifierMap(metadata) {
+  const tickerToIdentifier = {};
+  for (const row of Object.values(metadata || {})) {
+    if (!row?.ticker) continue;
+    const identifier = row.identifier || row.token_identifier;
+    if (identifier) {
+      tickerToIdentifier[normalizeTokenLookupKey(row.ticker)] = normalizeTokenLookupKey(identifier);
+    }
+  }
+  return tickerToIdentifier;
+}
+
+/** Same canonical key rules as /check-balance-esdt (merge ticker + full identifier). */
+function canonicalizeTokenKey(tokenKey, tickerToIdentifier) {
+  const key = normalizeTokenLookupKey(tokenKey);
+  if (key.includes('-') && key.split('-').length >= 2) {
+    return key;
+  }
+  return tickerToIdentifier[key] || key;
+}
+
+/** Merge balance map entries to canonical identifiers (values are human-readable). */
+function mergeHumanBalancesMap(balanceMap, metadata) {
+  const tickerToIdentifier = buildTickerToIdentifierMap(metadata);
+  const merged = new Map();
+
+  for (const [tokenKey, balance] of balanceMap) {
+    const canonical = canonicalizeTokenKey(tokenKey, tickerToIdentifier);
+    addToMap(merged, canonical, balance);
+  }
+  return merged;
+}
+
+function humanToAtomic(humanStr, decimals) {
+  if (decimals == null || Number.isNaN(Number(decimals))) {
+    return null;
+  }
+  return new BigNumber(humanStr || '0')
+    .multipliedBy(new BigNumber(10).pow(Number(decimals)))
+    .integerValue(BigNumber.ROUND_DOWN)
+    .toString();
+}
+
+/** Convert human-readable Supabase amounts to atomic (wei) for on-chain comparison. */
+async function convertHumanBalanceMapToWei(humanMap, indexes, onChainDecimalsByKey, getTokenDecimals) {
+  const weiMap = new Map();
+  const unresolved = [];
+
+  for (const [tokenKey, humanAmount] of humanMap) {
+    const meta = await resolveTokenMeta(tokenKey, indexes, onChainDecimalsByKey, getTokenDecimals);
+    const atomic = humanToAtomic(humanAmount.toString(), meta.decimals);
+    if (atomic == null) {
+      unresolved.push(tokenKey);
+      continue;
+    }
+    addToMap(weiMap, tokenKey, atomic);
+  }
+
+  return { weiMap, unresolved };
+}
+
 function aggregateHousePnlByToken(houseBalanceData) {
   const totals = new Map();
   const pnlFields = ['bettingPNL', 'auctionPNL', 'lotteryPNL', 'dropPNL'];
@@ -169,7 +230,8 @@ function aggregateHousePnlByToken(houseBalanceData) {
   return totals;
 }
 
-async function aggregateVirtualAccountEsdtBalances(guildId) {
+/** Sum all VA balances (human-readable, same unit as deposits/tips). */
+async function aggregateVirtualAccountEsdtBalancesHuman(guildId) {
   const { data, error } = await supabase
     .from('virtual_accounts')
     .select('balances')
@@ -184,6 +246,83 @@ async function aggregateVirtualAccountEsdtBalances(guildId) {
     }
   }
   return totals;
+}
+
+/** @deprecated Use aggregateVirtualAccountEsdtBalancesHuman — kept for exports/tests. */
+async function aggregateVirtualAccountEsdtBalances(guildId) {
+  return aggregateVirtualAccountEsdtBalancesHuman(guildId);
+}
+
+/** ESDT removed from VA but still owed (RPS, football, lottery, staking pool supply). */
+async function aggregateEscrowEsdtWei(guildId, metadata, indexes, onChainDecimalsByKey, getTokenDecimals) {
+  const weiTotals = new Map();
+
+  const { data: footballRows, error: footballError } = await supabase
+    .from('football_bets')
+    .select('amount_wei, token_data, status, prize_sent')
+    .eq('guild_id', guildId)
+    .eq('status', 'ACCEPTED');
+
+  if (footballError) throw footballError;
+  for (const row of footballRows || []) {
+    if (row.prize_sent) continue;
+    const tokenData = row.token_data || {};
+    const identifier = tokenData.identifier || tokenData.token;
+    if (!identifier || !row.amount_wei) continue;
+    addToMap(weiTotals, normalizeTokenLookupKey(identifier), row.amount_wei);
+  }
+
+  const { data: lotteryRows, error: lotteryError } = await supabase
+    .from('lottery_tickets')
+    .select('ticket_price_wei, token_identifier')
+    .eq('guild_id', guildId)
+    .eq('status', 'LIVE');
+
+  if (lotteryError) throw lotteryError;
+  for (const row of lotteryRows || []) {
+    if (!row.token_identifier || !row.ticket_price_wei) continue;
+    addToMap(weiTotals, normalizeTokenLookupKey(row.token_identifier), row.ticket_price_wei);
+  }
+
+  const { data: stakingRows, error: stakingError } = await supabase
+    .from('staking_pools')
+    .select('current_supply_wei, reward_token_identifier')
+    .eq('guild_id', guildId)
+    .eq('status', 'ACTIVE');
+
+  if (stakingError) throw stakingError;
+  for (const row of stakingRows || []) {
+    if (!row.reward_token_identifier || !row.current_supply_wei) continue;
+    addToMap(weiTotals, normalizeTokenLookupKey(row.reward_token_identifier), row.current_supply_wei);
+  }
+
+  const { data: rpsRows, error: rpsError } = await supabase
+    .from('rps_games')
+    .select('human_amount, token, status')
+    .eq('guild_id', guildId)
+    .in('status', ['waiting', 'active']);
+
+  if (rpsError) throw rpsError;
+  const rpsHuman = new Map();
+  for (const row of rpsRows || []) {
+    if (!row.human_amount || !row.token) continue;
+    const key = normalizeTokenLookupKey(row.token);
+    const multiplier = row.status === 'active' ? 2 : 1;
+    const stake = new BigNumber(row.human_amount).multipliedBy(multiplier).toString();
+    addToMap(rpsHuman, key, stake);
+  }
+
+  const rpsWei = await convertHumanBalanceMapToWei(
+    mergeHumanBalancesMap(rpsHuman, metadata),
+    indexes,
+    onChainDecimalsByKey,
+    getTokenDecimals
+  );
+  for (const [token, amount] of rpsWei.weiMap) {
+    addToMap(weiTotals, token, amount);
+  }
+
+  return { weiTotals, rpsUnresolved: rpsWei.unresolved };
 }
 
 async function aggregateLedgerNftBalances(guildId) {
@@ -333,8 +472,9 @@ async function enrichEsdtRows(rows, indexes, onChainDecimalsByKey, getTokenDecim
 }
 
 /**
- * Compare guild virtual-account ledger (ESDT + house + NFT/SFT) with Community Fund on-chain holdings.
- * ESDT amounts are compared in atomic units (same as VA storage); display uses token_metadata decimals.
+ * Compare guild liability ledger with Community Fund on-chain holdings.
+ * VA balances are human-readable in Supabase; house PNL and wallet API use atomic (wei).
+ * Escrow includes RPS stakes, open football bets, LIVE lottery tickets, and staking pool supply.
  */
 async function syncCommunityFundLedger(guildId, options = {}) {
   const { walletAddress, getAllHouseBalances, fetchAllNFTs, getTokenDecimals } = options;
@@ -345,19 +485,44 @@ async function syncCommunityFundLedger(guildId, options = {}) {
   const metadata = await dbServerData.getTokenMetadata(guildId);
   const indexes = buildMetadataIndexes(metadata);
 
-  const vaEsdt = await aggregateVirtualAccountEsdtBalances(guildId);
+  const { totals: onChainEsdt, decimalsByKey: onChainDecimalsByKey } = await fetchWalletEsdtBalances(walletAddress);
+
+  const vaHumanRaw = await aggregateVirtualAccountEsdtBalancesHuman(guildId);
+  const vaHuman = mergeHumanBalancesMap(vaHumanRaw, metadata);
+  const vaWeiResult = await convertHumanBalanceMapToWei(
+    vaHuman,
+    indexes,
+    onChainDecimalsByKey,
+    getTokenDecimals
+  );
+
   const houseData = await getAllHouseBalances(guildId);
-  const houseEsdt = aggregateHousePnlByToken(houseData);
+  const houseEsdtRaw = aggregateHousePnlByToken(houseData);
+  const tickerToIdentifier = buildTickerToIdentifierMap(metadata);
+  const houseEsdt = new Map();
+  for (const [token, amount] of houseEsdtRaw) {
+    addToMap(houseEsdt, canonicalizeTokenKey(token, tickerToIdentifier), amount);
+  }
+
+  const escrowResult = await aggregateEscrowEsdtWei(
+    guildId,
+    metadata,
+    indexes,
+    onChainDecimalsByKey,
+    getTokenDecimals
+  );
 
   const ledgerEsdt = new Map();
-  for (const [token, amount] of vaEsdt) {
-    addToMap(ledgerEsdt, token, amount.toString());
+  for (const [token, amount] of vaWeiResult.weiMap) {
+    addToMap(ledgerEsdt, token, amount);
   }
   for (const [token, amount] of houseEsdt) {
     addToMap(ledgerEsdt, token, amount.toString());
   }
+  for (const [token, amount] of escrowResult.weiTotals) {
+    addToMap(ledgerEsdt, token, amount);
+  }
 
-  const { totals: onChainEsdt, decimalsByKey: onChainDecimalsByKey } = await fetchWalletEsdtBalances(walletAddress);
   const ledgerEsdtAligned = alignLedgerEsdtKeysToOnChain(ledgerEsdt, onChainEsdt);
   const ledgerNft = await aggregateLedgerNftBalances(guildId);
   const onChainNft = await fetchWalletNftBalances(walletAddress, fetchAllNFTs);
@@ -389,6 +554,13 @@ async function syncCommunityFundLedger(guildId, options = {}) {
   const surplusCount = esdtMismatches.filter((m) => m.kind === 'surplus').length;
   const deficitCount = esdtMismatches.filter((m) => m.kind === 'deficit').length;
 
+  const unresolvedDecimals = [
+    ...new Set([
+      ...vaWeiResult.unresolved,
+      ...escrowResult.rpsUnresolved
+    ])
+  ];
+
   return {
     inSync,
     walletAddress,
@@ -401,7 +573,9 @@ async function syncCommunityFundLedger(guildId, options = {}) {
       onChainTokenCount: onChainEsdt.size,
       missingDecimalsCount: esdtMismatchesEnriched.missingDecimalsCount + esdtMatchedEnriched.missingDecimalsCount,
       surplusCount,
-      deficitCount
+      deficitCount,
+      liabilityNote: 'Ledger = VA totals (human→wei) + house PNL (wei) + escrow (RPS, football, lottery, staking). Auction bid reservations stay inside VA totals.',
+      unresolvedDecimals
     },
     nft: {
       matchedCount: nftComparison.matched.length,
@@ -446,13 +620,35 @@ function buildLedgerSyncMismatchFields(syncResult) {
       fields.push({
         name: '📋 ESDT mismatch types',
         value: truncateEmbedField(
-          `• **${esdt.surplusCount}** surplus on wallet (not allocated to VA + house)\n` +
+          `• **${esdt.surplusCount}** surplus on wallet (not in ledger liability)\n` +
           `• **${esdt.deficitCount}** shortfall (ledger > wallet)\n` +
-          `• **${esdt.mismatchCount - esdt.surplusCount - esdt.deficitCount}** amount drift (same liability, different balance)`
+          `• **${esdt.mismatchCount - esdt.surplusCount - esdt.deficitCount}** amount drift`
         ),
         inline: false
       });
     }
+  }
+
+  if (esdt.liabilityNote) {
+    fields.push({
+      name: '📐 Ledger formula',
+      value: truncateEmbedField(esdt.liabilityNote),
+      inline: false
+    });
+  }
+
+  if (esdt.unresolvedDecimals?.length > 0) {
+    const sample = esdt.unresolvedDecimals.slice(0, 8).join(', ');
+    const more = esdt.unresolvedDecimals.length > 8
+      ? ` (+${esdt.unresolvedDecimals.length - 8} more)`
+      : '';
+    fields.push({
+      name: '⚠️ Tokens skipped (no decimals)',
+      value: truncateEmbedField(
+        `${sample}${more}\nRun \`/update-token-metadata\` so these balances convert correctly.`
+      ),
+      inline: false
+    });
   }
 
   if (esdt.matchedCount > 0) {
@@ -498,8 +694,12 @@ module.exports = {
   DISCORD_EMBED_FIELD_MAX,
   syncCommunityFundLedger,
   aggregateVirtualAccountEsdtBalances,
+  aggregateVirtualAccountEsdtBalancesHuman,
   aggregateHousePnlByToken,
+  aggregateEscrowEsdtWei,
   buildLedgerSyncMismatchFields,
   truncateEmbedField,
-  formatHumanAmount
+  formatHumanAmount,
+  humanToAtomic,
+  mergeHumanBalancesMap
 };
