@@ -13,6 +13,8 @@ Below is a list of all available commands for the ESDT Tipping Bot, grouped by c
 - **/set-community-fund** — Admins: Set a project wallet as the Community Fund for P2P tips and games. Optionally include QR code URL for game embeds.
 - **/list-wallets** — Admins: List all registered user wallets in the server.
 - **/list-projects** — List all registered project wallets.
+- **/check-community-fund-balance** — Admins: Check Community Fund EGLD for on-chain fees and mass-withdraw estimates.
+- **/sync-community-fund-ledger** — Admins: Compare virtual account + house ledger vs Community Fund on-chain (ESDT, NFT, SFT).
 
 ---
 
