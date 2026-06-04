@@ -10917,15 +10917,16 @@ client.on('interactionCreate', async (interaction) => {
       const syncResult = await syncCommunityFundLedger(guildId, {
         walletAddress: communityFundProject.walletAddress,
         getAllHouseBalances,
-        fetchAllNFTs
+        fetchAllNFTs,
+        getTokenDecimals
       });
 
       const embed = new EmbedBuilder()
         .setTitle(syncResult.inSync ? '✅ Ledger In Sync' : '❌ Ledger Mismatch Detected')
         .setDescription(
           syncResult.inSync
-            ? 'Virtual account ledger totals match Community Fund on-chain holdings (ESDT, NFT, and SFT).'
-            : 'On-chain Community Fund holdings do not match virtual account + house ledger totals. Review mismatches below.'
+            ? 'Virtual account + house ledger totals match Community Fund on-chain holdings (ESDT, NFT, and SFT). Amounts use **token_metadata** decimals (human-readable).'
+            : 'Ledger (VA + house) vs Community Fund wallet — amounts are **human-readable** using Supabase **token_metadata** decimals (comparison is done in atomic units). Surplus on wallet often means tokens not yet assigned to virtual accounts.'
         )
         .setColor(syncResult.inSync ? 0x00FF00 : 0xFF0000)
         .setTimestamp()
@@ -10946,16 +10947,9 @@ client.on('interactionCreate', async (interaction) => {
           }
         );
 
-      if (!syncResult.inSync) {
-        const mismatchFields = buildLedgerSyncMismatchFields(
-          syncResult.esdt.mismatches,
-          syncResult.nft.mismatches,
-          syncResult.esdt.mismatchCount,
-          syncResult.nft.mismatchCount
-        );
-        if (mismatchFields.length > 0) {
-          embed.addFields(mismatchFields);
-        }
+      const detailFields = buildLedgerSyncMismatchFields(syncResult);
+      if (detailFields.length > 0) {
+        embed.addFields(detailFields);
       }
 
       try {
