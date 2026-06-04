@@ -22,7 +22,7 @@ Understanding the difference between these two wallet types is crucial for prope
   * `/send-nft` - Send NFTs to users
   * `/create-auction` - Create NFT auctions
 * **On-Chain Transfers**: All operations result in **on-chain blockchain transfers**
-* **Usage Fee**: MakeX API `usageFee` ($0.03 in REWARD) is charged for each transfer
+* **Fees**: Only **EGLD** is required for blockchain gas (MakeX usage fees are **waived** for whitelisted project wallets)
 * **Security**: Admins have full control - can delete projects, manage funds, etc.
 
 > ⚠️ **Important**: Project Wallets are controlled by admins. Deletion commands result in mass withdrawals to user wallets for safety.
@@ -37,8 +37,8 @@ Understanding the difference between these two wallet types is crucial for prope
   * `/challenge-rps` - RPS game challenges
   * `/withdraw-esdt` - User withdrawals
 * **Virtual Account Operations**: Most operations happen **inside the Community Fund** - bot just updates balance records
-* **Usage Fee**: **NO usageFee** for Virtual Account operations (tips, RPS, NFT transfers)
-* **Usage Fee Exception**: `/withdraw-esdt` and `/house-withdraw` to Project Wallets **DO charge usageFee** (on-chain transfers)
+* **Fees**: Virtual Account operations (tips, RPS, in-VA NFT transfers) do **not** use on-chain gas
+* **On-chain withdrawals**: `/withdraw-esdt`, `/withdraw-nft`, `/house-withdraw`, etc. require **EGLD** in the Community Fund (or project wallet) for blockchain fees only
 * **Security**: Cannot be deleted by admins - protects user funds. All deletion commands result in mass withdrawals to user wallets
 
 #### Key Differences Summary
@@ -47,7 +47,7 @@ Understanding the difference between these two wallet types is crucial for prope
 | -------------- | -------------------------------------------- | ------------------------------------------------------- |
 | **Control**    | Admin-controlled                             | Bot-managed (not admin-controlled)                      |
 | **Operations** | On-chain transfers                           | Virtual Account (balance updates)                       |
-| **Usage Fee**  | ✅ Charged ($0.03 REWARD)                     | ❌ Not charged (except withdrawals)                      |
+| **On-chain fees** | EGLD only (usage fees waived)            | EGLD only for withdrawals / mass refund                  |
 | **Commands**   | `/send-esdt`, `/send-nft`, `/create-auction` | `/tip-virtual-esdt`, `/challenge-rps`, `/withdraw-esdt` |
 | **Deletion**   | Admin can delete                             | Protected - mass withdrawal only                        |
 
@@ -68,9 +68,7 @@ Understanding the difference between these two wallet types is crucial for prope
    * Wallet address
    * Seed phrase (24 words) - you can use this to log in to xPortal or Extension wallet
    * PEM file content - save this to a secure location (e.g., `WalletKey.pem`)
-5. **Top up the wallet** with:
-   * **EGLD** - Required for blockchain transaction fees
-   * **REWARD tokens** - Required for MakeX API usage fees ($0.03 per transaction)
+5. **Top up the wallet** with **EGLD** for blockchain transaction fees (at least **0.08 EGLD** recommended per wallet).
 6. The bot will confirm registration and show your project in `/list-projects`.
 
 **Example:**

@@ -29,12 +29,11 @@ description: >-
 
 ### 💡 Wallet Funding Requirements
 
-* **Both Project and Community Fund wallets must hold:**
-  * **EGLD** (for blockchain transaction fees)
-  * **REWARD** (for MakeX API usageFee)
+* **Project and Community Fund wallets must hold enough EGLD** for blockchain transaction fees (minimum **0.08 EGLD** enforced before each on-chain transfer).
+* **MakeX usage fees are waived** for whitelisted bot wallets — you do **not** need REWARD for API usage fees.
 
 {% hint style="danger" %}
-If any of these are missing, on-chain transfers and withdraws will not work! Before every on-chain transfer, bot will check if there is sufficient amount of EGLD and REWARD to cover transfer fees.
+If EGLD is too low, on-chain transfers and withdraws are blocked. The bot checks EGLD before every on-chain operation and admins can use `/check-community-fund-balance` to preview requirements.
 {% endhint %}
 
 ***
@@ -46,47 +45,26 @@ If any of these are missing, on-chain transfers and withdraws will not work! Bef
 
 ***
 
-### 💸 Usage Fee (usageFee)
+### 💸 Fees: EGLD vs Virtual Account operations
 
-**Important**: Usage fees depend on which wallet type is used:
+**MakeX usage fees** (`usageFee` in REWARD) are **waived** for whitelisted Project and Community Fund wallets. You only need **EGLD** for on-chain gas.
 
 #### Project Wallets (Admin-Controlled)
 
-* **All operations charge usageFee**: Every transfer from Project Wallets incurs a **$0.03 fee in REWARD tokens**
-* **Commands that charge**:
-  * `/send-esdt` - Sending tokens
-  * `/send-nft` - Sending NFTs and SFTs
-  * `/house-withdraw` - Withdrawing from House Balance to Project Wallets
-* This is because all operations result in **on-chain blockchain transfers**
+* On-chain commands (`/send-esdt`, `/send-nft`, `/house-withdraw`, etc.) require **EGLD** in the project wallet (≥ **0.08 EGLD** minimum).
 
-#### Community Fund (Virtual Account Operations)
+#### Community Fund
 
-* **Most operations are FREE**: Virtual Account operations do **NOT charge usageFee**
-* **Commands that are FREE**:
-  * `/tip-virtual-esdt` - User-to-user tips
-  * `/tip-virtual-nft` - User-to-user NFT/SFT transfers
-  * `/challenge-rps` - RPS game challenges
-* **Commands that DO charge usageFee**:
-  * `/withdraw-esdt` - Withdrawing ESDT to user wallets (on-chain transfer)
-  * `/withdraw-nft` - Withdrawing NFT/SFT to user wallets (on-chain transfer)
+* **In-ledger (no gas)**: `/tip-virtual-esdt`, `/tip-virtual-nft`, `/challenge-rps`, and similar — balance updates only.
+* **On-chain (EGLD required)**: `/withdraw-esdt`, `/withdraw-nft`, `/withdraw-nft-bulk`, cross-guild transfers, swaps, mass refunds — EGLD is checked before each transaction.
 
-**Why the difference?**
-
-* Project Wallet operations = On-chain transfers = UsageFee charged
-* Community Fund Virtual Account operations = Balance updates only = No UsageFee
-* Withdrawals = On-chain transfers = UsageFee charged
-
-**Buy REWARD:** Buy REWARD on any DEX or in xPortal.&#x20;
-
-{% hint style="success" %}
-**Pro Tip:** We strongly recommend investing in [HODL Token Club](https://hodltokenclub.gitbook.io/hodl-token-club-litepaper-v2/) DeFi and farming REWARD on [OneDEX](https://swap.onedex.app/pool) instead of buying directly. That way projects using bot will generate sufficient amount of REWARDs without need of buying.
-{% endhint %}
+**Ledger health:** Admins can run `/sync-community-fund-ledger` to verify that Community Fund on-chain holdings match virtual account + house ledger totals (ESDT, NFT, SFT).
 
 ***
 
 ### ✅ Best Practices
 
-* Always ensure Community Fund or Project Wallet has enough EGLD, REWARD, before initiating on-chain transfers.
+* Always ensure Community Fund or Project Wallet has enough **EGLD** before initiating on-chain transfers.
 * Use `/list-projects` to check server wallets.
 * Always check list of supported tokens using `/show-community-fund-address` before top-up.
 

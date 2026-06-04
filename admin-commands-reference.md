@@ -24,7 +24,7 @@ Register a new project with auto-generated wallet.
 /register-project MainWallet REWARD-cf6eac,EGLD https://logo.png
 ```
 
-**Note**: The bot automatically generates a new MultiversX wallet for your project. Wallet details (address, seed phrase, PEM file) will be displayed in the command response and sent to you via DM. Make sure to save the PEM file and seed phrase securely. You must top up the wallet with EGLD (for fees) and REWARD tokens (for usage fees) before using it.
+**Note**: The bot automatically generates a new MultiversX wallet for your project. Wallet details (address, seed phrase, PEM file) will be displayed in the command response and sent to you via DM. Make sure to save the PEM file and seed phrase securely. Top up the wallet with **EGLD** for blockchain fees (at least **0.08 EGLD** recommended). MakeX usage fees are waived for whitelisted project and Community Fund wallets.
 
 ### `/update-project`
 Update project settings.
@@ -364,18 +364,28 @@ List registered wallets.
 - `public` (Optional): Show publicly or privately
 
 ### `/check-community-fund-balance`
-Check Community Fund balances for withdrawals.
+Check Community Fund **EGLD** for on-chain fees and mass-withdraw estimates.
 
 **Usage**: `/check-community-fund-balance [transfers]`
 
 **Parameters**:
-- `transfers` (Optional): Number of transfers to check (default: 1)
+- `transfers` (Optional): Number of transfers to check (default: 1). Also estimates EGLD for a full mass refund/withdraw if virtual accounts hold balances.
 
 Shows:
-- EGLD balance
-- REWARD balance
-- Required amounts for withdrawals
-- Balance breakdown
+- EGLD balance vs required EGLD (minimum **0.08 EGLD**, or higher for many on-chain transactions)
+- Mass-withdraw transaction breakdown (ESDT + NFT bulk + SFT)
+- Community Fund wallet address
+- Note that MakeX usage fees are waived (whitelist)
+
+### `/sync-community-fund-ledger`
+Compare virtual account ledger totals vs Community Fund **on-chain** holdings (MultiversX API).
+
+**Usage**: `/sync-community-fund-ledger`
+
+Shows:
+- Whether ESDT, NFT, and SFT ledger totals match the Community Fund wallet
+- Mismatch samples (on-chain vs VA + house balances) when out of sync
+- Use this to detect ledger or deposit/withdraw issues
 
 ### `/update-usernames`
 Update Discord usernames for all virtual accounts.

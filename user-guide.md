@@ -209,8 +209,7 @@ This transfers tokens from your Virtual Account to your registered wallet addres
 **Note**: Withdrawals require:
 
 * Community Fund to have the tokens available
-* EGLD for gas fees
-* REWARD for usage fees
+* Sufficient **EGLD** in the Community Fund for blockchain fees (admins maintain this; usage fees are waived)
 
 ### Transferring to House Balance
 
@@ -456,8 +455,8 @@ When buying lottery tickets, the ticket price is automatically deducted from you
 
 **Can't withdraw?**
 
-* Check Community Fund balance (admins can check this)
-* Ensure Community Fund has required tokens
+* Ask an admin to run `/check-community-fund-balance` (EGLD for fees) or `/sync-community-fund-ledger` (ledger vs wallet)
+* Ensure Community Fund has required tokens and EGLD
 * Verify your wallet is registered correctly
 
 ***

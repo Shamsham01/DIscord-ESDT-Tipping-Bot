@@ -948,7 +948,7 @@ const commands = [
     },
     {
         name: 'check-community-fund-balance',
-        description: 'Check Community Fund balances. Calculates mass withdraw costs (Admin only)',
+        description: 'Check Community Fund EGLD for on-chain fees and mass withdraw estimates (Admin only)',
         options: [
             {
                 name: 'transfers',
@@ -958,6 +958,12 @@ const commands = [
                 min_value: 1
             }
         ],
+        default_member_permissions: null,
+    },
+    {
+        name: 'sync-community-fund-ledger',
+        description: 'Compare virtual account ledger vs Community Fund on-chain (ESDT, NFT, SFT) (Admin only)',
+        options: [],
         default_member_permissions: null,
     },
     {

@@ -123,12 +123,12 @@ After registering the project, the bot will:
 
 ### Step 3: Top Up Your Wallet
 
-**Before using the wallet, you must top it up with:**
+**Before using the wallet, top it up with EGLD:**
 
-* **EGLD** - Required for blockchain transaction fees
-* **REWARD tokens** - Required for MakeX API usage fees ($0.03 per transaction)
+* **EGLD** - Required for blockchain transaction fees (at least **0.08 EGLD** recommended)
+* MakeX **usage fees are waived** for whitelisted bot wallets — REWARD is not required for API fees
 
-Without these, the bot cannot send tokens, NFTs, or SFTs from this wallet.
+Without sufficient EGLD, the bot cannot complete on-chain sends or withdrawals from this wallet.
 
 ### Step 4: Verify Project Registration
 

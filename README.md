@@ -150,14 +150,15 @@ Stay connected across servers:
 
 Each Project and Community wallet needs:
 
-* **EGLD** - For blockchain transaction fees
-* **REWARD tokens** - For MakeX API usage fees ($0.03 per on-chain transfer)
+* **EGLD** - For blockchain transaction fees (minimum **0.08 EGLD** recommended; checked before each on-chain transfer)
 * **Supported tokens** - The tokens you want to send/tip
 
-### **Usage Fees**
+### **Fees**
 
-* **Virtual Account Operations** - FREE (tips, games, NFT transfers within virtual accounts)
-* **On-Chain Transfers** - $0.03 in REWARD tokens (only for admin transfers and withdrawals)
+* **MakeX usage fees** - Waived for whitelisted Project and Community Fund wallets (no REWARD required for API fees)
+* **Virtual Account Operations** - No on-chain gas (tips, games, in-VA NFT transfers)
+* **On-Chain Transfers** - EGLD only (admin sends, user withdrawals, mass refunds)
+* **Ledger audit** - Admins: `/sync-community-fund-ledger` compares VA + house ledger vs on-chain Community Fund
 
 {% hint style="warning" %}
 **Important Security Note for Admins:** Bot will always create new, dedicated wallets for project registration. While PEM files are encrypted in the database, it's best practice to keep minimal funds in bot wallets and top up regularly.

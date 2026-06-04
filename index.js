@@ -117,6 +117,12 @@ const lotteryHelpers = require('./utils/lottery-helpers');
 const traitValidator = require('./utils/trait-validator');
 const collectionTraits = require('./utils/collection-traits');
 const { transferMultipleNFTs } = require('./multiversx-transfers-bulk-send');
+const {
+  ensureWalletEgldForOnChainTransfer,
+  WALLET_EGLD_MIN_BALANCE,
+  fetchWalletEgldBalanceHuman
+} = require('./utils/wallet-egld-guard');
+const { syncCommunityFundLedger } = require('./utils/community-fund-ledger-sync');
 
 const client = new Client({
   intents: [
@@ -456,6 +462,7 @@ async function waitForMultiversXTransactionTerminalOutcome(txHash) {
 const pendingSwapQuotes = new Map();
 
 const NFT_BULK_TRANSFER_LIMIT = 50;
+const EGLD_PER_TX = 0.00025;
 
 function isBulkTransferableNft(nft) {
   const tokenType = nft.tokenType || 'NFT';
@@ -557,53 +564,33 @@ async function createBalanceErrorEmbed(guildId, balanceCheck, commandName, optio
   }
 
   embed
-    .setTitle('❌ Insufficient Community Fund Balances')
-    .setDescription(`Cannot proceed with **${commandName}** due to insufficient balances in the Community Fund wallet.`);
-
-  // Format REWARD balances to 2 decimal places
-  const formatReward = (value) => {
-    const num = parseFloat(value || '0');
-    return isNaN(num) ? '0.00' : num.toFixed(2);
-  };
+    .setTitle('❌ Insufficient Community Fund EGLD')
+    .setDescription(
+      `Cannot proceed with **${commandName}** because the Community Fund wallet does not have enough EGLD for blockchain fees.\n\n` +
+      `Minimum required: **${WALLET_EGLD_MIN_BALANCE} EGLD**. Usage fees are waived; only EGLD is needed for on-chain transactions.`
+    );
 
   const numberOfTransfers = balanceCheck.numberOfTransfers || 1;
 
-  // Calculate totals and differences
-  const onChainReward = parseFloat(balanceCheck.rewardBalanceOnChain || '0');
-  const virtualAccountReward = parseFloat(balanceCheck.rewardBalanceVirtualAccount || '0');
-  const houseBalanceReward = parseFloat(balanceCheck.rewardBalanceHouseBalance || '0');
-  const totalInVirtualAccounts = virtualAccountReward + houseBalanceReward;
-  const difference = onChainReward - totalInVirtualAccounts;
-  const usageFeeReward = parseFloat(balanceCheck.requiredReward || '0');
-  const neededToWithdraw = Math.max(0, -difference) + Math.ceil(usageFeeReward * 100) / 100; // Round up usage fee
-
-  // Add detailed balance information for admin-facing commands
   embed.addFields([
     { name: '💰 EGLD Balance', value: `${balanceCheck.egldBalance} EGLD`, inline: true },
     { name: '📊 Required EGLD', value: `${balanceCheck.requiredEgld} EGLD`, inline: true },
     { name: '✅ EGLD Status', value: new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(balanceCheck.requiredEgld)) ? '✅ Sufficient' : '❌ Insufficient', inline: true },
-    { name: '💼 Total in Wallet (On-Chain)', value: `${formatReward(balanceCheck.rewardBalanceOnChain)} REWARD`, inline: false },
-    { name: '📦 REWARD Liability (VA + House)', value: `${formatReward(totalInVirtualAccounts)} REWARD\n• Virtual Accounts: ${formatReward(virtualAccountReward)}\n• House Balance: ${formatReward(houseBalanceReward)}`, inline: false },
-    { name: '📊 Difference', value: `${formatReward(difference)} REWARD`, inline: true },
-    { name: `💵 Usage Fee (${numberOfTransfers} transfer${numberOfTransfers === 1 ? '' : 's'})`, value: `${formatReward(Math.ceil(usageFeeReward * 100) / 100)} REWARD`, inline: true },
-    { name: '⚠️ Needed to Enable', value: `${formatReward(neededToWithdraw)} REWARD`, inline: true }
+    { name: 'ℹ️ Transfers checked', value: `${numberOfTransfers} on-chain transaction${numberOfTransfers === 1 ? '' : 's'}`, inline: true }
   ]);
 
-  // Add informational note about transferring REWARD
-  if (balanceCheck.walletAddress && neededToWithdraw > 0) {
+  if (balanceCheck.walletAddress) {
     embed.addFields({
-      name: 'ℹ️ How to Add REWARD',
-      value: `A REWARD transfer of **${formatReward(neededToWithdraw)} REWARD** to the Community Fund wallet address is required:\n\`${balanceCheck.walletAddress}\`\n\n⚠️ **Important:** Transfer must be made from a wallet that is **NOT** registered with this bot.\n\n💡 Ask admins to supply the required tokens to enable withdrawals.`,
+      name: '📍 Community Fund Wallet',
+      value: `\`${balanceCheck.walletAddress}\`\n\nTop up this wallet with **EGLD** from a wallet that is **not** registered with the bot.`,
       inline: false
     });
   }
 
-  // Add other errors (non-REWARD related, like EGLD issues)
-  const otherErrors = balanceCheck.errors?.filter(e => !e.includes('REWARD')) || [];
-  if (otherErrors.length > 0) {
+  if (balanceCheck.errors?.length > 0) {
     embed.addFields({
-      name: '⚠️ Other Issues',
-      value: otherErrors.map(e => `• ${e}`).join('\n'),
+      name: '⚠️ Details',
+      value: balanceCheck.errors.map(e => `• ${e}`).join('\n'),
       inline: false
     });
   }
@@ -624,269 +611,48 @@ async function createBalanceErrorEmbed(guildId, balanceCheck, commandName, optio
   return embed;
 }
 
-// Helper function to check Community Fund balances for withdrawals
-// Returns: { sufficient: boolean, egldBalance: string, rewardBalance: string, requiredEgld: string, requiredReward: string, errors: string[] }
+// Helper function to check Community Fund EGLD for on-chain withdrawals (usage fees waived via MakeX whitelist).
+// Returns: { sufficient, egldBalance, requiredEgld, walletAddress, numberOfTransfers, errors }
 async function checkCommunityFundBalances(guildId, numberOfTransfers = 1) {
   try {
     const errors = [];
-    
-    // Get Community Fund project
     const projects = await getProjects(guildId);
     const communityFundProjectName = getCommunityFundProjectName();
     const communityFundProject = projects[communityFundProjectName];
-    
+
     if (!communityFundProject || !communityFundProject.walletAddress) {
       return {
         sufficient: false,
         errors: ['Community Fund project not found or wallet address not configured.']
       };
     }
-    
+
     const walletAddress = communityFundProject.walletAddress;
-    
-    // Constants
-    const EGLD_DECIMALS = 18;
-    const EGLD_PER_TX = 0.00025; // Conservative estimate
-    const USAGE_FEE_USD = 0.03; // $0.03 per transfer
-    
-    // Calculate required amounts
-    const requiredEgld = EGLD_PER_TX * numberOfTransfers;
-    const requiredEgldWei = new BigNumber(requiredEgld).multipliedBy(new BigNumber(10).pow(EGLD_DECIMALS)).toString();
-    
-    // 1. Fetch EGLD balance
-    let egldBalanceWei = '0';
+    const requiredForTransfers = EGLD_PER_TX * numberOfTransfers;
+    const requiredEgld = Math.max(WALLET_EGLD_MIN_BALANCE, requiredForTransfers);
+
     let egldBalanceHuman = '0';
     try {
-      const egldResponse = await fetch(`https://api.multiversx.com/accounts/${walletAddress}`);
-      if (egldResponse.ok) {
-        const egldData = await egldResponse.json();
-        egldBalanceWei = egldData.balance || '0';
-        egldBalanceHuman = new BigNumber(egldBalanceWei).dividedBy(new BigNumber(10).pow(EGLD_DECIMALS)).toString();
-      } else {
-        errors.push(`Failed to fetch EGLD balance: ${egldResponse.status} ${egldResponse.statusText}`);
-      }
+      egldBalanceHuman = await fetchWalletEgldBalanceHuman(walletAddress);
     } catch (error) {
       errors.push(`Error fetching EGLD balance: ${error.message}`);
     }
-    
-    // 2. Fetch REWARD balance from API
-    const REWARD_IDENTIFIER = 'REWARD-cf6eac';
-    let rewardBalanceWei = '0';
-    let rewardBalanceHuman = '0';
-    let rewardPriceUsd = 0;
-    let rewardDecimals = 8;
-    let rewardFetchFailed = false;
-    try {
-      const rewardResponse = await fetch(`https://api.multiversx.com/accounts/${walletAddress}/tokens/${REWARD_IDENTIFIER}`);
-      if (rewardResponse.ok) {
-        const rewardData = await rewardResponse.json();
-        rewardBalanceWei = rewardData.balance || '0';
-        rewardDecimals = rewardData.decimals || 8;
-        rewardPriceUsd = rewardData.price || 0;
-        rewardBalanceHuman = new BigNumber(rewardBalanceWei).dividedBy(new BigNumber(10).pow(rewardDecimals)).toString();
-      } else {
-        // If REWARD token not found (404), balance is 0, but we still need to check price
-        if (rewardResponse.status === 404) {
-          rewardBalanceHuman = '0';
-          // Try to get price from token metadata API
-          try {
-            rewardPriceUsd = await getTokenPriceUsd(REWARD_IDENTIFIER);
-          } catch (priceError) {
-            console.error('[BALANCE-CHECK] Error fetching REWARD price:', priceError.message);
-          }
-        } else {
-          errors.push(`Failed to fetch REWARD balance: ${rewardResponse.status} ${rewardResponse.statusText}`);
-          rewardFetchFailed = true;
-        }
-      }
-    } catch (error) {
-      errors.push(`Error fetching REWARD balance: ${error.message}`);
-      rewardFetchFailed = true;
-    }
-    
-    // 3. Get Virtual Account REWARD balance from Supabase
-    // Sum ALL REWARD balances across ALL users in the guild (not just Community Fund wallet user)
-    let virtualAccountRewardBalance = '0';
-    try {
-      // Get all virtual accounts with balances for this guild
-      const allAccounts = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
-      
-      // Sum REWARD balances across all accounts
-      // Check both identifier (REWARD-cf6eac) and ticker (REWARD) for backward compatibility
-      const rewardTicker = REWARD_IDENTIFIER.split('-')[0]; // Extract "REWARD" from "REWARD-cf6eac"
-      let totalRewardBalance = new BigNumber('0');
-      
-      for (const account of allAccounts) {
-        const balances = account.balances || {};
-        let accountRewardBalance = new BigNumber('0');
-        
-        // Check for full identifier first (preferred) - case-insensitive match
-        for (const [tokenKey, balance] of Object.entries(balances)) {
-          if (tokenKey.toLowerCase() === REWARD_IDENTIFIER.toLowerCase()) {
-            accountRewardBalance = accountRewardBalance.plus(new BigNumber(balance || '0'));
-            break; // Found identifier match, use it and skip ticker check
-          }
-        }
-        
-        // If no identifier match found, check for ticker-only key (backward compatibility)
-        if (accountRewardBalance.isZero() && balances[rewardTicker]) {
-          accountRewardBalance = accountRewardBalance.plus(new BigNumber(balances[rewardTicker] || '0'));
-        }
-        
-        totalRewardBalance = totalRewardBalance.plus(accountRewardBalance);
-      }
-      
-      virtualAccountRewardBalance = totalRewardBalance.toString();
-      console.log(`[BALANCE-CHECK] Total Virtual Account REWARD balance across ${allAccounts.length} accounts: ${virtualAccountRewardBalance}`);
-    } catch (error) {
-      console.error('[BALANCE-CHECK] Error fetching Virtual Account REWARD balance:', error.message);
-      // Don't add to errors, as this is optional
-    }
-    
-    // 4. Get House Balance REWARD (betting + auction + lottery PNL)
-    // House balances represent funds locked in the house system and shouldn't be available for withdrawals
-    let houseBalanceRewardTotal = '0';
-    try {
-      const houseBalanceData = await getAllHouseBalances(guildId);
-      const rewardTicker = REWARD_IDENTIFIER.split('-')[0]; // Extract "REWARD" from "REWARD-cf6eac"
-      
-      // Aggregate house balances similar to house-balance command
-      const aggregatedBalances = {
-        bettingPNL: {},
-        auctionPNL: {},
-        lotteryPNL: {}
-      };
-      
-      // Aggregate PNL from all token records
-      for (const [tokenIdentifier, tokenData] of Object.entries(houseBalanceData || {})) {
-        // Merge betting PNL
-        if (tokenData.bettingPNL) {
-          for (const [token, amount] of Object.entries(tokenData.bettingPNL)) {
-            if (!aggregatedBalances.bettingPNL[token]) {
-              aggregatedBalances.bettingPNL[token] = '0';
-            }
-            const current = new BigNumber(aggregatedBalances.bettingPNL[token] || '0');
-            aggregatedBalances.bettingPNL[token] = current.plus(new BigNumber(amount || '0')).toString();
-          }
-        }
-        
-        // Merge auction PNL
-        if (tokenData.auctionPNL) {
-          for (const [token, amount] of Object.entries(tokenData.auctionPNL)) {
-            if (!aggregatedBalances.auctionPNL[token]) {
-              aggregatedBalances.auctionPNL[token] = '0';
-            }
-            const current = new BigNumber(aggregatedBalances.auctionPNL[token] || '0');
-            aggregatedBalances.auctionPNL[token] = current.plus(new BigNumber(amount || '0')).toString();
-          }
-        }
-        
-        // Merge lottery PNL
-        if (tokenData.lotteryPNL) {
-          for (const [token, amount] of Object.entries(tokenData.lotteryPNL)) {
-            if (!aggregatedBalances.lotteryPNL[token]) {
-              aggregatedBalances.lotteryPNL[token] = '0';
-            }
-            const current = new BigNumber(aggregatedBalances.lotteryPNL[token] || '0');
-            aggregatedBalances.lotteryPNL[token] = current.plus(new BigNumber(amount || '0')).toString();
-          }
-        }
-      }
-      
-      // Calculate total house balance for REWARD
-      // Check both identifier and ticker (for backward compatibility)
-      const bettingPNLId = aggregatedBalances.bettingPNL[REWARD_IDENTIFIER] || '0';
-      const bettingPNLTicker = aggregatedBalances.bettingPNL[rewardTicker] || '0';
-      const bettingPNL = new BigNumber(bettingPNLId).plus(new BigNumber(bettingPNLTicker));
-      
-      const auctionPNLId = aggregatedBalances.auctionPNL[REWARD_IDENTIFIER] || '0';
-      const auctionPNLTicker = aggregatedBalances.auctionPNL[rewardTicker] || '0';
-      const auctionPNL = new BigNumber(auctionPNLId).plus(new BigNumber(auctionPNLTicker));
-      
-      const lotteryPNLId = aggregatedBalances.lotteryPNL[REWARD_IDENTIFIER] || '0';
-      const lotteryPNLTicker = aggregatedBalances.lotteryPNL[rewardTicker] || '0';
-      const lotteryPNL = new BigNumber(lotteryPNLId).plus(new BigNumber(lotteryPNLTicker));
-      
-      // Sum all PNL (this is the total house balance)
-      const totalHousePNL = bettingPNL.plus(auctionPNL).plus(lotteryPNL);
-      
-      // Convert from wei to human-readable format
-      houseBalanceRewardTotal = totalHousePNL.dividedBy(new BigNumber(10).pow(rewardDecimals)).toString();
-      
-      console.log(`[BALANCE-CHECK] House Balance REWARD: ${houseBalanceRewardTotal} (Betting: ${bettingPNL.dividedBy(new BigNumber(10).pow(rewardDecimals)).toString()}, Auction: ${auctionPNL.dividedBy(new BigNumber(10).pow(rewardDecimals)).toString()}, Lottery: ${lotteryPNL.dividedBy(new BigNumber(10).pow(rewardDecimals)).toString()})`);
-    } catch (error) {
-      console.error('[BALANCE-CHECK] Error fetching House Balance REWARD:', error.message);
-      // Don't add to errors, continue with 0 house balance
-    }
-    
-    // 5. Calculate available REWARD (on-chain minus virtual account minus house balance)
-    const virtualAccountRewardBN = new BigNumber(virtualAccountRewardBalance || '0');
-    const houseBalanceRewardBN = new BigNumber(houseBalanceRewardTotal || '0');
-    const onChainRewardBN = new BigNumber(rewardBalanceHuman);
-    const availableRewardBN = onChainRewardBN.minus(virtualAccountRewardBN).minus(houseBalanceRewardBN);
-    // Ensure we don't return negative values
-    const availableRewardHuman = availableRewardBN.isGreaterThan(0) ? availableRewardBN.toString() : '0';
-    
-    // 6. Calculate required REWARD based on usage fee
-    let requiredRewardHuman = '0';
-    let rewardPriceAvailable = false;
-    
-    // Try to get REWARD price if not already fetched
-    if (rewardPriceUsd <= 0) {
-      try {
-        rewardPriceUsd = await getTokenPriceUsd(REWARD_IDENTIFIER);
-      } catch (priceError) {
-        console.error('[BALANCE-CHECK] Error fetching REWARD price:', priceError.message);
-      }
-    }
-    
-    if (rewardPriceUsd > 0) {
-      const requiredRewardUsd = USAGE_FEE_USD * numberOfTransfers;
-      requiredRewardHuman = new BigNumber(requiredRewardUsd).dividedBy(rewardPriceUsd).toString();
-      rewardPriceAvailable = true;
-    } else {
-      errors.push('REWARD token price not available, cannot calculate required amount. Transfer cannot proceed without REWARD price information.');
-    }
-    
-    // 7. Check if balances are sufficient
-    const egldSufficient = new BigNumber(egldBalanceWei).isGreaterThanOrEqualTo(new BigNumber(requiredEgldWei));
-    
-    // REWARD check: must have price available AND sufficient balance
-    // If price is not available or fetch failed, fail the check
-    let rewardSufficient = false;
-    if (rewardFetchFailed) {
-      // If REWARD balance fetch failed, we cannot verify balance - fail the check
-      rewardSufficient = false;
-      errors.push('REWARD balance check failed. Cannot verify if sufficient REWARD is available.');
-    } else if (!rewardPriceAvailable) {
-      // If price is not available, we cannot calculate required amount - fail the check
-      rewardSufficient = false;
-    } else {
-      // Normal check: compare available REWARD with required REWARD
-      rewardSufficient = new BigNumber(availableRewardHuman).isGreaterThanOrEqualTo(new BigNumber(requiredRewardHuman));
-    }
-    
+
+    const egldSufficient = new BigNumber(egldBalanceHuman).isGreaterThanOrEqualTo(requiredEgld);
     if (!egldSufficient) {
-      errors.push(`Insufficient EGLD: Have ${egldBalanceHuman} EGLD, need ${requiredEgld} EGLD (${numberOfTransfers} transfer(s) × ${EGLD_PER_TX} EGLD)`);
+      errors.push(
+        `Insufficient EGLD: Have ${egldBalanceHuman} EGLD, need at least ${requiredEgld} EGLD ` +
+        `(minimum ${WALLET_EGLD_MIN_BALANCE} EGLD; ${numberOfTransfers} transfer(s) × ${EGLD_PER_TX} EGLD estimated).`
+      );
     }
-    
-    if (!rewardSufficient && rewardPriceAvailable && !rewardFetchFailed) {
-      errors.push(`Insufficient REWARD: Have ${availableRewardHuman} REWARD available (${rewardBalanceHuman} on-chain - ${virtualAccountRewardBalance} in Virtual Account - ${houseBalanceRewardTotal} in House Balance), need ${requiredRewardHuman} REWARD (${numberOfTransfers} transfer(s) × $${USAGE_FEE_USD} ÷ $${rewardPriceUsd.toFixed(8)} per REWARD)`);
-    }
-    
+
     return {
-      sufficient: egldSufficient && rewardSufficient,
-      walletAddress: walletAddress,
+      sufficient: egldSufficient,
+      walletAddress,
       egldBalance: egldBalanceHuman,
-      rewardBalanceOnChain: rewardBalanceHuman,
-      rewardBalanceVirtualAccount: virtualAccountRewardBalance,
-      rewardBalanceHouseBalance: houseBalanceRewardTotal,
-      rewardBalanceAvailable: availableRewardHuman,
       requiredEgld: requiredEgld.toString(),
-      requiredReward: requiredRewardHuman,
-      rewardPriceUsd: rewardPriceUsd,
-      numberOfTransfers: numberOfTransfers,
-      errors: errors
+      numberOfTransfers,
+      errors
     };
   } catch (error) {
     console.error('[BALANCE-CHECK] Error checking Community Fund balances:', error);
@@ -1366,7 +1132,8 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
             tokenIdentifiers,
             project.walletPem,
             API_BASE_URL,
-            API_TOKEN
+            API_TOKEN,
+            project.walletAddress
           );
 
           if (transferResult.success && transferResult.txHash) {
@@ -2523,6 +2290,11 @@ async function transferESDT(recipientWallet, tokenIdentifier, amount, projectNam
       throw new Error(`Project "${projectName}" has no wallet configured.`);
     }
 
+    if (!project.walletAddress) {
+      throw new Error(`Project "${projectName}" has no wallet address configured.`);
+    }
+    await ensureWalletEgldForOnChainTransfer(project.walletAddress);
+
     // Extract ticker from identifier for supported tokens check
     const tokenTicker = tokenIdentifier.split('-')[0];
     
@@ -2703,6 +2475,11 @@ async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, a
       console.error(`[WITHDRAW] Project "${projectName}" has empty PEM. Wallet address: ${project.walletAddress}`);
       throw new Error(`Project "${projectName}" has no wallet configured or PEM is empty. Please reconfigure the Community Fund using /set-community-fund.`);
     }
+
+    if (!project.walletAddress) {
+      throw new Error(`Project "${projectName}" has no wallet address configured.`);
+    }
+    await ensureWalletEgldForOnChainTransfer(project.walletAddress);
     
     // Validate PEM format
     if (!project.walletPem.includes('BEGIN') || !project.walletPem.includes('END')) {
@@ -2873,6 +2650,11 @@ async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, gu
     if (!project.walletPem) {
       throw new Error(`Project "${projectName}" has no wallet configured.`);
     }
+
+    if (!project.walletAddress) {
+      throw new Error(`Project "${projectName}" has no wallet address configured.`);
+    }
+    await ensureWalletEgldForOnChainTransfer(project.walletAddress);
     
     // Restore PEM line breaks if needed
     let pemToSend = project.walletPem;
@@ -3025,6 +2807,11 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
       console.error(`[WITHDRAW-SFT] Project "${projectName}" has empty PEM. Wallet address: ${project.walletAddress}`);
       throw new Error(`Project "${projectName}" has no wallet configured or PEM is empty. Please reconfigure the Community Fund using /set-community-fund.`);
     }
+
+    if (!project.walletAddress) {
+      throw new Error(`Project "${projectName}" has no wallet address configured.`);
+    }
+    await ensureWalletEgldForOnChainTransfer(project.walletAddress);
     
     // Validate PEM format
     if (!project.walletPem.includes('BEGIN') || !project.walletPem.includes('END')) {
@@ -3188,6 +2975,12 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
 // Auto-detects SFT vs NFT based on token_type from database (bulletproof detection)
 async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier, projectName, guildId, amount = 1, tokenType = null) {
   try {
+    const projectsForEgld = await getProjects(guildId);
+    const projectForEgld = projectsForEgld[projectName];
+    if (projectForEgld?.walletAddress) {
+      await ensureWalletEgldForOnChainTransfer(projectForEgld.walletAddress);
+    }
+
     // Convert amount to number
     const amountNum = typeof amount === 'string' ? parseInt(amount, 10) : Number(amount);
     const finalAmount = isNaN(amountNum) || amountNum <= 0 ? 1 : amountNum;
@@ -3723,7 +3516,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: '📝 PEM File Content', value: `\`\`\`\n${wallet.pem}\n\`\`\``, inline: false },
           { name: '📝 Supported Tokens', value: supportedTokens.join(', '), inline: false },
           { name: '🔐 Security', value: 'Wallet was generated by the bot using MultiversX SDK. PEM is encrypted in the database.', inline: false },
-          { name: '⚠️ Important Instructions', value: '**Check your DMs for complete wallet details and PEM file!**\n\n**Next Steps:**\n1. Save the PEM file content to a secure location (e.g., `WalletKey.pem`)\n2. You can use the Seed Phrase to log in to xPortal or Extension wallet\n3. **Top up the wallet with:**\n   - **EGLD** for blockchain transaction fees\n   - **REWARD** tokens for MakeX API usage fees', inline: false }
+          { name: '⚠️ Important Instructions', value: '**Check your DMs for complete wallet details and PEM file!**\n\n**Next Steps:**\n1. Save the PEM file content to a secure location (e.g., `WalletKey.pem`)\n2. You can use the Seed Phrase to log in to xPortal or Extension wallet\n3. **Top up the wallet with EGLD** for blockchain transaction fees (at least 0.08 EGLD recommended)', inline: false }
         ])
         .setColor('#00FF00')
         .setTimestamp()
@@ -3756,7 +3549,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: '📝 Supported Tokens', value: supportedTokens.join(', '), inline: false },
             { name: '💾 How to Save PEM File', value: '1. Copy the PEM content above\n2. Open a text editor (Notepad, VS Code, etc.)\n3. Paste the PEM content\n4. Save as `WalletKey.pem` (or any name you prefer)\n5. Store in a secure location', inline: false },
             { name: '🔐 Using Seed Phrase', value: 'You can use the Seed Phrase to log in to:\n- xPortal mobile app\n- MultiversX Extension wallet\n- Any MultiversX wallet that supports seed phrase import', inline: false },
-            { name: '⚠️ Important: Top Up Your Wallet', value: '**Before using this wallet, make sure to top it up with:**\n- **EGLD** - Required for blockchain transaction fees\n- **REWARD** tokens - Required for MakeX API usage fees ($0.03 per transaction)\n\nWithout these, the bot cannot send tokens or NFTs from this wallet.', inline: false }
+            { name: '⚠️ Important: Top Up Your Wallet', value: '**Before using this wallet, top it up with EGLD** for blockchain transaction fees (at least **0.08 EGLD** recommended).\n\nMakeX usage fees are waived for whitelisted project wallets. Without EGLD, the bot cannot send tokens or NFTs from this wallet.', inline: false }
           ])
           .setColor('#00FF00')
           .setTimestamp()
@@ -11006,125 +10799,72 @@ client.on('interactionCreate', async (interaction) => {
         ? `\n\n📊 **Mass Withdraw Analysis:**\n• Estimated on-chain transactions: **${txCounts.totalTransactions}**\n• Breakdown: ${formatMassWithdrawTransactionSummary(txCounts)}\n• Refund items: **${txCounts.esdtTransactionCount + txCounts.nftItemCount + txCounts.sftItemCount}** (${txCounts.esdtTransactionCount} ESDT + ${txCounts.nftItemCount} NFT + ${txCounts.sftItemCount} SFT)\n• Accounts with balances: **${accountsWithBalances.length}**`
         : '';
       
+      const egldStatus = new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(balanceCheck.requiredEgld))
+        ? '✅ Sufficient'
+        : '❌ Insufficient';
+      const availableEgld = parseFloat(balanceCheck.egldBalance || '0');
+      const maxTransactionsByEGLD = EGLD_PER_TX > 0
+        ? Math.floor(Math.max(0, availableEgld - WALLET_EGLD_MIN_BALANCE) / EGLD_PER_TX)
+        : 0;
+
       const embed = new EmbedBuilder()
-        .setTitle(balanceCheck.sufficient ? '✅ Community Fund Balances Sufficient' : '❌ Community Fund Balances Insufficient')
-        .setDescription(`Balance check for **${numberOfTransfers}** transfer(s)${massWithdrawSummary}`)
+        .setTitle(balanceCheck.sufficient ? '✅ Community Fund EGLD Sufficient' : '❌ Community Fund EGLD Insufficient')
+        .setDescription(
+          `EGLD check for **${numberOfTransfers}** on-chain transfer(s). ` +
+          `MakeX usage fees are **waived** — only EGLD is required for blockchain fees (minimum **${WALLET_EGLD_MIN_BALANCE} EGLD**).${massWithdrawSummary}`
+        )
         .setColor(balanceCheck.sufficient ? 0x00FF00 : 0xFF0000)
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
-      
-      // Format REWARD balances to 2 decimal places
-      const formatReward = (value) => {
-        const num = parseFloat(value || '0');
-        return isNaN(num) ? '0.00' : num.toFixed(2);
-      };
-      
-      // Calculate totals and differences
-      const onChainReward = parseFloat(balanceCheck.rewardBalanceOnChain || '0');
-      const virtualAccountReward = parseFloat(balanceCheck.rewardBalanceVirtualAccount || '0');
-      const houseBalanceReward = parseFloat(balanceCheck.rewardBalanceHouseBalance || '0');
-      const totalInVirtualAccounts = virtualAccountReward + houseBalanceReward;
-      const difference = onChainReward - totalInVirtualAccounts;
-      const usageFeeReward = parseFloat(balanceCheck.requiredReward || '0');
-      const neededToWithdraw = Math.max(0, -difference) + Math.ceil(usageFeeReward * 100) / 100; // Round up usage fee
-      
-      // Calculate REWARD status
-      const egldStatus = new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(balanceCheck.requiredEgld)) ? '✅ Sufficient' : '❌ Insufficient';
-      const availableReward = parseFloat(balanceCheck.rewardBalanceAvailable || '0');
-      const requiredReward = parseFloat(balanceCheck.requiredReward || '0');
-      const rewardStatus = new BigNumber(availableReward).isGreaterThanOrEqualTo(new BigNumber(requiredReward)) ? '✅ Sufficient' : '❌ Insufficient';
-      
-      // Calculate how many transactions can be performed with current balances
-      const EGLD_PER_TX = 0.00025;
-      const USAGE_FEE_USD = 0.03;
-      const rewardPriceUsd = balanceCheck.rewardPriceUsd || 0;
-      const availableEgld = parseFloat(balanceCheck.egldBalance || '0');
-      
-      let maxTransactionsByEGLD = 0;
-      let maxTransactionsByREWARD = 0;
-      
-      if (EGLD_PER_TX > 0) {
-        maxTransactionsByEGLD = Math.floor(availableEgld / EGLD_PER_TX);
-      }
-      
-      if (rewardPriceUsd > 0 && availableReward > 0) {
-        const rewardPerTx = USAGE_FEE_USD / rewardPriceUsd;
-        if (rewardPerTx > 0) {
-          maxTransactionsByREWARD = Math.floor(availableReward / rewardPerTx);
-        }
-      }
-      
-      // The limiting factor is the smaller of the two
-      const maxTransactionsPossible = Math.min(maxTransactionsByEGLD, maxTransactionsByREWARD);
-      
-      // Add simplified balance information
+
       const fields = [
         { name: '💰 EGLD Balance', value: `${balanceCheck.egldBalance} EGLD`, inline: true },
         { name: '📊 Required EGLD', value: `${balanceCheck.requiredEgld} EGLD`, inline: true },
         { name: '✅ EGLD Status', value: egldStatus, inline: true },
-        { name: '💼 REWARD Available', value: `${formatReward(balanceCheck.rewardBalanceAvailable)} REWARD`, inline: true },
-        { name: '💵 Required REWARD', value: `${formatReward(Math.ceil(requiredReward * 100) / 100)} REWARD`, inline: true },
-        { name: '✅ REWARD Status', value: rewardStatus, inline: true }
+        { name: 'ℹ️ Usage fees', value: 'Waived (MakeX whitelist)', inline: true }
       ];
-      
-      // Add mass withdraw analysis if there are balances
+
       if (txCounts.totalTransactions > 0 && massWithdrawBalanceCheck) {
         const massRequiredEgld = parseFloat(massWithdrawBalanceCheck.requiredEgld || '0');
-        const massRequiredReward = parseFloat(massWithdrawBalanceCheck.requiredReward || '0');
-        const massEgldStatus = new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(massRequiredEgld)) ? '✅ Sufficient' : '❌ Insufficient';
-        const massRewardStatus = new BigNumber(availableReward).isGreaterThanOrEqualTo(new BigNumber(massRequiredReward)) ? '✅ Sufficient' : '❌ Insufficient';
-        
+        const massEgldStatus = new BigNumber(balanceCheck.egldBalance).isGreaterThanOrEqualTo(new BigNumber(massRequiredEgld))
+          ? '✅ Sufficient'
+          : '❌ Insufficient';
+
         fields.push(
           { name: '━━━━━━━━━━━━━━━━━━━━', value: '**Mass Withdraw Analysis**', inline: false },
           { name: '📊 Estimated On-Chain Transactions', value: `**${txCounts.totalTransactions}**\n${formatMassWithdrawTransactionSummary(txCounts)}`, inline: true },
           { name: '💰 Required EGLD (All)', value: `${massRequiredEgld} EGLD`, inline: true },
           { name: '✅ EGLD Status (All)', value: massEgldStatus, inline: true },
-          { name: '💵 Required REWARD (All)', value: `${formatReward(Math.ceil(massRequiredReward * 100) / 100)} REWARD`, inline: true },
-          { name: '✅ REWARD Status (All)', value: massRewardStatus, inline: true },
-          { name: '📈 Max Transactions Possible', value: `**${maxTransactionsPossible}** transactions\n• Limited by: ${maxTransactionsByEGLD < maxTransactionsByREWARD ? 'EGLD' : 'REWARD'}`, inline: true }
+          { name: '📈 Est. Extra Transfers (EGLD headroom)', value: `~**${maxTransactionsByEGLD}** after reserving ${WALLET_EGLD_MIN_BALANCE} EGLD`, inline: false }
         );
       } else if (txCounts.totalTransactions === 0) {
         fields.push(
           { name: '📊 Mass Withdraw Status', value: '✅ No virtual account balances found\nNo mass withdraws needed.', inline: false }
         );
       }
-      
-      // Add detailed breakdown
-      fields.push(
-        { name: '━━━━━━━━━━━━━━━━━━━━', value: '**Balance Breakdown**', inline: false },
-        { name: '💼 Total in Wallet (On-Chain)', value: `${formatReward(balanceCheck.rewardBalanceOnChain)} REWARD`, inline: false },
-        { name: '📦 Total in Virtual Accounts', value: `${formatReward(totalInVirtualAccounts)} REWARD\n• Virtual Accounts: ${formatReward(virtualAccountReward)}\n• House Balance: ${formatReward(houseBalanceReward)}`, inline: false },
-        { name: '📊 Difference', value: `${formatReward(difference)} REWARD`, inline: true },
-        { name: '💵 1 Transfer Usage Fee', value: `${formatReward(Math.ceil(usageFeeReward * 100) / 100)} REWARD`, inline: true },
-        { name: '⚠️ Needed to Perform Withdraw', value: `${formatReward(neededToWithdraw)} REWARD`, inline: true }
-      );
-      
+
+      if (balanceCheck.walletAddress) {
+        fields.push({
+          name: '📍 Community Fund Wallet',
+          value: `\`${balanceCheck.walletAddress}\`\n\nRun \`/sync-community-fund-ledger\` to verify ledger vs on-chain holdings.`,
+          inline: false
+        });
+      }
+
       embed.addFields(fields);
-      
-      // Add informational note about transferring REWARD if insufficient
-      if (!balanceCheck.sufficient && balanceCheck.walletAddress && neededToWithdraw > 0) {
+
+      if (!balanceCheck.sufficient && balanceCheck.walletAddress) {
         embed.addFields({
-          name: 'ℹ️ How to Add REWARD',
-          value: `A REWARD transfer of **${formatReward(neededToWithdraw)} REWARD** to the Community Fund wallet address is required:\n\`${balanceCheck.walletAddress}\`\n\n⚠️ **Important:** Transfer must be made from a wallet that is **NOT** registered with this bot.\n\n💡 Ask admins to supply the required tokens to enable withdrawals.`,
+          name: 'ℹ️ How to fix',
+          value: `Send **EGLD** to:\n\`${balanceCheck.walletAddress}\`\n\nUse a wallet that is **not** registered with this bot.`,
           inline: false
         });
       }
-      
-      // Add wallet address for reference (when sufficient or if not shown above)
-      if (balanceCheck.walletAddress && (balanceCheck.sufficient || neededToWithdraw === 0)) {
+
+      if (balanceCheck.errors?.length > 0) {
         embed.addFields({
-          name: '📍 Community Fund Wallet Address',
-          value: `\`${balanceCheck.walletAddress}\``,
-          inline: false
-        });
-      }
-      
-      // Add other errors (non-REWARD related, like EGLD issues)
-      const otherErrors = balanceCheck.errors?.filter(e => !e.includes('REWARD')) || [];
-      if (otherErrors.length > 0) {
-        embed.addFields({
-          name: '⚠️ Other Issues',
-          value: otherErrors.map(e => `• ${e}`).join('\n'),
+          name: '⚠️ Details',
+          value: balanceCheck.errors.map(e => `• ${e}`).join('\n'),
           inline: false
         });
       }
@@ -11146,6 +10886,97 @@ client.on('interactionCreate', async (interaction) => {
       
     } catch (error) {
       console.error('Error in check-community-fund-balance command:', error.message);
+      if (interaction.deferred) {
+        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      } else {
+        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      }
+    }
+  } else if (commandName === 'sync-community-fund-ledger') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({ content: '❌ **Admin Only!** This command is restricted to server administrators.', flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+
+      const guildId = interaction.guildId;
+      const projects = await getProjects(guildId);
+      const communityFundProjectName = getCommunityFundProjectName();
+      const communityFundProject = projects[communityFundProjectName];
+
+      if (!communityFundProject?.walletAddress) {
+        await interaction.editReply({
+          content: '❌ Community Fund wallet is not configured. Run `/set-community-fund` first.',
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      const syncResult = await syncCommunityFundLedger(guildId, {
+        walletAddress: communityFundProject.walletAddress,
+        getAllHouseBalances,
+        fetchAllNFTs
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle(syncResult.inSync ? '✅ Ledger In Sync' : '❌ Ledger Mismatch Detected')
+        .setDescription(
+          syncResult.inSync
+            ? 'Virtual account ledger totals match Community Fund on-chain holdings (ESDT, NFT, and SFT).'
+            : 'On-chain Community Fund holdings do not match virtual account + house ledger totals. Review mismatches below.'
+        )
+        .setColor(syncResult.inSync ? 0x00FF00 : 0xFF0000)
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+        .addFields(
+          { name: '📍 Community Fund Wallet', value: `\`${syncResult.walletAddress}\``, inline: false },
+          {
+            name: '🪙 ESDT',
+            value: `Ledger tokens: **${syncResult.esdt.ledgerTokenCount}** • On-chain: **${syncResult.esdt.onChainTokenCount}**\n` +
+              `Matched: **${syncResult.esdt.matchedCount}** • Mismatches: **${syncResult.esdt.mismatchCount}**`,
+            inline: true
+          },
+          {
+            name: '🖼️ NFT / SFT',
+            value: `Ledger items: **${syncResult.nft.ledgerItemCount}** • On-chain: **${syncResult.nft.onChainItemCount}**\n` +
+              `Matched: **${syncResult.nft.matchedCount}** • Mismatches: **${syncResult.nft.mismatchCount}**`,
+            inline: true
+          }
+        );
+
+      if (!syncResult.inSync) {
+        const mismatchLines = [];
+        for (const m of syncResult.esdt.mismatches.slice(0, 10)) {
+          mismatchLines.push(`• **${m.key}** — ledger ${m.expected} vs chain ${m.actual} (Δ ${m.delta})`);
+        }
+        for (const m of syncResult.nft.mismatches.slice(0, 10)) {
+          mismatchLines.push(`• **${m.key}** — ledger ${m.expected} vs chain ${m.actual} (Δ ${m.delta})`);
+        }
+        const totalMismatches = syncResult.esdt.mismatchCount + syncResult.nft.mismatchCount;
+        const shown = Math.min(20, mismatchLines.length);
+        if (mismatchLines.length > 0) {
+          embed.addFields({
+            name: '⚠️ Mismatches (sample)',
+            value: mismatchLines.slice(0, 15).join('\n') +
+              (totalMismatches > shown ? `\n\n_…and ${totalMismatches - shown} more._` : ''),
+            inline: false
+          });
+        }
+      }
+
+      try {
+        const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
+        const qrCodeUrl = communityFundQRData?.[communityFundProjectName];
+        if (qrCodeUrl) embed.setThumbnail(qrCodeUrl);
+      } catch (qrError) {
+        console.error('[LEDGER-SYNC] Error getting QR code:', qrError.message);
+      }
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (error) {
+      console.error('Error in sync-community-fund-ledger command:', error.message);
       if (interaction.deferred) {
         await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       } else {
@@ -18133,6 +17964,18 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (!fundProjectData.walletAddress) {
+      await interaction.followUp({ content: '❌ Community Fund wallet address is not configured.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+
+    try {
+      await ensureWalletEgldForOnChainTransfer(fundProjectData.walletAddress);
+    } catch (egldErr) {
+      await interaction.followUp({ content: `❌ ${egldErr.message}`, flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+
     let pemToSend = fundProjectData.walletPem;
     if (!pemToSend.includes('\n')) {
       pemToSend = pemToSend
@@ -22348,7 +22191,8 @@ client.on('interactionCreate', async (interaction) => {
         tokenIdentifiers,
         communityFundProject.walletPem,
         API_BASE_URL,
-        API_TOKEN
+        API_TOKEN,
+        communityFundProject.walletAddress
       );
       
       if (transferResult.success && transferResult.txHash) {
@@ -27037,7 +26881,8 @@ async function handleHelpCommand(interaction, page = 1) {
             '`/set-community-fund` 🔴 Admin - Set community fund project',
             '`/list-wallets` - List registered wallets',
             '`/show-community-fund-address` - View community fund address',
-            '`/check-community-fund-balance` - Check community fund balance'
+            '`/check-community-fund-balance` - Check Community Fund EGLD for fees\n' +
+            '`/sync-community-fund-ledger` - Compare VA ledger vs on-chain Community Fund'
           ]
         }
       },

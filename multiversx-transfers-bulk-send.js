@@ -60,10 +60,15 @@ function extractCollectionAndNonce(fullTokenIdentifier) {
  * @param {string} apiToken - API authentication token
  * @returns {Promise<Object>} Transfer result with txHash, success status, etc.
  */
-async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem, apiBaseUrl, apiToken) {
+async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem, apiBaseUrl, apiToken, senderWalletAddress = null) {
   try {
     if (!apiBaseUrl || !apiToken) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
+    }
+
+    if (senderWalletAddress) {
+      const { ensureWalletEgldForOnChainTransfer } = require('./utils/wallet-egld-guard');
+      await ensureWalletEgldForOnChainTransfer(senderWalletAddress);
     }
 
     if (!Array.isArray(tokenIdentifiers) || tokenIdentifiers.length === 0) {
