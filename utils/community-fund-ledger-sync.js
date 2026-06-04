@@ -11,6 +11,42 @@ function nftLedgerKey(collection, nonce) {
   return `${(collection || '').toLowerCase()}\u0000${Number(nonce)}`;
 }
 
+function parseNoncePart(noncePart) {
+  if (noncePart == null || noncePart === '') return null;
+  const str = String(noncePart);
+  if (/^[0-9a-f]+$/i.test(str)) {
+    const hex = parseInt(str, 16);
+    if (!isNaN(hex)) return hex;
+  }
+  const dec = parseInt(str, 10);
+  return isNaN(dec) ? null : dec;
+}
+
+/** Canonical key from full NFT identifier (e.g. COLLECTION-abc123-02). */
+function nftKeyFromIdentifier(identifier) {
+  if (!identifier || typeof identifier !== 'string') return null;
+  const parts = identifier.split('-');
+  if (parts.length < 3) return null;
+  const nonce = parseNoncePart(parts[parts.length - 1]);
+  if (nonce == null) return null;
+  const collection = parts.slice(0, -1).join('-');
+  return nftLedgerKey(collection, nonce);
+}
+
+function nftKeyFromOnChain(nft) {
+  const fromIdentifier = nftKeyFromIdentifier(nft.identifier);
+  if (fromIdentifier) return fromIdentifier;
+  const collection = nft.collection || nft.token;
+  if (collection == null || nft.nonce == null) return null;
+  return nftLedgerKey(collection, nft.nonce);
+}
+
+function nftKeyFromLedgerRow(row) {
+  const fromIdentifier = nftKeyFromIdentifier(row.identifier);
+  if (fromIdentifier) return fromIdentifier;
+  return nftLedgerKey(row.collection, row.nonce);
+}
+
 function addToMap(map, key, amount) {
   const bn = new BigNumber(amount || '0');
   if (bn.isZero()) return;
@@ -63,7 +99,8 @@ async function aggregateLedgerNftBalances(guildId) {
 
   const totals = new Map();
   for (const row of data || []) {
-    const key = nftLedgerKey(row.collection, row.nonce);
+    const key = nftKeyFromLedgerRow(row);
+    if (!key) continue;
     const amount = row.token_type === 'SFT' ? (row.amount || 1) : 1;
     addToMap(totals, key, amount);
   }
@@ -105,13 +142,11 @@ async function fetchWalletNftBalances(walletAddress, fetchAllNFTs) {
   const totals = new Map();
 
   for (const nft of items) {
-    const collection = nft.collection || nft.token;
-    const nonce = nft.nonce;
-    if (collection == null || nonce == null) continue;
+    const key = nftKeyFromOnChain(nft);
+    if (!key) continue;
 
-    const key = nftLedgerKey(collection, nonce);
     const balanceBN = new BigNumber(nft.balance || '1');
-    const isSft = nft.type === 'SemiFungibleESDT' || (balanceBN.isGreaterThan(1));
+    const isSft = nft.type === 'SemiFungibleESDT' || balanceBN.isGreaterThan(1);
     const amount = isSft ? (nft.balance || '1') : '1';
     addToMap(totals, key, amount);
   }
@@ -220,9 +255,59 @@ async function syncCommunityFundLedger(guildId, options = {}) {
   };
 }
 
+const DISCORD_EMBED_FIELD_MAX = 1024;
+
+function formatAmountForEmbed(raw) {
+  const s = String(raw ?? '0');
+  if (s.length <= 20) return s;
+  return `${s.slice(0, 10)}…${s.slice(-8)}`;
+}
+
+function truncateEmbedField(text, max = DISCORD_EMBED_FIELD_MAX) {
+  if (!text || text.length <= max) return text;
+  return `${text.slice(0, max - 28)}\n\n_…truncated._`;
+}
+
+/** Build Discord embed fields for mismatch samples (respects 1024-char field limit). */
+function buildLedgerSyncMismatchFields(esdtMismatches, nftMismatches, esdtMismatchTotal, nftMismatchTotal) {
+  const fields = [];
+
+  if (esdtMismatches.length > 0) {
+    const lines = esdtMismatches.slice(0, 6).map(
+      (m) => `• \`${m.key}\` — VA **${formatAmountForEmbed(m.expected)}** / chain **${formatAmountForEmbed(m.actual)}**`
+    );
+    const more = Math.max(0, esdtMismatchTotal - lines.length);
+    if (more > 0) lines.push(`_+${more} more ESDT mismatch(es)_`);
+    fields.push({
+      name: '⚠️ ESDT mismatches (sample)',
+      value: truncateEmbedField(lines.join('\n')),
+      inline: false
+    });
+  }
+
+  if (nftMismatches.length > 0) {
+    const lines = nftMismatches.slice(0, 6).map(
+      (m) => `• \`${m.key}\` — VA **${formatAmountForEmbed(m.expected)}** / chain **${formatAmountForEmbed(m.actual)}**`
+    );
+    const more = Math.max(0, nftMismatchTotal - lines.length);
+    if (more > 0) lines.push(`_+${more} more NFT/SFT mismatch(es)_`);
+    fields.push({
+      name: '⚠️ NFT/SFT mismatches (sample)',
+      value: truncateEmbedField(lines.join('\n')),
+      inline: false
+    });
+  }
+
+  return fields;
+}
+
 module.exports = {
   ESDT_IDENTIFIER_REGEX,
+  DISCORD_EMBED_FIELD_MAX,
   syncCommunityFundLedger,
   aggregateVirtualAccountEsdtBalances,
-  aggregateHousePnlByToken
+  aggregateHousePnlByToken,
+  buildLedgerSyncMismatchFields,
+  truncateEmbedField,
+  formatAmountForEmbed
 };

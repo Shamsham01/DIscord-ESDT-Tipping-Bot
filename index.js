@@ -122,7 +122,7 @@ const {
   WALLET_EGLD_MIN_BALANCE,
   fetchWalletEgldBalanceHuman
 } = require('./utils/wallet-egld-guard');
-const { syncCommunityFundLedger } = require('./utils/community-fund-ledger-sync');
+const { syncCommunityFundLedger, buildLedgerSyncMismatchFields } = require('./utils/community-fund-ledger-sync');
 
 const client = new Client({
   intents: [
@@ -10947,36 +10947,41 @@ client.on('interactionCreate', async (interaction) => {
         );
 
       if (!syncResult.inSync) {
-        const mismatchLines = [];
-        for (const m of syncResult.esdt.mismatches.slice(0, 10)) {
-          mismatchLines.push(`• **${m.key}** — ledger ${m.expected} vs chain ${m.actual} (Δ ${m.delta})`);
-        }
-        for (const m of syncResult.nft.mismatches.slice(0, 10)) {
-          mismatchLines.push(`• **${m.key}** — ledger ${m.expected} vs chain ${m.actual} (Δ ${m.delta})`);
-        }
-        const totalMismatches = syncResult.esdt.mismatchCount + syncResult.nft.mismatchCount;
-        const shown = Math.min(20, mismatchLines.length);
-        if (mismatchLines.length > 0) {
-          embed.addFields({
-            name: '⚠️ Mismatches (sample)',
-            value: mismatchLines.slice(0, 15).join('\n') +
-              (totalMismatches > shown ? `\n\n_…and ${totalMismatches - shown} more._` : ''),
-            inline: false
-          });
+        const mismatchFields = buildLedgerSyncMismatchFields(
+          syncResult.esdt.mismatches,
+          syncResult.nft.mismatches,
+          syncResult.esdt.mismatchCount,
+          syncResult.nft.mismatchCount
+        );
+        if (mismatchFields.length > 0) {
+          embed.addFields(mismatchFields);
         }
       }
 
       try {
         const communityFundQRData = await dbServerData.getCommunityFundQR(guildId);
         const qrCodeUrl = communityFundQRData?.[communityFundProjectName];
-        if (qrCodeUrl) embed.setThumbnail(qrCodeUrl);
+        if (qrCodeUrl && /^https?:\/\//i.test(qrCodeUrl)) {
+          embed.setThumbnail(qrCodeUrl);
+        }
       } catch (qrError) {
         console.error('[LEDGER-SYNC] Error getting QR code:', qrError.message);
       }
 
-      await interaction.editReply({ embeds: [embed] });
+      try {
+        await interaction.editReply({ embeds: [embed] });
+      } catch (embedError) {
+        console.error('[LEDGER-SYNC] Embed reply failed:', embedError.message, embedError.errors || embedError);
+        const summary =
+          `${syncResult.inSync ? '✅ Ledger in sync' : '❌ Ledger mismatch'} — ` +
+          `ESDT: ${syncResult.esdt.mismatchCount} mismatch(es), ` +
+          `NFT/SFT: ${syncResult.nft.mismatchCount} mismatch(es) ` +
+          `(${syncResult.nft.onChainItemCount} on-chain items). Wallet: \`${syncResult.walletAddress}\``;
+        await interaction.editReply({ content: summary, flags: [MessageFlags.Ephemeral] });
+      }
     } catch (error) {
-      console.error('Error in sync-community-fund-ledger command:', error.message);
+      const detail = error.errors ? JSON.stringify(error.errors) : (error.stack || '');
+      console.error('Error in sync-community-fund-ledger command:', error.message, detail);
       if (interaction.deferred) {
         await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
       } else {
