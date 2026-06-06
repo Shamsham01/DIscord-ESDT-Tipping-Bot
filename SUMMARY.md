@@ -1,6 +1,7 @@
 # Table of contents
 
 * [Introduction](README.md)
+* [On-Chain Subscription Plan](on-chain-subscription.md)
 * [List of Commands](list-of-commands.md)
 * [Getting Started](getting-started/README.md)
   * [Registering Projects](getting-started/registering-projects.md)
@@ -8,6 +9,7 @@
 * [Admin Setup Guide](admin-setup-guide.md)
   * [Channel Permissions](admin-setup-guide.md#channel-permissions)
   * [NFT holder roles (optional)](admin-setup-guide.md#nft-holder-roles-optional)
+  * [On-Chain Subscription Plan](on-chain-subscription.md)
   * [Creating Your First Project](admin-setup-guide.md#creating-your-first-project)
   * [Setting Up Community Fund](admin-setup-guide.md#setting-up-community-fund)
   * [Updating Project Settings](admin-setup-guide.md#updating-project-settings)

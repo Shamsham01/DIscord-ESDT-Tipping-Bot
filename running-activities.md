@@ -201,6 +201,10 @@ This adds 200 tokens to the bonus pot, increasing the total prize pool for this 
 
 NFT staking allows users to stake their NFTs from their Virtual Account to earn rewards. Pool creators set up staking pools with reward tokens, and users can stake eligible NFTs to earn daily rewards.
 
+{% hint style="info" %}
+**Pool creation fee:** Creating a pool normally charges a one-time **REWARD** fee (~$5 USD equivalent). Servers with an **active on-chain plan** ([On-Chain Subscription Plan](on-chain-subscription.md)) have this fee **waived**. Initial reward supply is always required.
+{% endhint %}
+
 ### Creating a Staking Pool
 
 Admins can create NFT staking pools using:

@@ -194,6 +194,7 @@ This instantly transfers tokens from your Virtual Account to the recipient's Vir
 
 **Requirements**:
 
+* Server has an **active on-chain plan** (admin subscribes with `/subscribe-on-chain-plan` — see [On-Chain Subscription Plan](on-chain-subscription.md))
 * Sufficient balance in Virtual Account
 * Community Fund must have sufficient balance
 * Your wallet must be registered
@@ -208,8 +209,9 @@ This transfers tokens from your Virtual Account to your registered wallet addres
 
 **Note**: Withdrawals require:
 
+* An **active on-chain subscription** for the server (contact your admins if you see a subscription error)
 * Community Fund to have the tokens available
-* Sufficient **EGLD** in the Community Fund for blockchain fees (admins maintain this; usage fees are waived)
+* Sufficient **EGLD** in the Community Fund for blockchain fees (admins maintain this; MakeX usage fees are waived when the plan is active)
 
 ### Transferring to House Balance
 
@@ -285,7 +287,7 @@ For SFTs with quantity:
 * ✅ Maintains your Virtual Account balances across servers
 * ✅ Works for both tokens and NFTs/SFTs
 
-**Note**: Cross-guild transfers require on-chain transactions, so they may take a few moments to complete.
+**Note**: Cross-guild **NFT** transfers require on-chain transactions (server must have active on-chain plan). Cross-guild **ESDT** transfers are ledger-only. On-chain legs may take a few moments to complete.
 
 ***
 
@@ -365,6 +367,8 @@ List an NFT or SFT for sale on the marketplace.
 ```
 
 Withdraw an NFT or SFT from your Virtual Account to your registered wallet.
+
+**Requires**: Server **active on-chain plan** (admins: `/subscribe-on-chain-plan`) plus Community Fund EGLD for gas.
 
 **Parameters**:
 
@@ -455,6 +459,7 @@ When buying lottery tickets, the ticket price is automatically deducted from you
 
 **Can't withdraw?**
 
+* Server may need an **on-chain subscription** — ask an admin to check `/on-chain-subscription-status`
 * Ask an admin to run `/check-community-fund-balance` (EGLD for fees) or `/sync-community-fund-ledger` (ledger vs wallet)
 * Ensure Community Fund has required tokens and EGLD
 * Verify your wallet is registered correctly

@@ -21,8 +21,8 @@ Understanding the difference between these two wallet types is crucial for prope
   * `/send-esdt` - Send tokens to users
   * `/send-nft` - Send NFTs to users
   * `/create-auction` - Create NFT auctions
-* **On-Chain Transfers**: All operations result in **on-chain blockchain transfers**
-* **Fees**: Only **EGLD** is required for blockchain gas (MakeX usage fees are **waived** for whitelisted project wallets)
+* **On-Chain Transfers**: All operations result in **on-chain blockchain transfers** (require an **active on-chain plan** — see [On-Chain Subscription Plan](../on-chain-subscription.md))
+* **Fees**: **EGLD** for blockchain gas; **active on-chain plan** for permission to send on-chain; MakeX usage fees **waived** when plan syncs wallets to whitelist
 * **Security**: Admins have full control - can delete projects, manage funds, etc.
 
 > ⚠️ **Important**: Project Wallets are controlled by admins. Deletion commands result in mass withdrawals to user wallets for safety.
@@ -38,7 +38,7 @@ Understanding the difference between these two wallet types is crucial for prope
   * `/withdraw-esdt` - User withdrawals
 * **Virtual Account Operations**: Most operations happen **inside the Community Fund** - bot just updates balance records
 * **Fees**: Virtual Account operations (tips, RPS, in-VA NFT transfers) do **not** use on-chain gas
-* **On-chain withdrawals**: `/withdraw-esdt`, `/withdraw-nft`, `/house-withdraw`, etc. require **EGLD** in the Community Fund (or project wallet) for blockchain fees only
+* **On-chain withdrawals**: `/withdraw-esdt`, `/withdraw-nft`, `/house-withdraw`, etc. require an **active on-chain plan** plus **EGLD** in the Community Fund (or project wallet) for blockchain fees
 * **Security**: Cannot be deleted by admins - protects user funds. All deletion commands result in mass withdrawals to user wallets
 
 #### Key Differences Summary
@@ -47,7 +47,7 @@ Understanding the difference between these two wallet types is crucial for prope
 | -------------- | -------------------------------------------- | ------------------------------------------------------- |
 | **Control**    | Admin-controlled                             | Bot-managed (not admin-controlled)                      |
 | **Operations** | On-chain transfers                           | Virtual Account (balance updates)                       |
-| **On-chain fees** | EGLD only (usage fees waived)            | EGLD only for withdrawals / mass refund                  |
+| **On-chain fees** | Active plan + EGLD (usage fees waived)   | Active plan + EGLD for withdrawals / mass refund         |
 | **Commands**   | `/send-esdt`, `/send-nft`, `/create-auction` | `/tip-virtual-esdt`, `/challenge-rps`, `/withdraw-esdt` |
 | **Deletion**   | Admin can delete                             | Protected - mass withdrawal only                        |
 

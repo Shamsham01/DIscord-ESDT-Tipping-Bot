@@ -153,11 +153,13 @@ Each Project and Community wallet needs:
 * **EGLD** - For blockchain transaction fees (minimum **0.08 EGLD** recommended; checked before each on-chain transfer)
 * **Supported tokens** - The tokens you want to send/tip
 
-### **Fees**
+### **Fees & On-Chain Plan**
 
-* **MakeX usage fees** - Waived for whitelisted Project and Community Fund wallets (no REWARD required for API fees)
-* **Virtual Account Operations** - No on-chain gas (tips, games, in-VA NFT transfers)
-* **On-Chain Transfers** - EGLD only (admin sends, user withdrawals, mass refunds)
+* **On-chain subscription** - Servers need an active **on-chain plan** (`/subscribe-on-chain-plan`, paid in USDC) to use withdrawals, admin sends, swaps, and other blockchain operations. See **[On-Chain Subscription Plan](on-chain-subscription.md)**.
+* **MakeX usage fees** - Waived for whitelisted Project and Community Fund wallets when the on-chain plan is active (no REWARD required for API fees)
+* **Virtual Account Operations** - No on-chain gas and **no subscription required** (tips, games, in-VA NFT transfers)
+* **On-Chain Transfers** - Require active plan + EGLD for gas (admin sends, user withdrawals, mass refunds)
+* **Staking pool creation fee** - One-time REWARD fee is **waived** for servers with an active on-chain plan
 * **Ledger audit** - Admins: `/sync-community-fund-ledger` compares VA + house ledger vs on-chain Community Fund
 
 {% hint style="warning" %}
@@ -178,7 +180,8 @@ Ready to transform your Discord community? Here's what you need:
 2. **Set Permissions** - Configure channel permissions (see Admin Setup Guide)
 3. **Create a Project** - Use `/register-project` to auto-generate a wallet
 4. **Set Up Community Fund** - Use `/set-community-fund` for user activities
-5. **Start Engaging** - Your community can now tip, play games, trade NFTs, and more!
+5. **Subscribe On-Chain Plan** - Use `/subscribe-on-chain-plan` to enable withdrawals, admin sends, and MakeX fee waivers
+6. **Start Engaging** - Your community can tip, play games, and trade in Virtual Accounts; on-chain features need step 5
 
 **Explore the documentation to learn about all features and commands!**
 

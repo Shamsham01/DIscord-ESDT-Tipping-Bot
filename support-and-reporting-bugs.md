@@ -10,6 +10,11 @@ description: Reach out for support or report any bugs.
 * HODL Token Club X Account - [Follow Us](https://x.com/HodlTokenClub)
 * Email Address: `hodl.token.club@gmail.com`&#x20;
 
+### Common admin issues
+
+* **On-chain operations blocked** — Check `/on-chain-subscription-status` and renew with `/subscribe-on-chain-plan` if expired. See [On-Chain Subscription Plan](on-chain-subscription.md).
+* **EGLD too low** — Use `/check-community-fund-balance` before withdrawals or mass refunds.
+
 ### Useful Links
 
 * [Get MultiversX Wallet](https://wallet.multiversx.com/create)

@@ -24,7 +24,7 @@ Register a new project with auto-generated wallet.
 /register-project MainWallet REWARD-cf6eac,EGLD https://logo.png
 ```
 
-**Note**: The bot automatically generates a new MultiversX wallet for your project. Wallet details (address, seed phrase, PEM file) will be displayed in the command response and sent to you via DM. Make sure to save the PEM file and seed phrase securely. Top up the wallet with **EGLD** for blockchain fees (at least **0.08 EGLD** recommended). MakeX usage fees are waived for whitelisted project and Community Fund wallets.
+**Note**: The bot automatically generates a new MultiversX wallet for your project. Wallet details (address, seed phrase, PEM file) will be displayed in the command response and sent to you via DM. Make sure to save the PEM file and seed phrase securely. Top up the wallet with **EGLD** for blockchain fees (at least **0.08 EGLD** recommended). On-chain sends require an **active on-chain plan** ([On-Chain Subscription Plan](on-chain-subscription.md)). MakeX usage fees are waived for whitelisted project and Community Fund wallets when the plan is active.
 
 ### `/update-project`
 Update project settings.
@@ -59,6 +59,44 @@ Create and set Community Fund (auto-generated wallet).
 ```
 /set-community-fund MainFund REWARD-cf6eac,EGLD https://qr-code.png
 ```
+
+---
+
+## On-Chain Subscription
+
+### `/subscribe-on-chain-plan`
+Subscribe or renew the server's on-chain plan (withdrawals, admin sends, swaps, MakeX whitelist).
+
+**Usage**: `/subscribe-on-chain-plan plan`
+
+**Parameters**:
+- `plan` (Required): `1_month` (10 USDC), `3_months` (20 USDC), `6_months` (40 USDC), or `12_months` (60 USDC)
+
+**Payment flow**:
+1. USDC deducted from subscribing admin's Virtual Account
+2. Same USDC amount transferred on-chain from Community Fund to treasury
+3. Subscription end date updated (renewals stack on existing end date)
+4. All Project + Community Fund wallets synced to MakeX usage fee whitelist
+
+**Requirements**: Administrator permission, Community Fund configured, sufficient USDC in admin VA and Community Fund on-chain.
+
+**Example**:
+```
+/subscribe-on-chain-plan plan:3_months
+```
+
+See **[On-Chain Subscription Plan](on-chain-subscription.md)** for full gating rules and pricing.
+
+### `/on-chain-subscription-status`
+View on-chain plan status, expiry, subscribing admin, and MakeX whitelist entries.
+
+**Usage**: `/on-chain-subscription-status`
+
+Shows:
+- Active / inactive status
+- Valid-until date and plan length
+- Who subscribed (`subscribed_by_discord_id`)
+- Guild wallet count and MakeX whitelist preview
 
 ---
 
@@ -233,6 +271,8 @@ Create a new NFT staking pool.
 - `staking_total_limit` (Optional): Maximum NFTs that can be staked
 - `staking_limit_per_user` (Optional): Maximum NFTs per user
 
+**Pool creation fee**: One-time REWARD fee (~$5 USD equivalent) applies unless the server has an **active on-chain plan** (fee waived). Initial reward supply is always charged from the creator's Virtual Account.
+
 **Example**:
 ```
 /create-staking-pool COLLECTION-abc123 REWARD-cf6eac 10000 10 "My Pool" 1000 50 6
@@ -375,7 +415,8 @@ Shows:
 - EGLD balance vs required EGLD (minimum **0.08 EGLD**, or higher for many on-chain transactions)
 - Mass-withdraw transaction breakdown (ESDT + NFT bulk + SFT)
 - Community Fund wallet address
-- Note that MakeX usage fees are waived (whitelist)
+- Note that MakeX usage fees are waived when on-chain plan is active (whitelist)
+- Reminder to check `/on-chain-subscription-status` if on-chain operations fail
 
 ### `/sync-community-fund-ledger`
 Compare virtual account ledger totals vs Community Fund **on-chain** holdings (MultiversX API).

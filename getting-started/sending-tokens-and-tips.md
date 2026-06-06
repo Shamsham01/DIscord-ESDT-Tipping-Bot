@@ -10,7 +10,7 @@ description: >-
 
 ### 🏦 Admin Transfers, Tips & Auctions
 
-* **Admins** can use `/send-esdt` or `/send-nft` to send tokens, NFTs, and SFTs from a Project Wallet to any user (on-chain transfers)
+* **Admins** can use `/send-esdt` or `/send-nft` to send tokens, NFTs, and SFTs from a Project Wallet to any user (on-chain transfers — requires an **active on-chain plan**; see [On-Chain Subscription Plan](../on-chain-subscription.md))
 * **Admins** can use `/create-auction` to list NFT or SFT from Project Wallet. The raised tokens will be credited to House Balance and can be withdrawn to Project Wallet anytime using `/house-withdraw`
 
 **Note**: The bot supports both NFTs (Non-Fungible Tokens) and SFTs (Semi-Fungible Tokens). SFTs have a quantity (amount) field. All NFT-related commands work with both NFTs and SFTs.
@@ -29,11 +29,12 @@ description: >-
 
 ### 💡 Wallet Funding Requirements
 
+* **Active on-chain plan** — Server must have subscribed via `/subscribe-on-chain-plan` (or valid legacy MakeX whitelist) before any on-chain send or withdraw.
 * **Project and Community Fund wallets must hold enough EGLD** for blockchain transaction fees (minimum **0.08 EGLD** enforced before each on-chain transfer).
-* **MakeX usage fees are waived** for whitelisted bot wallets — you do **not** need REWARD for API usage fees.
+* **MakeX usage fees are waived** for whitelisted bot wallets (auto-synced when plan is active) — you do **not** need REWARD for API usage fees.
 
 {% hint style="danger" %}
-If EGLD is too low, on-chain transfers and withdraws are blocked. The bot checks EGLD before every on-chain operation and admins can use `/check-community-fund-balance` to preview requirements.
+Without an active on-chain plan, withdrawals and admin on-chain sends are blocked. If EGLD is too low, on-chain transfers are also blocked. Use `/on-chain-subscription-status` and `/check-community-fund-balance` to diagnose.
 {% endhint %}
 
 ***
@@ -47,16 +48,18 @@ If EGLD is too low, on-chain transfers and withdraws are blocked. The bot checks
 
 ### 💸 Fees: EGLD vs Virtual Account operations
 
+**On-chain plan** — Subscribe with `/subscribe-on-chain-plan` (USDC; see [On-Chain Subscription Plan](../on-chain-subscription.md)).
+
 **MakeX usage fees** (`usageFee` in REWARD) are **waived** for whitelisted Project and Community Fund wallets. You only need **EGLD** for on-chain gas.
 
 #### Project Wallets (Admin-Controlled)
 
-* On-chain commands (`/send-esdt`, `/send-nft`, `/house-withdraw`, etc.) require **EGLD** in the project wallet (≥ **0.08 EGLD** minimum).
+* On-chain commands (`/send-esdt`, `/send-nft`, `/house-withdraw`, etc.) require an **active on-chain plan** and **EGLD** in the project wallet (≥ **0.08 EGLD** minimum).
 
 #### Community Fund
 
-* **In-ledger (no gas)**: `/tip-virtual-esdt`, `/tip-virtual-nft`, `/challenge-rps`, and similar — balance updates only.
-* **On-chain (EGLD required)**: `/withdraw-esdt`, `/withdraw-nft`, `/withdraw-nft-bulk`, cross-guild transfers, swaps, mass refunds — EGLD is checked before each transaction.
+* **In-ledger (no plan, no gas)**: `/tip-virtual-esdt`, `/tip-virtual-nft`, `/challenge-rps`, and similar — balance updates only.
+* **On-chain (plan + EGLD)**: `/withdraw-esdt`, `/withdraw-nft`, `/withdraw-nft-bulk`, cross-guild NFT transfers, swaps, mass refunds — plan and EGLD checked before each transaction.
 
 **Ledger health:** Admins can run `/sync-community-fund-ledger` to verify that Community Fund on-chain holdings match virtual account + house ledger totals (ESDT, NFT, SFT).
 

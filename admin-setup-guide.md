@@ -74,6 +74,29 @@ See **[NFT Role Verification](nft-role-verification.md)** for eligibility modes,
 
 ***
 
+## On-Chain Subscription Plan
+
+**Required for blockchain operations.** Virtual Account features (tips, games, in-ledger activity) work without it; **withdrawals, admin sends, swaps, and mass refunds** require an active plan.
+
+Full details: **[On-Chain Subscription Plan](on-chain-subscription.md)**
+
+### Quick summary
+
+| Item | Detail |
+|------|--------|
+| **Command** | `/subscribe-on-chain-plan` (Administrator) |
+| **Status** | `/on-chain-subscription-status` |
+| **Payment** | USDC from subscribing admin’s VA; same amount sent on-chain from Community Fund |
+| **Plans** | 1 mo = 10 USDC · 3 mo = 20 · 6 mo = 40 · 12 mo = 60 USDC |
+| **Includes** | All Project + Community Fund wallets added to MakeX usage fee whitelist |
+| **Bonus** | Staking pool **creation fee waived** while plan is active |
+
+{% hint style="warning" %}
+Set up the **Community Fund** and ensure it holds **USDC** (for subscription payment) and **EGLD** (for gas) before subscribing.
+{% endhint %}
+
+***
+
 ## Creating Your First Project
 
 A **project** represents a wallet that can send tokens, NFTs, and SFTs to users. You can have multiple projects per server.
@@ -126,9 +149,10 @@ After registering the project, the bot will:
 **Before using the wallet, top it up with EGLD:**
 
 * **EGLD** - Required for blockchain transaction fees (at least **0.08 EGLD** recommended)
-* MakeX **usage fees are waived** for whitelisted bot wallets — REWARD is not required for API fees
+* **Active on-chain plan** - Required for on-chain sends (`/send-esdt`, `/send-nft`, etc.) — see [On-Chain Subscription Plan](on-chain-subscription.md)
+* MakeX **usage fees are waived** for whitelisted bot wallets (synced when plan is active) — REWARD is not required for API fees
 
-Without sufficient EGLD, the bot cannot complete on-chain sends or withdrawals from this wallet.
+Without sufficient EGLD or an active on-chain plan, the bot cannot complete on-chain sends or withdrawals from this wallet.
 
 ### Step 4: Verify Project Registration
 
@@ -205,6 +229,22 @@ This shows:
 * Number of monitored wallets
 * Polling interval (10 seconds)
 * Processed transaction count
+
+### Step 4: Subscribe On-Chain Plan
+
+Enable withdrawals, admin sends, swaps, and MakeX fee waivers:
+
+```
+/subscribe-on-chain-plan plan:1_month
+```
+
+Include **USDC** in supported tokens if you plan to pay with USDC. Ensure the Community Fund holds USDC (payment) and EGLD (gas). See **[On-Chain Subscription Plan](on-chain-subscription.md)**.
+
+Check status anytime:
+
+```
+/on-chain-subscription-status
+```
 
 ***
 

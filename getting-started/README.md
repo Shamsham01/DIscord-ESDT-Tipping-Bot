@@ -33,6 +33,12 @@ Welcome! Follow these steps to quickly set up your ESDT Tipping Bot and register
 
 ***
 
-### 5. Next Steps
+### 5. Subscribe On-Chain Plan (Admins)
+
+* After Community Fund is set up, run **`/subscribe-on-chain-plan`** to enable withdrawals, admin on-chain sends, swaps, and MakeX API fee waivers.
+* Check status anytime with **`/on-chain-subscription-status`**.
+* See **[On-Chain Subscription Plan](../on-chain-subscription.md)** for USDC pricing and full details.
+
+### 6. Next Steps
 
 * Ask your Community to register their wallets with `/set-wallet` command. This will create Virtual Accounts for the registered users.
