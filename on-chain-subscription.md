@@ -71,10 +71,14 @@ Subscribe or renew the server’s on-chain plan.
 
 1. Admin permission check
 2. USDC balance check (admin VA + Community Fund on-chain)
-3. On-chain USDC transfer: Community Fund → treasury
-4. VA deduction from subscribing admin
-5. Subscription record saved (including **your Discord ID** for expiry reminders)
-6. All guild **Project** and **Community Fund** wallet addresses synced to the **MakeX usage fee whitelist**
+3. **Provisional MakeX whitelist** — if the Community Fund is not already whitelisted, all guild wallets are written to MakeX Supabase as `valid` *before* the payment is broadcast (so MakeX API usage fees are waived)
+4. On-chain USDC transfer: Community Fund → treasury
+5. **On-chain confirmation** — payment tx must reach `success` on MultiversX
+6. **Confirm whitelist** — finalize entries (or rollback provisional whitelist if payment fails)
+7. Subscription record saved (including **your Discord ID** for expiry reminders)
+8. VA deduction from subscribing admin
+
+If the on-chain payment fails, provisional whitelist entries are **rolled back** to their previous state and your VA is **not** deducted.
 
 **Renewals stack:** If the plan is still active, new months are added to the current end date.
 

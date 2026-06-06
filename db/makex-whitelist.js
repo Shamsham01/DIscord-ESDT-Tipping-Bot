@@ -1,9 +1,16 @@
 const { getMakexSupabase, isMakexSupabaseConfigured } = require('../makex-supabase-client');
 const supabase = require('../supabase-client');
 
+const PENDING_PAYMENT_NAME_PREFIX = 'TippingBot:pending-payment:';
+
 function buildWhitelistName(guildId, guildName) {
   const safeName = (guildName || 'Unknown').replace(/:/g, '-').slice(0, 200);
   return `TippingBot:${guildId}:${safeName}`;
+}
+
+function buildPendingPaymentWhitelistName(guildId, guildName) {
+  const safeName = (guildName || 'Unknown').replace(/:/g, '-').slice(0, 180);
+  return `${PENDING_PAYMENT_NAME_PREFIX}${guildId}:${safeName}`;
 }
 
 async function getGuildWalletAddresses(guildId) {
@@ -38,7 +45,9 @@ async function upsertWalletWhitelist({
   guildName,
   whitelistStart,
   whitelistEnd,
-  email
+  email,
+  status = 'valid',
+  name = null
 }) {
   if (!isMakexSupabaseConfigured()) {
     console.warn('[MAKEX-WHITELIST] MakeX Supabase not configured, skipping upsert');
@@ -50,11 +59,11 @@ async function upsertWalletWhitelist({
       .from('makex_usage_fee_whitelist')
       .upsert({
         wallet_address: walletAddress,
-        name: buildWhitelistName(guildId, guildName),
+        name: name || buildWhitelistName(guildId, guildName),
         email: email || null,
         whitelist_start: whitelistStart,
         whitelist_end: whitelistEnd,
-        status: 'valid',
+        status,
         updated_at: new Date().toISOString()
       }, {
         onConflict: 'wallet_address'
@@ -68,6 +77,101 @@ async function upsertWalletWhitelist({
     console.error(`[MAKEX-WHITELIST] Error upserting wallet ${walletAddress}:`, error);
     throw error;
   }
+}
+
+async function getWhitelistEntriesForAddresses(walletAddresses) {
+  if (!walletAddresses.length || !isMakexSupabaseConfigured()) return [];
+
+  try {
+    const { data, error } = await getMakexSupabase()
+      .from('makex_usage_fee_whitelist')
+      .select('*')
+      .in('wallet_address', walletAddresses);
+
+    if (error) throw error;
+    return data || [];
+  } catch (error) {
+    console.error('[MAKEX-WHITELIST] Error fetching whitelist entries by address:', error);
+    throw error;
+  }
+}
+
+async function captureGuildWhitelistSnapshot(guildId) {
+  const wallets = await getGuildWalletAddresses(guildId);
+  const addresses = wallets.map(w => w.walletAddress);
+  const entries = await getWhitelistEntriesForAddresses(addresses);
+  const entryByAddress = new Map(entries.map(e => [e.wallet_address, e]));
+
+  return wallets.map(w => ({
+    walletAddress: w.walletAddress,
+    projectName: w.projectName,
+    previous: entryByAddress.get(w.walletAddress) || null
+  }));
+}
+
+async function provisionGuildWalletsForPayment(guildId, guildName, whitelistStart, whitelistEnd) {
+  if (!isMakexSupabaseConfigured()) {
+    throw new Error('MakeX Supabase is not configured. Cannot provision whitelist before subscription payment.');
+  }
+
+  const wallets = await getGuildWalletAddresses(guildId);
+  const email = process.env.MAKEX_WHITELIST_CONTACT_EMAIL || null;
+  const pendingName = buildPendingPaymentWhitelistName(guildId, guildName);
+  const results = [];
+
+  for (const wallet of wallets) {
+    const result = await upsertWalletWhitelist({
+      walletAddress: wallet.walletAddress,
+      guildId,
+      guildName,
+      whitelistStart,
+      whitelistEnd,
+      email,
+      status: 'valid',
+      name: pendingName
+    });
+    results.push({ ...wallet, ...result });
+  }
+
+  console.log(`[MAKEX-WHITELIST] Provisionally whitelisted ${results.length} wallet(s) for guild ${guildId} before subscription payment`);
+  return results;
+}
+
+async function confirmGuildWalletsAfterPayment(guildId, guildName, whitelistStart, whitelistEnd) {
+  return syncGuildWalletsToWhitelist(guildId, guildName, whitelistStart, whitelistEnd);
+}
+
+async function rollbackGuildWhitelistSnapshot(snapshot) {
+  if (!isMakexSupabaseConfigured() || !snapshot?.length) return { rolledBack: 0 };
+
+  let rolledBack = 0;
+  for (const item of snapshot) {
+    try {
+      if (item.previous) {
+        await getMakexSupabase()
+          .from('makex_usage_fee_whitelist')
+          .upsert({
+            wallet_address: item.previous.wallet_address,
+            name: item.previous.name,
+            email: item.previous.email,
+            whitelist_start: item.previous.whitelist_start,
+            whitelist_end: item.previous.whitelist_end,
+            status: item.previous.status,
+            updated_at: new Date().toISOString()
+          }, {
+            onConflict: 'wallet_address'
+          });
+      } else {
+        await expireWalletWhitelist(item.walletAddress);
+      }
+      rolledBack += 1;
+    } catch (error) {
+      console.error(`[MAKEX-WHITELIST] Rollback failed for ${item.walletAddress}:`, error);
+    }
+  }
+
+  console.log(`[MAKEX-WHITELIST] Rolled back provisional whitelist for ${rolledBack} wallet(s)`);
+  return { rolledBack };
 }
 
 async function syncGuildWalletsToWhitelist(guildId, guildName, whitelistStart, whitelistEnd) {
@@ -166,11 +270,18 @@ async function getWhitelistEntriesForGuild(guildId) {
 
 module.exports = {
   buildWhitelistName,
+  buildPendingPaymentWhitelistName,
   getGuildWalletAddresses,
   upsertWalletWhitelist,
+  getWhitelistEntriesForAddresses,
+  captureGuildWhitelistSnapshot,
+  provisionGuildWalletsForPayment,
+  confirmGuildWalletsAfterPayment,
+  rollbackGuildWhitelistSnapshot,
   syncGuildWalletsToWhitelist,
   expireWalletWhitelist,
   expireGuildWallets,
   hasValidWhitelistForWallets,
-  getWhitelistEntriesForGuild
+  getWhitelistEntriesForGuild,
+  isMakexSupabaseConfigured
 };

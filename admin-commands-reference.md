@@ -73,10 +73,11 @@ Subscribe or renew the server's on-chain plan (withdrawals, admin sends, swaps, 
 - `plan` (Required): `1_month` (10 USDC), `3_months` (20 USDC), `6_months` (40 USDC), or `12_months` (60 USDC)
 
 **Payment flow**:
-1. USDC deducted from subscribing admin's Virtual Account
-2. Same USDC amount transferred on-chain from Community Fund to treasury
-3. Subscription end date updated (renewals stack on existing end date)
-4. All Project + Community Fund wallets synced to MakeX usage fee whitelist
+1. Provisional MakeX whitelist written **before** on-chain broadcast (if Community Fund not already whitelisted)
+2. USDC transferred on-chain from Community Fund to treasury; tx confirmed on MultiversX
+3. Whitelist confirmed on success, or rolled back on failure
+4. Subscription end date updated (renewals stack on existing end date)
+5. USDC deducted from subscribing admin's Virtual Account
 
 **Requirements**: Administrator permission, Community Fund configured, sufficient USDC in admin VA and Community Fund on-chain.
 

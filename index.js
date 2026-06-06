@@ -25115,6 +25115,27 @@ async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
     };
   }
 
+  const existing = await dbOnChainSubscriptions.getSubscription(guildId);
+  const subscriptionStart = new Date();
+  const subscriptionEnd = computeSubscriptionEnd(existing?.subscriptionEnd, plan.months);
+  const whitelistStartIso = subscriptionStart.toISOString();
+  const whitelistEndIso = subscriptionEnd.toISOString();
+
+  const communityFundWhitelisted = await makexWhitelist.hasValidWhitelistForWallets([communityFund.walletAddress]);
+  let whitelistSnapshot = null;
+  let usedProvisionalWhitelist = false;
+
+  if (!communityFundWhitelisted) {
+    if (!makexWhitelist.isMakexSupabaseConfigured()) {
+      throw new Error(
+        'MakeX whitelist is not configured. Subscription payment requires a provisional whitelist before the on-chain transfer so MakeX API usage fees can be waived.'
+      );
+    }
+    whitelistSnapshot = await makexWhitelist.captureGuildWhitelistSnapshot(guildId);
+    await makexWhitelist.provisionGuildWalletsForPayment(guildId, guildName, whitelistStartIso, whitelistEndIso);
+    usedProvisionalWhitelist = true;
+  }
+
   let transferResult;
   try {
     console.log(`[ON-CHAIN-SUB] Transferring subscription fee: ${amountStr} ${USDC_TOKEN_IDENTIFIER} from Community Fund to treasury`);
@@ -25130,10 +25151,59 @@ async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
     if (!transferResult.success) {
       throw new Error(`Failed to transfer subscription fee on-chain: ${transferResult.error || 'Unknown error'}`);
     }
+
+    if (!transferResult.txHash) {
+      throw new Error('Subscription payment did not return a transaction hash.');
+    }
+
+    console.log(`[ON-CHAIN-SUB] Verifying subscription payment on-chain: ${transferResult.txHash}`);
+    const txOutcome = await waitForMultiversXTransactionTerminalOutcome(transferResult.txHash);
+    if (txOutcome.status !== 'success') {
+      throw new Error(txOutcome.userMessage || 'Subscription payment failed on-chain.');
+    }
   } catch (transferError) {
+    if (usedProvisionalWhitelist && whitelistSnapshot) {
+      try {
+        await makexWhitelist.rollbackGuildWhitelistSnapshot(whitelistSnapshot);
+      } catch (rollbackError) {
+        console.error('[ON-CHAIN-SUB] Failed to rollback provisional whitelist:', rollbackError);
+      }
+    }
     console.error('[ON-CHAIN-SUB] Error making on-chain transfer for subscription:', transferError);
     throw new Error(`Failed to process subscription payment: ${transferError.message}. Your balance was not deducted.`);
   }
+
+  let whitelistResults;
+  try {
+    if (usedProvisionalWhitelist) {
+      whitelistResults = await makexWhitelist.confirmGuildWalletsAfterPayment(
+        guildId,
+        guildName,
+        whitelistStartIso,
+        whitelistEndIso
+      );
+    } else {
+      whitelistResults = await makexWhitelist.syncGuildWalletsToWhitelist(
+        guildId,
+        guildName,
+        whitelistStartIso,
+        whitelistEndIso
+      );
+    }
+  } catch (whitelistError) {
+    console.error('[ON-CHAIN-SUB] Payment succeeded but whitelist confirmation failed:', whitelistError);
+    whitelistResults = [];
+  }
+
+  await dbOnChainSubscriptions.upsertSubscription({
+    guildId,
+    subscribedByDiscordId: userId,
+    planMonths: plan.months,
+    amountUsdc,
+    subscriptionStart: whitelistStartIso,
+    subscriptionEnd: whitelistEndIso,
+    lastPaymentTxHash: transferResult.txHash || null
+  });
 
   const deductResult = await virtualAccounts.deductFundsFromAccount(
     guildId,
@@ -25162,27 +25232,6 @@ async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
     }
   }
 
-  const existing = await dbOnChainSubscriptions.getSubscription(guildId);
-  const subscriptionStart = new Date();
-  const subscriptionEnd = computeSubscriptionEnd(existing?.subscriptionEnd, plan.months);
-
-  await dbOnChainSubscriptions.upsertSubscription({
-    guildId,
-    subscribedByDiscordId: userId,
-    planMonths: plan.months,
-    amountUsdc,
-    subscriptionStart: subscriptionStart.toISOString(),
-    subscriptionEnd: subscriptionEnd.toISOString(),
-    lastPaymentTxHash: transferResult.txHash || null
-  });
-
-  const whitelistResults = await makexWhitelist.syncGuildWalletsToWhitelist(
-    guildId,
-    guildName,
-    subscriptionStart.toISOString(),
-    subscriptionEnd.toISOString()
-  );
-
   return {
     success: true,
     sufficient: true,
@@ -25190,7 +25239,8 @@ async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
     plan,
     subscriptionEnd,
     txHash: transferResult.txHash || null,
-    walletsWhitelisted: whitelistResults.length
+    walletsWhitelisted: whitelistResults.length,
+    provisionalWhitelist: usedProvisionalWhitelist
   };
 }
 
