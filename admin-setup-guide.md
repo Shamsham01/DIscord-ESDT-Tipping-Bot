@@ -180,7 +180,7 @@ The **Community Fund** is a special project wallet that:
 Use the `/set-community-fund` command:
 
 ```
-/set-community-fund fund-name supported-tokens [qr-code-url]
+/set-community-fund fund-name supported-tokens
 ```
 
 {% embed url="https://streamable.com/mom0mk" fullWidth="true" %}
@@ -189,15 +189,14 @@ Use the `/set-community-fund` command:
 
 * **`fund-name`** (Required): Name for your Community Fund (e.g., "Main Fund", "Gaming Fund")
 * **`supported-tokens`** (Required): Comma-separated list of supported tokens (e.g., `REWARD-cf6eac,EGLD`)
-* **`qr-code-url`** (Optional): URL to a QR code image of the Community Fund wallet address
 
 #### Example
 
 ```
-/set-community-fund MainFund REWARD-cf6eac,EGLD https://example.com/qr-code.png
+/set-community-fund MainFund REWARD-cf6eac,EGLD
 ```
 
-**Note**: The Community Fund wallet is **auto-generated** by the bot. You don't need to provide a PEM file - the bot creates and manages this wallet automatically.
+**Note**: The Community Fund wallet and QR code are **auto-generated** by the bot. You don't need to provide a PEM file or QR image URL — the bot creates the wallet, generates the QR code, uploads it to storage, and saves the URL automatically.
 
 ### Step 2: Get Community Fund Address
 
@@ -210,7 +209,7 @@ After creating the Community Fund, get its address:
 This will display:
 
 * The wallet address (users need this to top up)
-* QR code (if you provided a URL)
+* QR code for the wallet address
 * Supported tokens
 
 **Share this address with your users** so they can transfer tokens to top up their virtual accounts.
@@ -268,24 +267,9 @@ To add or update a project logo (for non-Community Fund projects):
 * Embed footers
 * Project listings
 
-### Updating Community Fund QR Code
+### Community Fund QR Code
 
-To add or update the Community Fund QR code:
-
-```
-/update-project Community Fund qr-code-url:https://example.com/new-qr.png
-```
-
-{% embed url="https://streamable.com/x6txwo" fullWidth="true" %}
-
-**Note**:
-
-* QR code URLs are stored in the `community_fund_qr` table
-* Only the Community Fund project can have a QR code URL
-* QR codes are displayed in:
-  * Game embeds (RPS, Football Betting)
-  * Wallet registration confirmations
-  * Community Fund address displays
+The Community Fund QR code is **generated automatically** when you run `/set-community-fund`. The URL is stored in the `community_fund_qr` table and used in game embeds, wallet registration confirmations, and `/show-community-fund-address`. If you recreate the Community Fund, a new QR code is generated for the new wallet address.
 
 ### Updating Other Project Fields
 
@@ -302,22 +286,16 @@ You can update multiple fields at once:
 * **`wallet-pem`**: Update PEM file content
 * **`supported-tokens`**: Update supported tokens list
 * **`project-logo-url`**: Update project logo (non-Community Fund only)
-* **`qr-code-url`**: Update QR code (Community Fund only)
 * **`user-input`**: Update project notes/description
 
 ### Important Notes
 
 1. **Project Logo vs QR Code**:
    * **Project Logo** (`project-logo-url`): For regular projects, used in notifications
-   * **QR Code** (`qr-code-url`): Only for Community Fund, displayed in game embeds
+   * **QR Code**: Auto-generated for Community Fund only, displayed in game embeds
 2. **You can't mix them**:
    * Regular projects can only have `project-logo-url`
-   * Community Fund can only have `qr-code-url`
-3. **Both are optional** but recommended for better user experience
-
-{% hint style="success" %}
-Tip: Best way to create wallet QR code is to copy Community Fund wallet address, paste it in chatGPT and ask it to generate QR code for give wallet address.
-{% endhint %}
+   * Community Fund uses an auto-generated QR code instead of a project logo
 
 ***
 

@@ -10,7 +10,7 @@ Below is a list of all available commands for the ESDT Tipping Bot, grouped by c
 - **/register-project** — Admins: Register a new project wallet for sending tokens.
 - **/update-project** — Admins: Update details for an existing project wallet.
 - **/delete-project** — Admins: Delete a registered project wallet.
-- **/set-community-fund** — Admins: Set a project wallet as the Community Fund for P2P tips and games. Optionally include QR code URL for game embeds.
+- **/set-community-fund** — Admins: Create the Community Fund wallet for P2P tips and games. QR code is generated automatically.
 - **/list-wallets** — Admins: List all registered user wallets in the server.
 - **/list-projects** — List all registered project wallets.
 - **/check-community-fund-balance** — Admins: Check Community Fund EGLD for on-chain fees and mass-withdraw estimates.

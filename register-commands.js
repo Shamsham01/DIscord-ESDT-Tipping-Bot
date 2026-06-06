@@ -303,12 +303,6 @@ const commands = [
                 required: false,
             },
             {
-                name: 'qr-code-url',
-                description: 'Community Fund QR code URL (stored in community_fund_qr table) (optional)',
-                type: ApplicationCommandOptionType.String,
-                required: false,
-            },
-            {
                 name: 'user-input',
                 description: 'New additional notes or description for the project (optional)',
                 type: ApplicationCommandOptionType.String,
@@ -384,12 +378,6 @@ const commands = [
                 description: 'Comma-separated list of supported token tickers (e.g., EGLD,USDC,USDT)',
                 type: ApplicationCommandOptionType.String,
                 required: true
-            },
-            {
-                name: 'qr-code-url',
-                description: 'URL to the community fund wallet QR code image (optional)',
-                type: ApplicationCommandOptionType.String,
-                required: false
             }
         ],
         default_member_permissions: null, // Permissions are checked in code

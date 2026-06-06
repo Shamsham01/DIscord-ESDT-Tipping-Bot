@@ -400,6 +400,22 @@ async function setCommunityFundQR(guildId, projectName, qrUrl) {
   }
 }
 
+async function deleteCommunityFundQR(guildId, projectName) {
+  try {
+    const { error } = await supabase
+      .from('community_fund_qr')
+      .delete()
+      .eq('guild_id', guildId)
+      .eq('project_name', projectName);
+
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('[DB] Error deleting community fund QR:', error);
+    throw error;
+  }
+}
+
 // Token Metadata
 async function getTokenMetadata(guildId) {
   try {
@@ -661,6 +677,7 @@ module.exports = {
   updateGuildSettings,
   getCommunityFundQR,
   setCommunityFundQR,
+  deleteCommunityFundQR,
   getTokenMetadata,
   setTokenMetadata,
   getHouseBalance,

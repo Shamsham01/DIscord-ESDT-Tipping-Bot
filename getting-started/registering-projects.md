@@ -88,11 +88,10 @@ Understanding the difference between these two wallet types is crucial for prope
 1. **Create Community Fund** using `/set-community-fund`:
    * `fund-name`: Name for your Community Fund (e.g., "Main Fund", "Gaming Fund").
    * `supported-tokens`: Comma-separated list of supported tokens (e.g., `REWARD-cf6eac,WEGLD-bd4d79`    ).
-   * (Optional) `qr-code-url`: URL to a QR code image of the Community Fund wallet address.
 2. **Get Community Fund Address** using `/show-community-fund-address` to display the wallet address and QR code for users. [The embed will contain Wallet Registration button for seamless user registration without need to use registration command.](#user-content-fn-1)[^1]
 
 {% hint style="info" %}
-**Note:** The Community Fund wallet is **auto-generated** by the bot. You don't need to provide a PEM file - the bot creates and manages this wallet automatically.
+**Note:** The Community Fund wallet and QR code are **auto-generated** by the bot. You don't need to provide a PEM file or QR image URL — the bot creates and manages both automatically.
 {% endhint %}
 
 > ⚠️ **Important:**
@@ -103,7 +102,7 @@ Understanding the difference between these two wallet types is crucial for prope
 
 ***
 
-### 🖼️ Updating Project Logo and QR Code
+### 🖼️ Updating Project Logo
 
 You can update project settings using `/update-project`:
 
@@ -113,19 +112,11 @@ You can update project settings using `/update-project`:
 /update-project project-name project-logo-url:https://example.com/new-logo.png
 ```
 
-**To update Community Fund QR code**:
-
-```
-/update-project Community Fund qr-code-url:https://example.com/new-qr.png
-```
-
 **Important Notes:**
 
 * **Project Logo** (`project-logo-url`): For regular projects, used in notifications and DM embeds
-* **QR Code** (`qr-code-url`): Only for Community Fund, displayed in game embeds and wallet registration
-* Regular projects can only have `project-logo-url`
-* Community Fund can only have `qr-code-url`
-* Both are optional but recommended for better user experience
+* **QR Code**: Auto-generated for Community Fund when you run `/set-community-fund`, displayed in game embeds and wallet registration
+* Regular projects use `project-logo-url`; Community Fund uses an auto-generated QR code instead
 
 ### 🏛️ Understanding House Balance
 
@@ -158,7 +149,7 @@ This shows earnings, spending, and PNL (Profit & Loss) for each house type.
 ### ✅ Best Practices
 
 * Regularly review and update supported tokens.
-* Add project logos and QR codes for better user experience.
+* Add project logos for regular projects; Community Fund QR codes are created automatically.
 * Monitor House Balance to track activity earnings and spending.
 
 [^1]: Useful Tip!

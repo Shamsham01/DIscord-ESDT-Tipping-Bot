@@ -29,12 +29,12 @@ Register a new project with auto-generated wallet.
 ### `/update-project`
 Update project settings.
 
-**Usage**: `/update-project project-name [new-project-name] [wallet-address] [wallet-pem] [supported-tokens] [project-logo-url] [qr-code-url] [user-input]`
+**Usage**: `/update-project project-name [new-project-name] [wallet-address] [wallet-pem] [supported-tokens] [project-logo-url] [user-input]`
 
 **Examples**:
 ```
 /update-project MainWallet project-logo-url:https://new-logo.png
-/update-project Community Fund qr-code-url:https://new-qr.png
+/update-project Community Fund supported-tokens:REWARD-cf6eac,EGLD
 /update-project MainWallet supported-tokens:REWARD-cf6eac,EGLD,USDC
 ```
 
@@ -53,11 +53,11 @@ Delete a project (requires "DELETE" confirmation).
 ### `/set-community-fund`
 Create and set Community Fund (auto-generated wallet).
 
-**Usage**: `/set-community-fund fund-name supported-tokens [qr-code-url]`
+**Usage**: `/set-community-fund fund-name supported-tokens`
 
 **Example**:
 ```
-/set-community-fund MainFund REWARD-cf6eac,EGLD https://qr-code.png
+/set-community-fund MainFund REWARD-cf6eac,EGLD
 ```
 
 ---
@@ -480,7 +480,7 @@ Display the Community Fund wallet address and QR code.
 
 Shows:
 - Community Fund wallet address
-- QR code (if available)
+- QR code (auto-generated)
 - Supported tokens
 
 ### `/get-competition`
@@ -558,7 +558,7 @@ If you don't have administrator permissions, contact your server admins.
 ### Project Management
 
 - Use separate wallets for different purposes
-- Keep project logos and QR codes updated
+- Keep project logos updated; Community Fund QR codes are auto-generated
 - Regularly review and update supported tokens
 - Monitor project balances
 
