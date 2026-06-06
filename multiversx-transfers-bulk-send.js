@@ -60,10 +60,15 @@ function extractCollectionAndNonce(fullTokenIdentifier) {
  * @param {string} apiToken - API authentication token
  * @returns {Promise<Object>} Transfer result with txHash, success status, etc.
  */
-async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem, apiBaseUrl, apiToken, senderWalletAddress = null) {
+async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem, apiBaseUrl, apiToken, senderWalletAddress = null, guildId = null) {
   try {
     if (!apiBaseUrl || !apiToken) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
+    }
+
+    if (guildId) {
+      const { assertGuildOnChainPlanActive } = require('./utils/on-chain-subscription-guard');
+      await assertGuildOnChainPlanActive(guildId);
     }
 
     if (senderWalletAddress) {

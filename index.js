@@ -55,6 +55,8 @@ console.log('Environment variables:', {
   SWAP_API_TOKEN: (process.env.SWAP_API_TOKEN || process.env.SECURE_TOKEN) ? 'Set' : 'Missing',
   SUPABASE_URL: process.env.SUPABASE_URL ? 'Set' : 'Missing',
   SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY ? 'Set' : 'Missing',
+  MAKEX_SUPABASE_URL: process.env.MAKEX_SUPABASE_URL ? 'Set' : 'Missing',
+  MAKEX_SUPABASE_SERVICE_ROLE_KEY: process.env.MAKEX_SUPABASE_SERVICE_ROLE_KEY ? 'Set' : 'Missing',
 });
 
 // Validate critical environment variables before proceeding
@@ -93,6 +95,20 @@ const dbSwapTransactions = require('./db/swap-transactions');
 const nftRoleVerificationHandlers = require('./handlers/nft-role-verification');
 const { runNftRoleSync } = require('./jobs/sync-nft-role-verifications');
 const dbNftRoleRules = require('./db/nft-role-verification');
+const dbOnChainSubscriptions = require('./db/on-chain-subscriptions');
+const makexWhitelist = require('./db/makex-whitelist');
+const {
+  isGuildOnChainPlanActive,
+  assertGuildOnChainPlanActive
+} = require('./utils/on-chain-subscription-guard');
+const {
+  getPlan,
+  computeSubscriptionEnd,
+  USDC_TOKEN_IDENTIFIER,
+  ON_CHAIN_SUBSCRIPTION_TREASURY_WALLET
+} = require('./utils/on-chain-subscription-plans');
+const { syncGuildWhitelistIfSubscribed } = require('./utils/sync-guild-makex-whitelist');
+const { runOnChainSubscriptionMaintenance } = require('./jobs/on-chain-subscription-reminders');
 
 // Validate dbFootball module is loaded correctly
 if (!dbFootball || typeof dbFootball !== 'object') {
@@ -820,6 +836,7 @@ async function checkLiveActivities(guildId) {
 // Mass refund function - refunds all virtual account balances to users' wallets
 async function processMassRefund(guildId, communityFundProject, progressCallback = null) {
   try {
+    await assertGuildOnChainPlanActive(guildId);
     console.log(`[MASS-REFUND] Starting mass refund for guild ${guildId} using project ${communityFundProject}`);
     
     // Get all virtual accounts with balances
@@ -1133,7 +1150,8 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
             project.walletPem,
             API_BASE_URL,
             API_TOKEN,
-            project.walletAddress
+            project.walletAddress,
+            guildId
           );
 
           if (transferResult.success && transferResult.txHash) {
@@ -2267,8 +2285,12 @@ async function getUserByWallet(walletAddress, guildId) {
 
 // Transfer ESDT tokens using project wallet
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") - required for API
-async function transferESDT(recipientWallet, tokenIdentifier, amount, projectName, guildId) {
+async function transferESDT(recipientWallet, tokenIdentifier, amount, projectName, guildId, options = {}) {
   try {
+    if (!options.skipSubscriptionCheck) {
+      await assertGuildOnChainPlanActive(guildId);
+    }
+
     if (!API_BASE_URL || !API_TOKEN) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
     }
@@ -2452,8 +2474,12 @@ async function transferESDT(recipientWallet, tokenIdentifier, amount, projectNam
 
 // Transfer ESDT from Community Fund (without supported tokens restriction)
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") - required for API
-async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, amount, projectName, guildId) {
+async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, amount, projectName, guildId, options = {}) {
   try {
+    if (!options.skipSubscriptionCheck) {
+      await assertGuildOnChainPlanActive(guildId);
+    }
+
     if (!API_BASE_URL || !API_TOKEN) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
     }
@@ -2634,8 +2660,12 @@ async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, a
 }
 
 // Transfer NFT using project wallet
-async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, guildId) {
+async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, guildId, options = {}) {
   try {
+    if (!options.skipSubscriptionCheck) {
+      await assertGuildOnChainPlanActive(guildId);
+    }
+
     if (!API_BASE_URL || !API_TOKEN) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
     }
@@ -2790,8 +2820,12 @@ async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, gu
 }
 
 // Transfer SFT from Community Fund to user wallet
-async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenNonce, amount, projectName, guildId) {
+async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenNonce, amount, projectName, guildId, options = {}) {
   try {
+    if (!options.skipSubscriptionCheck) {
+      await assertGuildOnChainPlanActive(guildId);
+    }
+
     if (!API_BASE_URL || !API_TOKEN) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
     }
@@ -2973,8 +3007,12 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
 
 // Transfer NFT from Community Fund to user wallet
 // Auto-detects SFT vs NFT based on token_type from database (bulletproof detection)
-async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier, projectName, guildId, amount = 1, tokenType = null) {
+async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier, projectName, guildId, amount = 1, tokenType = null, options = {}) {
   try {
+    if (!options.skipSubscriptionCheck) {
+      await assertGuildOnChainPlanActive(guildId);
+    }
+
     const projectsForEgld = await getProjects(guildId);
     const projectForEgld = projectsForEgld[projectName];
     if (projectForEgld?.walletAddress) {
@@ -3041,7 +3079,7 @@ async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier
       }
       
       console.log(`[WITHDRAW-NFT] Using collection ticker: "${collectionTicker}", nonce: ${nonceValue} (extracted from identifier: ${fullTokenIdentifier})`);
-      return await transferSFTFromCommunityFund(recipientWallet, collectionTicker, nonceValue, finalAmount, projectName, guildId);
+      return await transferSFTFromCommunityFund(recipientWallet, collectionTicker, nonceValue, finalAmount, projectName, guildId, options);
     }
     
     // NFT transfer (amount = 1)
@@ -3533,6 +3571,12 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       await interaction.editReply({ embeds: [embed] });
+
+      try {
+        await syncGuildWhitelistIfSubscribed(guildId, interaction.guild?.name || 'Unknown');
+      } catch (whitelistError) {
+        console.error('[REGISTER-PROJECT] MakeX whitelist sync failed:', whitelistError.message);
+      }
       
       // Send DM to admin with wallet details and PEM file
       try {
@@ -5233,6 +5277,12 @@ client.on('interactionCreate', async (interaction) => {
       
       await interaction.editReply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
       console.log(`[COMMUNITY-FUND] Created Community Fund wallet for guild ${guildId}: ${wallet.address}`);
+
+      try {
+        await syncGuildWhitelistIfSubscribed(guildId, interaction.guild?.name || 'Unknown');
+      } catch (whitelistError) {
+        console.error('[COMMUNITY-FUND] MakeX whitelist sync failed:', whitelistError.message);
+      }
     } catch (error) {
       console.error('Error setting Community Tip Fund:', error);
       if (interaction.deferred) {
@@ -13587,6 +13637,158 @@ client.on('interactionCreate', async (interaction) => {
         flags: [MessageFlags.Ephemeral]
       });
     }
+  } else if (commandName === 'subscribe-on-chain-plan') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({
+          content: '❌ Only administrators can subscribe to the on-chain plan.',
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      const planKey = interaction.options.getString('plan');
+      const guildId = interaction.guildId;
+      const userId = interaction.user.id;
+      const guildName = interaction.guild?.name || 'Unknown';
+
+      const result = await chargeOnChainSubscription(guildId, userId, planKey, guildName);
+
+      if (!result.sufficient) {
+        const embed = new EmbedBuilder()
+          .setTitle('❌ Insufficient Balance for On-Chain Plan')
+          .setDescription(result.communityFundShortfall
+            ? 'The Community Fund does not have enough USDC for the on-chain payment.'
+            : 'Your virtual account does not have enough USDC for this subscription.')
+          .addFields({
+            name: '💵 Required',
+            value: `**${result.amountUsdc} USDC**`,
+            inline: true
+          }, {
+            name: '📉 Shortfall',
+            value: `**${result.needed} USDC** more needed`,
+            inline: true
+          })
+          .setColor(0xFF0000)
+          .setTimestamp()
+          .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      const endDate = result.subscriptionEnd.toLocaleDateString('en-GB', {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC'
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle('✅ On-Chain Plan Activated')
+        .setDescription('Your server now has access to all on-chain transfers and MakeX API fee waivers.')
+        .addFields(
+          { name: '📦 Plan', value: result.plan.label, inline: true },
+          { name: '💵 Paid', value: `${result.amountUsdc} USDC`, inline: true },
+          { name: '📅 Valid Until', value: endDate, inline: true },
+          { name: '👤 Subscribed By', value: `<@${userId}>`, inline: true },
+          { name: '🔗 Wallets Whitelisted', value: `${result.walletsWhitelisted} wallet(s) synced to MakeX`, inline: true }
+        )
+        .setColor(0x00FF00)
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+
+      if (result.txHash) {
+        embed.addFields({
+          name: '🔗 Transaction',
+          value: `[View on Explorer](https://explorer.multiversx.com/transactions/${result.txHash})`,
+          inline: false
+        });
+      }
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (error) {
+      console.error('[ON-CHAIN-SUB] Error in subscribe-on-chain-plan command:', error);
+      await interaction.editReply({
+        content: `❌ **Error:** ${error.message}`,
+        flags: [MessageFlags.Ephemeral]
+      });
+    }
+  } else if (commandName === 'on-chain-subscription-status') {
+    try {
+      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.editReply({
+          content: '❌ Only administrators can view on-chain subscription status.',
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      const guildId = interaction.guildId;
+      const subscription = await dbOnChainSubscriptions.getSubscription(guildId);
+      const botPlanActive = dbOnChainSubscriptions.isSubscriptionActive(subscription);
+      const legacyActive = !botPlanActive && await isGuildOnChainPlanActive(guildId);
+      const isActive = botPlanActive || legacyActive;
+
+      const whitelistEntries = await makexWhitelist.getWhitelistEntriesForGuild(guildId);
+      const guildWallets = await makexWhitelist.getGuildWalletAddresses(guildId);
+
+      const embed = new EmbedBuilder()
+        .setTitle('On-Chain Plan Status')
+        .setColor(isActive ? 0x00FF00 : 0xFF0000)
+        .addFields(
+          { name: 'Status', value: isActive ? '✅ Active' : '❌ Inactive', inline: true },
+          { name: 'Guild Wallets', value: `${guildWallets.length}`, inline: true },
+          { name: 'MakeX Whitelist Entries', value: `${whitelistEntries.length}`, inline: true }
+        )
+        .setTimestamp()
+        .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
+
+      if (subscription) {
+        const endDate = new Date(subscription.subscriptionEnd).toLocaleDateString('en-GB', {
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric',
+          timeZone: 'UTC'
+        });
+        embed.addFields(
+          { name: 'Valid Until', value: endDate, inline: true },
+          { name: 'Last Plan', value: `${subscription.planMonths} month(s)`, inline: true },
+          { name: 'Subscribed By', value: `<@${subscription.subscribedByDiscordId}>`, inline: true }
+        );
+      } else if (legacyActive) {
+        embed.addFields({
+          name: 'Source',
+          value: 'Active via MakeX whitelist (legacy/manual entry)',
+          inline: false
+        });
+      } else {
+        embed.setDescription('No active on-chain plan. Use `/subscribe-on-chain-plan` to enable on-chain transfers.');
+      }
+
+      if (whitelistEntries.length > 0) {
+        const summary = whitelistEntries.slice(0, 5).map(entry => {
+          const end = new Date(entry.whitelist_end).toLocaleDateString('en-GB', { timeZone: 'UTC' });
+          return `\`${entry.wallet_address.slice(0, 12)}...\` — ${entry.status} until ${end}`;
+        }).join('\n');
+        embed.addFields({
+          name: 'Whitelist Preview',
+          value: summary + (whitelistEntries.length > 5 ? `\n...and ${whitelistEntries.length - 5} more` : ''),
+          inline: false
+        });
+      }
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (error) {
+      console.error('[ON-CHAIN-SUB] Error in on-chain-subscription-status command:', error);
+      await interaction.editReply({
+        content: `❌ **Error:** ${error.message}`,
+        flags: [MessageFlags.Ephemeral]
+      });
+    }
   } else if (commandName === 'subscribe-activity') {
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
@@ -13782,9 +13984,12 @@ client.on('interactionCreate', async (interaction) => {
       const initialSupplyHuman = new BigNumber(initialSupplyWei).dividedBy(new BigNumber(10).pow(rewardTokenDecimals)).toString();
       
       // Check balance first (without charging) - check both fee and initial supply
-      const feeInfo = await calculatePoolCreationFee();
+      const onChainPlanActive = await isGuildOnChainPlanActive(guildId);
+      const feeInfo = onChainPlanActive ? null : await calculatePoolCreationFee();
       const REWARD_IDENTIFIER = 'REWARD-cf6eac';
-      const feeAmountHuman = new BigNumber(feeInfo.feeAmountWei).dividedBy(new BigNumber(10).pow(feeInfo.rewardDecimals)).toString();
+      const feeAmountHuman = feeInfo
+        ? new BigNumber(feeInfo.feeAmountWei).dividedBy(new BigNumber(10).pow(feeInfo.rewardDecimals)).toString()
+        : '0';
       
       // Check balance for the reward token used for initial supply
       const userRewardTokenBalance = await virtualAccounts.getUserBalance(guildId, userId, rewardTokenIdentifier);
@@ -13815,8 +14020,8 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Check if user has sufficient balance for fee
-      if (balanceBN.isLessThan(feeBN)) {
+      // Check if user has sufficient balance for fee (waived when on-chain plan is active)
+      if (!onChainPlanActive && balanceBN.isLessThan(feeBN)) {
         const needed = feeBN.minus(balanceBN).toString();
         const embed = new EmbedBuilder()
           .setTitle('❌ Insufficient Balance for Pool Creation')
@@ -17929,6 +18134,13 @@ client.on('interactionCreate', async (interaction) => {
 
     if (!quote) {
       await interaction.reply({ content: '❌ Quote expired or not found. Please run /swap again.', flags: [MessageFlags.Ephemeral] });
+      return;
+    }
+
+    try {
+      await assertGuildOnChainPlanActive(guildId);
+    } catch (subError) {
+      await interaction.reply({ content: `❌ ${subError.message}`, flags: [MessageFlags.Ephemeral] });
       return;
     }
 
@@ -22191,7 +22403,8 @@ client.on('interactionCreate', async (interaction) => {
         communityFundProject.walletPem,
         API_BASE_URL,
         API_TOKEN,
-        communityFundProject.walletAddress
+        communityFundProject.walletAddress,
+        guildIdFromCustomId
       );
       
       if (transferResult.success && transferResult.txHash) {
@@ -24444,9 +24657,12 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
     }
     
     // Calculate fee info to show in loading message
-    const feeInfo = await calculatePoolCreationFee();
+    const onChainPlanActive = await isGuildOnChainPlanActive(guildId);
+    const feeInfo = onChainPlanActive ? null : await calculatePoolCreationFee();
     const REWARD_IDENTIFIER = 'REWARD-cf6eac';
-    const feeAmountHuman = new BigNumber(feeInfo.feeAmountWei).dividedBy(new BigNumber(10).pow(feeInfo.rewardDecimals)).toString();
+    const feeAmountHuman = feeInfo
+      ? new BigNumber(feeInfo.feeAmountWei).dividedBy(new BigNumber(10).pow(feeInfo.rewardDecimals)).toString()
+      : '0';
     
     // Convert initial supply to human-readable format for display
     const initialSupplyWei = pool.initialSupplyWei;
@@ -24462,7 +24678,9 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
       .addFields(
         {
           name: '💰 Processing Fees',
-          value: `Charging pool creation fee: **${feeAmountHuman} REWARD** ($${feeInfo.feeAmountUsd})`,
+          value: onChainPlanActive
+            ? 'Pool creation fee **waived** (active on-chain plan)'
+            : `Charging pool creation fee: **${feeAmountHuman} REWARD** ($${feeInfo.feeAmountUsd})`,
           inline: false
         },
         {
@@ -24820,6 +25038,142 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
   }
 }
 
+async function getWalletEsdtBalanceHuman(walletAddress, tokenIdentifier) {
+  try {
+    const encodedIdentifier = encodeURIComponent(tokenIdentifier);
+    const response = await fetch(`https://api.multiversx.com/accounts/${walletAddress}/tokens/${encodedIdentifier}`);
+    if (!response.ok) return '0';
+    const data = await response.json();
+    const decimals = data.decimals ?? 18;
+    return new BigNumber(data.balance || '0')
+      .dividedBy(new BigNumber(10).pow(decimals))
+      .toString();
+  } catch (error) {
+    console.error(`[BALANCE] Error fetching ${tokenIdentifier} balance for ${walletAddress}:`, error.message);
+    return '0';
+  }
+}
+
+async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
+  const plan = getPlan(planKey);
+  if (!plan) {
+    throw new Error('Invalid subscription plan selected.');
+  }
+
+  const amountUsdc = plan.amountUsdc;
+  const amountStr = amountUsdc.toString();
+
+  const userBalance = await virtualAccounts.getUserBalance(guildId, userId, USDC_TOKEN_IDENTIFIER);
+  const balanceBN = new BigNumber(userBalance || '0');
+  const feeBN = new BigNumber(amountStr);
+
+  if (balanceBN.isLessThan(feeBN)) {
+    const needed = feeBN.minus(balanceBN).toString();
+    return {
+      success: false,
+      sufficient: false,
+      needed,
+      amountUsdc
+    };
+  }
+
+  const communityFundProjectName = getCommunityFundProjectName();
+  const projects = await getProjects(guildId);
+  const communityFund = projects[communityFundProjectName];
+  if (!communityFund?.walletAddress) {
+    throw new Error('Community Fund is not configured. Use /set-community-fund first.');
+  }
+
+  const cfBalance = await getWalletEsdtBalanceHuman(communityFund.walletAddress, USDC_TOKEN_IDENTIFIER);
+  if (new BigNumber(cfBalance || '0').isLessThan(feeBN)) {
+    return {
+      success: false,
+      sufficient: false,
+      needed: feeBN.minus(cfBalance || '0').toString(),
+      amountUsdc,
+      communityFundShortfall: true
+    };
+  }
+
+  let transferResult;
+  try {
+    console.log(`[ON-CHAIN-SUB] Transferring subscription fee: ${amountStr} ${USDC_TOKEN_IDENTIFIER} from Community Fund to treasury`);
+    transferResult = await transferESDTFromCommunityFund(
+      ON_CHAIN_SUBSCRIPTION_TREASURY_WALLET,
+      USDC_TOKEN_IDENTIFIER,
+      amountStr,
+      communityFundProjectName,
+      guildId,
+      { skipSubscriptionCheck: true }
+    );
+
+    if (!transferResult.success) {
+      throw new Error(`Failed to transfer subscription fee on-chain: ${transferResult.error || 'Unknown error'}`);
+    }
+  } catch (transferError) {
+    console.error('[ON-CHAIN-SUB] Error making on-chain transfer for subscription:', transferError);
+    throw new Error(`Failed to process subscription payment: ${transferError.message}. Your balance was not deducted.`);
+  }
+
+  const deductResult = await virtualAccounts.deductFundsFromAccount(
+    guildId,
+    userId,
+    USDC_TOKEN_IDENTIFIER,
+    amountStr,
+    `On-chain plan subscription (${plan.label})`
+  );
+
+  if (!deductResult.success) {
+    console.error(`[ON-CHAIN-SUB] WARNING: On-chain transfer succeeded but VA deduction failed for user ${userId}. TX Hash: ${transferResult.txHash || 'N/A'}`);
+  } else if (transferResult.txHash && deductResult.transaction) {
+    try {
+      const supabase = require('./supabase-client');
+      await supabase
+        .from('virtual_account_transactions')
+        .update({
+          tx_hash: transferResult.txHash,
+          source: 'on_chain_subscription'
+        })
+        .eq('transaction_id', deductResult.transaction.id)
+        .eq('guild_id', guildId)
+        .eq('user_id', userId);
+    } catch (updateError) {
+      console.error('[ON-CHAIN-SUB] Error updating transaction record:', updateError);
+    }
+  }
+
+  const existing = await dbOnChainSubscriptions.getSubscription(guildId);
+  const subscriptionStart = new Date();
+  const subscriptionEnd = computeSubscriptionEnd(existing?.subscriptionEnd, plan.months);
+
+  await dbOnChainSubscriptions.upsertSubscription({
+    guildId,
+    subscribedByDiscordId: userId,
+    planMonths: plan.months,
+    amountUsdc,
+    subscriptionStart: subscriptionStart.toISOString(),
+    subscriptionEnd: subscriptionEnd.toISOString(),
+    lastPaymentTxHash: transferResult.txHash || null
+  });
+
+  const whitelistResults = await makexWhitelist.syncGuildWalletsToWhitelist(
+    guildId,
+    guildName,
+    subscriptionStart.toISOString(),
+    subscriptionEnd.toISOString()
+  );
+
+  return {
+    success: true,
+    sufficient: true,
+    amountUsdc,
+    plan,
+    subscriptionEnd,
+    txHash: transferResult.txHash || null,
+    walletsWhitelisted: whitelistResults.length
+  };
+}
+
 // Calculate pool creation fee (configurable via STAKING_POOL_CREATION_FEE_USD env variable, default $5)
 // Set STAKING_POOL_CREATION_FEE_USD in .env file to change the fee amount (e.g., STAKING_POOL_CREATION_FEE_USD=10 for $10)
 async function calculatePoolCreationFee() {
@@ -24861,6 +25215,17 @@ async function calculatePoolCreationFee() {
 // Charge pool creation fee from user VA and transfer on-chain
 async function chargePoolCreationFee(guildId, userId) {
   try {
+    if (await isGuildOnChainPlanActive(guildId)) {
+      console.log(`[STAKING] Skipping pool creation fee for guild ${guildId} (active on-chain plan)`);
+      return {
+        sufficient: true,
+        feeAmountWei: '0',
+        feeAmountUsd: 0,
+        txHash: null,
+        waived: true
+      };
+    }
+
     const feeInfo = await calculatePoolCreationFee();
     const REWARD_IDENTIFIER = 'REWARD-cf6eac';
     const FEE_RECIPIENT_WALLET = 'erd158k2c3aserjmwnyxzpln24xukl2fsvlk9x46xae4dxl5xds79g6sdz37qn';
@@ -27916,6 +28281,15 @@ client.on('ready', async () => {
     }
   }, 24 * 60 * 60 * 1000);
   console.log('NFT role verification sync scheduled (every 24 hours)');
+
+  setInterval(async () => {
+    try {
+      await runOnChainSubscriptionMaintenance(client);
+    } catch (error) {
+      console.error('[ON-CHAIN-SUB] Scheduled maintenance error:', error.message);
+    }
+  }, 24 * 60 * 60 * 1000);
+  console.log('On-chain subscription reminder and expiry check scheduled (every 24 hours)');
   
   // Set up periodic check for staking pool reward distributions
   setInterval(async () => {

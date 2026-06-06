@@ -928,6 +928,31 @@ const commands = [
         default_member_permissions: null,
     },
     {
+        name: 'subscribe-on-chain-plan',
+        description: 'Subscribe to on-chain transfers (withdrawals, sends, swaps) and MakeX API fee waiver (Admin only)',
+        options: [
+            {
+                name: 'plan',
+                description: 'Subscription duration and price in USDC',
+                type: ApplicationCommandOptionType.String,
+                required: true,
+                choices: [
+                    { name: '1 Month — 10 USDC', value: '1_month' },
+                    { name: '3 Months — 20 USDC (10 USDC off)', value: '3_months' },
+                    { name: '6 Months — 40 USDC (20 USDC off)', value: '6_months' },
+                    { name: '12 Months — 60 USDC (60 USDC off)', value: '12_months' }
+                ]
+            }
+        ],
+        default_member_permissions: null,
+    },
+    {
+        name: 'on-chain-subscription-status',
+        description: 'View on-chain plan status, expiry, and MakeX whitelist sync (Admin only)',
+        options: [],
+        default_member_permissions: null,
+    },
+    {
         name: 'server-balances',
         description: 'View server-wide virtual account summary with pagination when needed (Admin only)',
         options: [
