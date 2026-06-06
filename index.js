@@ -2669,6 +2669,64 @@ async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, a
   }
 }
 
+async function restoreVirtualAccountBalance(guildId, userId, tokenIdentifier, amount, balanceAfterDeduction, reason) {
+  const dbVirtualAccounts = require('./db/virtual-accounts');
+  const amountStr = typeof amount === 'object' && amount?.toString ? amount.toString() : String(amount);
+  const { newBalance: restoredBalance } = await dbVirtualAccounts.updateAccountBalance(
+    guildId, userId, tokenIdentifier, amountStr, {}
+  );
+  await dbVirtualAccounts.addTransaction(guildId, userId, {
+    id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    type: 'deposit',
+    token: tokenIdentifier,
+    amount: amountStr,
+    balanceBefore: balanceAfterDeduction,
+    balanceAfter: restoredBalance,
+    description: `ledger reversal (${reason})`,
+    timestamp: Date.now()
+  });
+  return restoredBalance;
+}
+
+async function tryRestoreVirtualAccountBalance(guildId, userId, tokenIdentifier, amount, balanceAfterDeduction, reason) {
+  try {
+    const newBalance = await restoreVirtualAccountBalance(
+      guildId, userId, tokenIdentifier, amount, balanceAfterDeduction, reason
+    );
+    return { restored: true, newBalance };
+  } catch (error) {
+    console.error(`[LEDGER] Failed to restore ${amount} ${tokenIdentifier} for user ${userId}:`, error);
+    return { restored: false, error };
+  }
+}
+
+async function tryRestoreNftToVirtualAccount(guildId, userId, collection, nftRecord, nonce, amount, tokenType) {
+  try {
+    await virtualAccountsNFT.addNFTToAccount(
+      guildId,
+      userId,
+      collection,
+      nftRecord.identifier,
+      nonce,
+      {
+        nft_name: nftRecord.nft_name,
+        nft_image_url: nftRecord.nft_image_url,
+        metadata: nftRecord.metadata
+      },
+      amount,
+      tokenType
+    );
+    return { restored: true };
+  } catch (error) {
+    console.error(`[LEDGER] Failed to restore NFT ${collection}#${nonce} for user ${userId}:`, error);
+    return { restored: false, error };
+  }
+}
+
+async function restoreEsdetWithdrawalBalance(guildId, userId, tokenIdentifier, withdrawAmountStr, balanceAfterDeduction, reason) {
+  return restoreVirtualAccountBalance(guildId, userId, tokenIdentifier, withdrawAmountStr, balanceAfterDeduction, reason);
+}
+
 // Transfer NFT using project wallet
 async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, guildId, options = {}) {
   try {
@@ -5661,7 +5719,8 @@ client.on('interactionCreate', async (interaction) => {
         });
         return;
       }
-        
+
+      try {
       // Create the challenge
       const challengeId = generateChallengeId();
       const userWallets = await getUserWallets(guildId);
@@ -5775,6 +5834,20 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       console.log(`RPS challenge created: ${challengeId} by ${interaction.user.tag} challenging ${userTag} for ${amountNum} ${tokenTicker}`);
+
+      } catch (postDeductError) {
+        const { restored } = await tryRestoreVirtualAccountBalance(
+          guildId,
+          interaction.user.id,
+          tokenIdentifier,
+          amountNum.toString(),
+          deductionResult.newBalance,
+          'RPS challenge creation failed'
+        );
+        throw new Error(
+          `${postDeductError.message}${restored ? ' Your stake has been refunded.' : ' CRITICAL: Refund failed — contact an admin.'}`
+        );
+      }
       
     } catch (error) {
       console.error('Error creating RPS challenge:', error);
@@ -11484,6 +11557,13 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
   } else if (commandName === 'withdraw-esdt') {
+    let deductResult;
+    let balanceRestored = false;
+    let withdrawAmountStr;
+    let tokenIdentifier;
+    let guildId;
+    let userId;
+
     try {
       await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
       
@@ -11501,8 +11581,8 @@ client.on('interactionCreate', async (interaction) => {
       const amountStr = interaction.options.getString('amount');
       const memo = interaction.options.getString('memo') || 'Withdrawal from virtual account';
       
-      const guildId = interaction.guildId;
-      const userId = interaction.user.id;
+      guildId = interaction.guildId;
+      userId = interaction.user.id;
       
       // Force reload virtual accounts data
       virtualAccounts.forceReloadData();
@@ -11511,7 +11591,7 @@ client.on('interactionCreate', async (interaction) => {
       await virtualAccounts.updateUserUsername(guildId, userId, interaction.user.tag);
       
       // Resolve token identifier from ticker/identifier BEFORE checking balance
-      const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
+      tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
       
       // Validate identifier format
       const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
@@ -11625,6 +11705,16 @@ client.on('interactionCreate', async (interaction) => {
         });
         return;
       }
+
+      try {
+        await assertGuildOnChainPlanActive(guildId);
+      } catch (subError) {
+        await interaction.editReply({
+          content: `❌ **Withdrawals disabled**\n\n${subError.message}`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
       
       // CRITICAL: Prevent race conditions by locking withdrawals for this user+token combination
       // This prevents concurrent withdrawals that could result in double-spending
@@ -11647,7 +11737,7 @@ client.on('interactionCreate', async (interaction) => {
       withdrawalLocks.set(withdrawalLockKey, withdrawalPromise);
       
       // Ensure withdrawAmount is a string (deductFundsFromAccount expects string or number)
-      const withdrawAmountStr = typeof withdrawAmount === 'object' && withdrawAmount.toString 
+      withdrawAmountStr = typeof withdrawAmount === 'object' && withdrawAmount.toString 
         ? withdrawAmount.toString() 
         : String(withdrawAmount);
       
@@ -11655,9 +11745,8 @@ client.on('interactionCreate', async (interaction) => {
       // This ensures that if a second withdrawal is attempted, it will see the reduced balance
       console.log(`[WITHDRAW] Pre-deducting ${withdrawAmountStr} ${tokenIdentifier} from virtual account for user ${userId} (BEFORE blockchain transaction)`);
       
-      let deductResult;
       let balanceBeforeDeduction = null;
-      let balanceRestored = false;
+      balanceRestored = false;
       
       try {
         // Get balance before deduction for potential restoration
@@ -11769,24 +11858,16 @@ client.on('interactionCreate', async (interaction) => {
           console.error(`[WITHDRAW] Error: ${transferResult.errorMessage || 'Unknown error'}`);
           
           try {
-            const dbVirtualAccounts = require('./db/virtual-accounts');
-            // Restore the balance by adding back the withdrawn amount
-            const { newBalance: restoredBalance } = await dbVirtualAccounts.updateAccountBalance(guildId, userId, tokenIdentifier, withdrawAmountStr, {});
+            const restoredBalance = await restoreEsdetWithdrawalBalance(
+              guildId,
+              userId,
+              tokenIdentifier,
+              withdrawAmountStr,
+              deductResult.newBalance,
+              'blockchain transaction failed'
+            );
             balanceRestored = true;
             console.log(`[WITHDRAW] Balance restored successfully. New balance: ${restoredBalance}`);
-            
-            // Record a reversal transaction
-            const reversalTransaction = {
-              id: `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-              type: 'deposit',
-              token: tokenIdentifier,
-              amount: withdrawAmountStr,
-              balanceBefore: deductResult.newBalance,
-              balanceAfter: restoredBalance,
-              description: `withdrawal reversal (blockchain transaction failed)`,
-              timestamp: Date.now()
-            };
-            await dbVirtualAccounts.addTransaction(guildId, userId, reversalTransaction);
           } catch (restoreError) {
             console.error(`[WITHDRAW] CRITICAL: Failed to restore balance after blockchain failure!`, restoreError);
             console.error(`[WITHDRAW] CRITICAL: User ${userId} balance needs manual correction!`);
@@ -11807,10 +11888,39 @@ client.on('interactionCreate', async (interaction) => {
       }
     } catch (error) {
       console.error('Error in withdraw command:', error.message);
+
+      let restoredMessage = '';
+      if (typeof deductResult !== 'undefined' && deductResult?.success && !balanceRestored) {
+        try {
+          const restoredBalance = await restoreEsdetWithdrawalBalance(
+            guildId,
+            userId,
+            tokenIdentifier,
+            withdrawAmountStr,
+            deductResult.newBalance,
+            error.message || 'withdrawal error'
+          );
+          balanceRestored = true;
+          console.log(`[WITHDRAW] Balance restored after thrown error. New balance: ${restoredBalance}`);
+          restoredMessage = '\n\n✅ Your balance has been restored.';
+        } catch (restoreError) {
+          console.error(`[WITHDRAW] CRITICAL: Failed to restore balance after thrown error!`, restoreError);
+          console.error(`[WITHDRAW] CRITICAL: User ${userId} balance needs manual correction!`);
+          console.error(`[WITHDRAW] CRITICAL: Should restore ${withdrawAmountStr} ${tokenIdentifier}`);
+          restoredMessage = '\n\n⚠️ **CRITICAL:** Balance restoration failed. Please contact an admin immediately.';
+        }
+      }
+
       if (interaction.deferred) {
-        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        await interaction.editReply({
+          content: `❌ **Withdrawal failed!**\n\n${error.message}${restoredMessage}`,
+          flags: [MessageFlags.Ephemeral]
+        });
       } else {
-        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        await interaction.reply({
+          content: `❌ **Withdrawal failed!**\n\n${error.message}${restoredMessage}`,
+          flags: [MessageFlags.Ephemeral]
+        });
       }
     }
   } else if (commandName === 'tip-virtual-esdt') {
@@ -13283,11 +13393,29 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       const destinationWalletAddress = destinationCommunityFund.walletAddress;
+
+      try {
+        await assertGuildOnChainPlanActive(sourceGuildId);
+      } catch (subError) {
+        await interaction.editReply({
+          content: `❌ **Cross-guild transfer unavailable**\n\n${subError.message}`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      const balanceCheck = await checkCommunityFundBalances(sourceGuildId, 1);
+      if (!balanceCheck.sufficient) {
+        const errorEmbed = await createBalanceErrorEmbed(sourceGuildId, balanceCheck, '/transfer-cross-guild-esdt');
+        await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
+        return;
+      }
       
       // Perform transfer
+      let sourceDeductResult;
       try {
         // Step 1: Deduct from source user's VA
-        const deductResult = await virtualAccounts.deductFundsFromAccount(
+        sourceDeductResult = await virtualAccounts.deductFundsFromAccount(
           sourceGuildId,
           userId,
           tokenIdentifier,
@@ -13296,9 +13424,9 @@ client.on('interactionCreate', async (interaction) => {
           'cross_guild_transfer'
         );
         
-        if (!deductResult.success) {
+        if (!sourceDeductResult.success) {
           await interaction.editReply({
-            content: `❌ **Failed to deduct balance!**\n\n${deductResult.error}`,
+            content: `❌ **Failed to deduct balance!**\n\n${sourceDeductResult.error}`,
             flags: [MessageFlags.Ephemeral]
           });
           return;
@@ -13320,19 +13448,17 @@ client.on('interactionCreate', async (interaction) => {
         );
         
         if (!transferResult.success || !transferResult.txHash) {
-          // Refund the deduction if transaction failed
-          await virtualAccounts.addFundsToAccount(
+          const { restored } = await tryRestoreVirtualAccountBalance(
             sourceGuildId,
             userId,
             tokenIdentifier,
             transferAmount,
-            null,
-            'cross_guild_transfer_refund',
-            null
+            sourceDeductResult.newBalance,
+            'cross-guild transfer failed'
           );
           
           await interaction.editReply({
-            content: `❌ **Transfer failed!**\n\n${transferResult.error || 'Blockchain transaction failed'}\n\nYour balance has been refunded.`,
+            content: `❌ **Transfer failed!**\n\n${transferResult.errorMessage || transferResult.error || 'Blockchain transaction failed'}\n\n${restored ? '✅ Your balance has been restored.' : '⚠️ Balance restoration failed. Please contact an admin immediately.'}`,
             flags: [MessageFlags.Ephemeral]
           });
           return;
@@ -13373,24 +13499,24 @@ client.on('interactionCreate', async (interaction) => {
         
       } catch (transferError) {
         console.error('[TRANSFER-CROSS-GUILD-ESDT] Transfer error:', transferError);
-        
-        // Try to refund if deduction happened but transaction failed
-        try {
-          await virtualAccounts.addFundsToAccount(
+
+        let restoredMessage = '';
+        if (sourceDeductResult?.success) {
+          const { restored } = await tryRestoreVirtualAccountBalance(
             sourceGuildId,
             userId,
             tokenIdentifier,
             transferAmount,
-            null,
-            'cross_guild_transfer_refund',
-            null
+            sourceDeductResult.newBalance,
+            transferError.message || 'cross-guild transfer error'
           );
-        } catch (refundError) {
-          console.error('[TRANSFER-CROSS-GUILD-ESDT] Refund failed:', refundError);
+          restoredMessage = restored
+            ? '\n\n✅ Your balance has been restored.'
+            : '\n\n⚠️ **CRITICAL:** Balance restoration failed. Please contact an admin immediately.';
         }
         
         await interaction.editReply({
-          content: `❌ **Transfer failed!**\n\n${transferError.message}\n\nIf your balance was deducted, it has been refunded.`,
+          content: `❌ **Transfer failed!**\n\n${transferError.message}${restoredMessage}`,
           flags: [MessageFlags.Ephemeral]
         });
         return;
@@ -13532,15 +13658,34 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       const destinationWalletAddress = destinationCommunityFund.walletAddress;
+
+      try {
+        await assertGuildOnChainPlanActive(sourceGuildId);
+      } catch (subError) {
+        await interaction.editReply({
+          content: `❌ **Cross-guild transfer unavailable**\n\n${subError.message}`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      const balanceCheck = await checkCommunityFundBalances(sourceGuildId, 1);
+      if (!balanceCheck.sufficient) {
+        const errorEmbed = await createBalanceErrorEmbed(sourceGuildId, balanceCheck, '/transfer-cross-guild-nft');
+        await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
+        return;
+      }
       
       // Construct full token identifier (includes nonce)
       const fullTokenIdentifier = verifyNFT.identifier || `${collection}-${nft.nonce.toString().padStart(4, '0')}`;
       const tokenType = verifyNFT.token_type || 'NFT';
       
       // Perform transfer
+      let nftReserved = false;
       try {
         // Step 1: Remove from source user's VA
         await virtualAccountsNFT.removeNFTFromAccount(sourceGuildId, userId, collection, nft.nonce, amount);
+        nftReserved = true;
         
         // Step 2: Make on-chain transaction from source Community Fund to destination Community Fund
         await interaction.editReply({
@@ -13559,24 +13704,12 @@ client.on('interactionCreate', async (interaction) => {
         );
         
         if (!transferResult.success || !transferResult.txHash) {
-          // Refund the removal if transaction failed
-          await virtualAccountsNFT.addNFTToAccount(
-            sourceGuildId,
-            userId,
-            collection,
-            verifyNFT.identifier,
-            nft.nonce,
-            {
-              nft_name: verifyNFT.nft_name,
-              nft_image_url: verifyNFT.nft_image_url,
-              metadata: verifyNFT.metadata
-            },
-            amount,
-            tokenType
+          const { restored } = await tryRestoreNftToVirtualAccount(
+            sourceGuildId, userId, collection, verifyNFT, nft.nonce, amount, tokenType
           );
           
           await interaction.editReply({
-            content: `❌ **Transfer failed!**\n\n${transferResult.error || 'Blockchain transaction failed'}\n\nYour NFT has been restored to your source account.`,
+            content: `❌ **Transfer failed!**\n\n${transferResult.errorMessage || transferResult.error || 'Blockchain transaction failed'}\n\n${restored ? '✅ Your NFT has been restored to your source account.' : '⚠️ NFT restoration failed. Please contact an admin immediately.'}`,
             flags: [MessageFlags.Ephemeral]
           });
           return;
@@ -13622,29 +13755,19 @@ client.on('interactionCreate', async (interaction) => {
         
       } catch (transferError) {
         console.error('[TRANSFER-CROSS-GUILD-NFT] Transfer error:', transferError);
-        
-        // Try to refund if removal happened but transaction failed
-        try {
-          await virtualAccountsNFT.addNFTToAccount(
-            sourceGuildId,
-            userId,
-            collection,
-            verifyNFT.identifier,
-            nft.nonce,
-            {
-              nft_name: verifyNFT.nft_name,
-              nft_image_url: verifyNFT.nft_image_url,
-              metadata: verifyNFT.metadata
-            },
-            amount,
-            tokenType
+
+        let restoredMessage = '';
+        if (nftReserved) {
+          const { restored } = await tryRestoreNftToVirtualAccount(
+            sourceGuildId, userId, collection, verifyNFT, nft.nonce, amount, tokenType
           );
-        } catch (refundError) {
-          console.error('[TRANSFER-CROSS-GUILD-NFT] Refund failed:', refundError);
+          restoredMessage = restored
+            ? '\n\n✅ Your NFT has been restored to your source account.'
+            : '\n\n⚠️ **CRITICAL:** NFT restoration failed. Please contact an admin immediately.';
         }
         
         await interaction.editReply({
-          content: `❌ **Transfer failed!**\n\n${transferError.message}\n\nIf your NFT was removed, it has been restored.`,
+          content: `❌ **Transfer failed!**\n\n${transferError.message}${restoredMessage}`,
           flags: [MessageFlags.Ephemeral]
         });
         return;
@@ -14293,36 +14416,42 @@ client.on('interactionCreate', async (interaction) => {
         updates.traitFilters = null;
       }
       
-      // Apply top-up deduction before updating pool supply
-      if (topupWei) {
-        const rewardTokenTicker = pool.rewardTokenTicker || pool.rewardTokenIdentifier.split('-')[0];
-        const deductResult = await virtualAccounts.deductFundsFromAccount(
-          guildId,
-          userId,
-          pool.rewardTokenIdentifier,
-          topupHuman,
-          `Staking pool top-up (${topupHuman} ${rewardTokenTicker})`
-        );
-
-        if (!deductResult.success) {
-          await interaction.editReply({
-            content: `❌ **Pool top-up failed!**\n\n${deductResult.error || 'Could not deduct funds from your virtual account.'}`,
-            flags: [MessageFlags.Ephemeral]
-          });
-          return;
-        }
-
-        updates.currentSupplyWei = new BigNumber(pool.currentSupplyWei).plus(new BigNumber(topupWei)).toString();
-        console.log(`[STAKING] Deducted pool top-up: ${topupHuman} ${rewardTokenTicker} from user ${userId} for pool ${poolId}`);
-      }
-
-      // Apply updates
-      if (Object.keys(updates).length === 0) {
+      if (Object.keys(updates).length === 0 && !topupWei) {
         await interaction.editReply({ content: '❌ No updates specified.', flags: [MessageFlags.Ephemeral] });
         return;
       }
+
+      let topupDeductResult = null;
+      try {
+        // Apply top-up deduction before updating pool supply
+        if (topupWei) {
+          const rewardTokenTicker = pool.rewardTokenTicker || pool.rewardTokenIdentifier.split('-')[0];
+          topupDeductResult = await virtualAccounts.deductFundsFromAccount(
+            guildId,
+            userId,
+            pool.rewardTokenIdentifier,
+            topupHuman,
+            `Staking pool top-up (${topupHuman} ${rewardTokenTicker})`
+          );
+
+          if (!topupDeductResult.success) {
+            await interaction.editReply({
+              content: `❌ **Pool top-up failed!**\n\n${topupDeductResult.error || 'Could not deduct funds from your virtual account.'}`,
+              flags: [MessageFlags.Ephemeral]
+            });
+            return;
+          }
+
+          updates.currentSupplyWei = new BigNumber(pool.currentSupplyWei).plus(new BigNumber(topupWei)).toString();
+          console.log(`[STAKING] Deducted pool top-up: ${topupHuman} ${rewardTokenTicker} from user ${userId} for pool ${poolId}`);
+        }
+
+        if (Object.keys(updates).length === 0) {
+          await interaction.editReply({ content: '❌ No updates specified.', flags: [MessageFlags.Ephemeral] });
+          return;
+        }
       
-      await dbStakingPools.updateStakingPool(guildId, poolId, updates);
+        await dbStakingPools.updateStakingPool(guildId, poolId, updates);
       
       // Check if PAUSED pool should be unpaused after supply/reward updates
       if (pool.status === 'PAUSED' && (updates.currentSupplyWei !== undefined || updates.rewardPerNftPerDayWei !== undefined)) {
@@ -14395,16 +14524,46 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
       
-      // Update embed
-      await updateStakingPoolEmbed(guildId, poolId);
+        // Update embed
+        await updateStakingPoolEmbed(guildId, poolId);
       
-      let successMessage = '✅ Staking pool updated successfully!';
-      if (topupHuman) {
-        const rewardTokenTicker = pool.rewardTokenTicker || pool.rewardTokenIdentifier.split('-')[0];
-        successMessage += `\n\n💵 **Top-up applied:** ${topupHuman} ${rewardTokenTicker} deducted from your virtual account and added to pool supply.`;
-      }
+        let successMessage = '✅ Staking pool updated successfully!';
+        if (topupHuman) {
+          const rewardTokenTicker = pool.rewardTokenTicker || pool.rewardTokenIdentifier.split('-')[0];
+          successMessage += `\n\n💵 **Top-up applied:** ${topupHuman} ${rewardTokenTicker} deducted from your virtual account and added to pool supply.`;
+        }
 
-      await interaction.editReply({ content: successMessage, flags: [MessageFlags.Ephemeral] });
+        await interaction.editReply({ content: successMessage, flags: [MessageFlags.Ephemeral] });
+      } catch (updateError) {
+        console.error('[STAKING] Error updating staking pool:', updateError);
+
+        let restoredMessage = '';
+        if (topupDeductResult?.success) {
+          const { restored } = await tryRestoreVirtualAccountBalance(
+            guildId,
+            userId,
+            pool.rewardTokenIdentifier,
+            topupHuman,
+            topupDeductResult.newBalance,
+            'staking pool top-up failed'
+          );
+          restoredMessage = restored
+            ? '\n\n✅ Your top-up amount has been refunded to your virtual account.'
+            : '\n\n⚠️ **CRITICAL:** Top-up refund failed. Please contact an admin immediately.';
+        }
+
+        if (interaction.deferred) {
+          await interaction.editReply({
+            content: `❌ **Pool update failed!**\n\n${updateError.message}${restoredMessage}`,
+            flags: [MessageFlags.Ephemeral]
+          });
+        } else {
+          await interaction.reply({
+            content: `❌ **Pool update failed!**\n\n${updateError.message}${restoredMessage}`,
+            flags: [MessageFlags.Ephemeral]
+          });
+        }
+      }
       
     } catch (error) {
       console.error('[STAKING] Error updating staking pool:', error);
@@ -19786,7 +19945,9 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ content: `❌ Failed to deduct funds: ${deductResult.error}`, flags: [MessageFlags.Ephemeral] });
         return;
       }
-      
+
+      let sellerCredited = false;
+      try {
       // Add ESDT to seller
       await virtualAccounts.addFundsToAccount(
         guildId,
@@ -19797,6 +19958,7 @@ client.on('interactionCreate', async (interaction) => {
         'marketplace_sale',
         null
       );
+      sellerCredited = true;
       
       // CRITICAL: Verify seller still owns the NFT before transferring
       // Double-check ownership right before transfer to prevent race conditions
@@ -19805,16 +19967,28 @@ client.on('interactionCreate', async (interaction) => {
         // Seller no longer owns the NFT - refund buyer and cancel listing
         console.error(`[NFT-MARKETPLACE] CRITICAL: Seller no longer owns NFT ${listing.collection}#${listing.nonce} during purchase! Refunding buyer.`);
         
-        // Refund buyer
-        await virtualAccounts.addFundsToAccount(
+        await tryRestoreVirtualAccountBalance(
           guildId,
           interaction.user.id,
           listing.priceTokenIdentifier,
           listing.priceAmount,
-          null,
-          'marketplace_refund',
-          `Refund for failed purchase: ${listing.nftName || `${listing.collection}#${listing.nonce}`}`
+          deductResult.newBalance,
+          'marketplace purchase failed — seller no longer owns NFT'
         );
+        if (sellerCredited) {
+          try {
+            await virtualAccounts.deductFundsFromAccount(
+              guildId,
+              listing.sellerId,
+              listing.priceTokenIdentifier,
+              listing.priceAmount,
+              `marketplace purchase rollback: ${listing.nftName || `${listing.collection}#${listing.nonce}`}`,
+              'marketplace_refund'
+            );
+          } catch (sellerRollbackError) {
+            console.error('[NFT-MARKETPLACE] CRITICAL: Failed to reverse seller credit:', sellerRollbackError);
+          }
+        }
         
         // Cancel listing
         await virtualAccountsNFT.updateListing(guildId, listingId, { status: 'CANCELLED' });
@@ -19910,13 +20084,41 @@ client.on('interactionCreate', async (interaction) => {
         content: `✅ **Purchase successful!**\n\nYou have purchased **${nftDisplayName}${amountText}** for ${listing.priceAmount} ${listing.priceTokenIdentifier.split('-')[0]}.`, 
         flags: [MessageFlags.Ephemeral] 
       });
+
+      } catch (purchaseError) {
+        if (deductResult?.success) {
+          await tryRestoreVirtualAccountBalance(
+            guildId,
+            interaction.user.id,
+            listing.priceTokenIdentifier,
+            listing.priceAmount,
+            deductResult.newBalance,
+            'marketplace purchase failed'
+          );
+        }
+        if (sellerCredited) {
+          try {
+            await virtualAccounts.deductFundsFromAccount(
+              guildId,
+              listing.sellerId,
+              listing.priceTokenIdentifier,
+              listing.priceAmount,
+              `marketplace purchase rollback: ${listing.nftName || `${listing.collection}#${listing.nonce}`}`,
+              'marketplace_refund'
+            );
+          } catch (sellerRollbackError) {
+            console.error('[NFT-MARKETPLACE] CRITICAL: Failed to reverse seller credit after purchase failure:', sellerRollbackError);
+          }
+        }
+        throw purchaseError;
+      }
       
     } catch (error) {
       console.error('[NFT-MARKETPLACE] Error processing buy:', error);
       if (interaction.deferred) {
-        await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        await interaction.editReply({ content: `❌ **Purchase failed!**\n\n${error.message}`, flags: [MessageFlags.Ephemeral] });
       } else {
-        await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+        await interaction.reply({ content: `❌ **Purchase failed!**\n\n${error.message}`, flags: [MessageFlags.Ephemeral] });
       }
     }
   } else if (customId.startsWith('nft-offer:')) {
@@ -20134,7 +20336,9 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ content: `❌ Failed to deduct funds: ${deductResult.error}`, flags: [MessageFlags.Ephemeral] });
         return;
       }
-      
+
+      let sellerCredited = false;
+      try {
       // Add ESDT to seller
       await virtualAccounts.addFundsToAccount(
         offerGuildId,
@@ -20145,6 +20349,7 @@ client.on('interactionCreate', async (interaction) => {
         'marketplace_sale',
         null
       );
+      sellerCredited = true;
       
       // Transfer NFT
       // Get listing amount (for SFTs, this is the number of tokens being sold)
@@ -20214,14 +20419,42 @@ client.on('interactionCreate', async (interaction) => {
         content: `✅ **Offer accepted!**\n\nNFT has been transferred to <@${offer.offererId}> for ${offer.priceAmount} ${offer.priceTokenIdentifier.split('-')[0]}.`, 
         flags: [MessageFlags.Ephemeral] 
       });
+
+      } catch (acceptError) {
+        if (deductResult?.success) {
+          await tryRestoreVirtualAccountBalance(
+            offerGuildId,
+            offer.offererId,
+            offer.priceTokenIdentifier,
+            offer.priceAmount,
+            deductResult.newBalance,
+            'marketplace offer acceptance failed'
+          );
+        }
+        if (sellerCredited) {
+          try {
+            await virtualAccounts.deductFundsFromAccount(
+              offerGuildId,
+              offerListing.sellerId,
+              offer.priceTokenIdentifier,
+              offer.priceAmount,
+              `marketplace offer rollback: ${offerListing.nftName || `${offerListing.collection}#${offerListing.nonce}`}`,
+              'marketplace_refund'
+            );
+          } catch (sellerRollbackError) {
+            console.error('[NFT-MARKETPLACE] CRITICAL: Failed to reverse seller credit after offer acceptance failure:', sellerRollbackError);
+          }
+        }
+        throw acceptError;
+      }
       
     } catch (error) {
       console.error('[NFT-MARKETPLACE] Error accepting offer:', error);
       try {
         if (interaction.deferred && !interaction.replied) {
-          await interaction.editReply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+          await interaction.editReply({ content: `❌ **Offer acceptance failed!**\n\n${error.message}`, flags: [MessageFlags.Ephemeral] });
         } else if (!interaction.replied && !interaction.deferred) {
-          await interaction.reply({ content: `Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+          await interaction.reply({ content: `❌ **Offer acceptance failed!**\n\n${error.message}`, flags: [MessageFlags.Ephemeral] });
         }
       } catch (replyError) {
         console.error('[NFT-MARKETPLACE] Could not send error message (interaction already handled):', replyError.message);
@@ -22965,6 +23198,7 @@ client.on('interactionCreate', async (interaction) => {
             return;
           }
 
+          try {
           // Create bet
           const betId = generateBetId(matchId, interaction.user.id);
           const betAmountWei = getMatchStakeForGuild(match, guildId);
@@ -23101,6 +23335,20 @@ client.on('interactionCreate', async (interaction) => {
 
           console.log(`[FOOTBALL] Virtual bet accepted: ${betId} for match ${matchId} by user ${interaction.user.tag}`);
 
+          } catch (postDeductError) {
+            const { restored } = await tryRestoreVirtualAccountBalance(
+              guildId,
+              interaction.user.id,
+              token.identifier,
+              requiredAmount,
+              deductionResult.newBalance,
+              'football bet failed'
+            );
+            throw new Error(
+              `${postDeductError.message}${restored ? ' Your bet amount has been refunded.' : ' CRITICAL: Refund failed — contact an admin.'}`
+            );
+          }
+
         } catch (error) {
           console.error('[FOOTBALL] Error processing bet:', error.message);
           if (interaction.deferred) {
@@ -23191,6 +23439,7 @@ client.on('interactionCreate', async (interaction) => {
             return;
           }
 
+          try {
           // Update challenge status in database
           await dbRpsGames.updateGame(guildId, challengeId, {
             status: 'active',
@@ -23241,6 +23490,20 @@ client.on('interactionCreate', async (interaction) => {
           }
 
           console.log(`RPS challenge joined via modal: ${challengeId} by ${interaction.user.tag}`);
+
+          } catch (postDeductError) {
+            const { restored } = await tryRestoreVirtualAccountBalance(
+              guildId,
+              interaction.user.id,
+              challenge.token,
+              amountToDeduct.toString(),
+              deductionResult.newBalance,
+              'RPS challenge join failed'
+            );
+            throw new Error(
+              `${postDeductError.message}${restored ? ' Your stake has been refunded.' : ' CRITICAL: Refund failed — contact an admin.'}`
+            );
+          }
 
         } catch (error) {
           console.error('Error processing RPS join via modal:', error);
@@ -23782,7 +24045,8 @@ async function processTicketPurchase(guildId, lotteryId, userId, userTag, number
     if (!deductionResult.success) {
       throw new Error(deductionResult.error || 'Failed to deduct funds');
     }
-    
+
+    try {
     // Sort numbers for storage
     const sortedNumbers = [...numbers].sort((a, b) => a - b);
     
@@ -23838,6 +24102,20 @@ async function processTicketPurchase(guildId, lotteryId, userId, userTag, number
     }
     
     console.log(`[LOTTERY] Ticket purchased: ${ticketId} for lottery ${lotteryId} by user ${userTag}`);
+
+    } catch (postDeductError) {
+      const { restored } = await tryRestoreVirtualAccountBalance(
+        guildId,
+        userId,
+        lottery.tokenIdentifier,
+        ticketPriceHuman,
+        deductionResult.newBalance,
+        'lottery ticket purchase failed'
+      );
+      throw new Error(
+        `${postDeductError.message}${restored ? ' Your ticket payment has been refunded.' : ' CRITICAL: Refund failed — contact an admin.'}`
+      );
+    }
     
   } catch (error) {
     console.error('[LOTTERY] Error processing ticket purchase:', error.message);
@@ -24668,6 +24946,7 @@ async function trackLotteryEarnings(guildId, tokenIdentifier, commissionWei) {
 // Helper function to complete pool creation after trait selection
 async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, traitValue, interaction) {
   let loadingMessage = null;
+  let initialSupplyDeductResult = null;
   try {
     // Get pool
     const pool = await dbStakingPools.getStakingPool(guildId, poolId);
@@ -24803,9 +25082,19 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
       if (balanceBN.isLessThan(initialSupplyBN)) {
         // If balance is insufficient, close the pool
         await dbStakingPools.updateStakingPool(guildId, poolId, { status: 'CLOSED' });
-        
-        // Note: Fee was already charged, but we'll close the pool
-        // In a production system, you might want to refund the fee here
+
+        if (!feeResult.waived && feeAmountHuman !== '0') {
+          const balAfterFee = await virtualAccounts.getUserBalance(guildId, userId, REWARD_IDENTIFIER);
+          await tryRestoreVirtualAccountBalance(
+            guildId,
+            userId,
+            REWARD_IDENTIFIER,
+            feeAmountHuman,
+            balAfterFee,
+            'pool creation aborted — insufficient initial supply (fee refund)'
+          );
+        }
+
         const embed = new EmbedBuilder()
           .setTitle('❌ Insufficient Balance for Initial Supply')
           .setDescription(`Pool creation failed due to insufficient balance for initial supply.`)
@@ -24840,7 +25129,7 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
       }
       
       // Deduct initial supply from VA balance
-      const deductResult = await virtualAccounts.deductFundsFromAccount(
+      initialSupplyDeductResult = await virtualAccounts.deductFundsFromAccount(
         guildId,
         userId,
         rewardTokenIdentifier,
@@ -24848,10 +25137,21 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
         `Staking pool initial supply (${initialSupplyHuman} ${rewardTokenTicker})`
       );
       
-      if (!deductResult.success) {
+      if (!initialSupplyDeductResult.success) {
         // If deduction fails, close the pool
         await dbStakingPools.updateStakingPool(guildId, poolId, { status: 'CLOSED' });
-        throw new Error(`Failed to deduct initial supply: ${deductResult.error}`);
+        if (!feeResult.waived && feeAmountHuman !== '0') {
+          const balAfterFee = await virtualAccounts.getUserBalance(guildId, userId, REWARD_IDENTIFIER);
+          await tryRestoreVirtualAccountBalance(
+            guildId,
+            userId,
+            REWARD_IDENTIFIER,
+            feeAmountHuman,
+            balAfterFee,
+            'pool creation aborted — initial supply deduction failed (fee refund)'
+          );
+        }
+        throw new Error(`Failed to deduct initial supply: ${initialSupplyDeductResult.error}`);
       }
       
       console.log(`[STAKING] Deducted initial supply: ${initialSupplyHuman} ${rewardTokenTicker} from user ${userId} for pool ${poolId}`);
@@ -25033,12 +25333,39 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
     
   } catch (error) {
     console.error('[STAKING] Error completing pool creation:', error);
+
+    let restoredMessage = '';
+    if (initialSupplyDeductResult?.success) {
+      const pool = await dbStakingPools.getStakingPool(guildId, poolId).catch(() => null);
+      const rewardTokenIdentifier = pool?.rewardTokenIdentifier;
+      const initialSupplyHuman = pool
+        ? new BigNumber(pool.initialSupplyWei).dividedBy(new BigNumber(10).pow(pool.rewardTokenDecimals || 18)).toString()
+        : null;
+      if (rewardTokenIdentifier && initialSupplyHuman) {
+        const { restored } = await tryRestoreVirtualAccountBalance(
+          guildId,
+          userId,
+          rewardTokenIdentifier,
+          initialSupplyHuman,
+          initialSupplyDeductResult.newBalance,
+          'pool creation failed'
+        );
+        restoredMessage = restored
+          ? '\n\n✅ Your initial supply has been refunded to your virtual account.'
+          : '\n\n⚠️ **CRITICAL:** Initial supply refund failed. Please contact an admin immediately.';
+      }
+      try {
+        await dbStakingPools.updateStakingPool(guildId, poolId, { status: 'CLOSED' });
+      } catch (closeError) {
+        console.error('[STAKING] Error closing pool after failed creation:', closeError);
+      }
+    }
     
     // Update loading message with error if it exists
     if (loadingMessage) {
       const errorEmbed = new EmbedBuilder()
         .setTitle('❌ Error During Pool Creation')
-        .setDescription(`An error occurred: ${error.message}`)
+        .setDescription(`An error occurred: ${error.message}${restoredMessage}`)
         .setColor(0xFF0000)
         .setTimestamp()
         .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
@@ -25050,10 +25377,11 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
       }
     }
     
+    const errorText = `❌ Error: ${error.message}${restoredMessage}`;
     if (interaction.deferred || interaction.replied) {
-      await interaction.followUp({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      await interaction.followUp({ content: errorText, flags: [MessageFlags.Ephemeral] });
     } else {
-      await interaction.editReply({ content: `❌ Error: ${error.message}`, flags: [MessageFlags.Ephemeral] });
+      await interaction.editReply({ content: errorText, flags: [MessageFlags.Ephemeral] });
     }
   }
 }
