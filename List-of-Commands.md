@@ -15,6 +15,10 @@ Below is a list of all available commands for the ESDT Tipping Bot, grouped by c
 - **/list-projects** — List all registered project wallets.
 - **/check-community-fund-balance** — Admins: Check Community Fund EGLD for on-chain fees and mass-withdraw estimates.
 - **/sync-community-fund-ledger** — Admins: Compare virtual account + house ledger vs Community Fund on-chain (ESDT, NFT, SFT).
+- **/subscribe-on-chain-plan** — Admins: Subscribe to on-chain transfers (withdrawals, sends, swaps) and MakeX API fee waiver (USDC plans: 1/3/6/12 months).
+- **/on-chain-subscription-status** — Admins: View on-chain plan expiry, subscriber, and MakeX whitelist sync status.
+
+See **[On-Chain Subscription Plan](on-chain-subscription.md)** for pricing, requirements, and what is gated.
 
 ---
 
