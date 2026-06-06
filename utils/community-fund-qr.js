@@ -1,37 +1,16 @@
 const QRCode = require('qrcode');
-const { createClient } = require('@supabase/supabase-js');
-const dbServerData = require('../db/server-data');
+const {
+  getSupabaseServiceClient,
+  isSupabaseServiceRoleConfigured
+} = require('../supabase-service-client');
 
 const BUCKET = 'community-fund-qr';
-
-let serviceSupabase = null;
-
-function getServiceSupabase() {
-  if (serviceSupabase) {
-    return serviceSupabase;
-  }
-
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url || !key) {
-    throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for Community Fund QR storage');
-  }
-
-  serviceSupabase = createClient(url, key, {
-    db: { schema: 'public' },
-    auth: { persistSession: false, autoRefreshToken: false }
-  });
-
-  return serviceSupabase;
-}
 
 function getStoragePath(guildId) {
   return `${guildId}/community-fund.png`;
 }
 
-async function ensureBucketExists() {
-  const supabase = getServiceSupabase();
+async function ensureBucketExists(supabase) {
   const { data: buckets, error: listError } = await supabase.storage.listBuckets();
 
   if (listError) {
@@ -53,8 +32,55 @@ async function ensureBucketExists() {
   }
 }
 
+async function uploadQrImage(supabase, filePath, pngBuffer) {
+  const uploadOptions = {
+    contentType: 'image/png',
+    upsert: true,
+    cacheControl: '3600'
+  };
+
+  let { error: uploadError } = await supabase.storage
+    .from(BUCKET)
+    .upload(filePath, pngBuffer, uploadOptions);
+
+  if (uploadError && /already exists|duplicate/i.test(uploadError.message)) {
+    const { error: removeError } = await supabase.storage.from(BUCKET).remove([filePath]);
+    if (removeError) {
+      throw new Error(`Failed to replace existing QR image: ${removeError.message}`);
+    }
+
+    ({ error: uploadError } = await supabase.storage
+      .from(BUCKET)
+      .upload(filePath, pngBuffer, { contentType: 'image/png', cacheControl: '3600' }));
+  }
+
+  if (uploadError) {
+    throw new Error(`Failed to upload Community Fund QR code: ${uploadError.message}`);
+  }
+}
+
+async function saveCommunityFundQrUrl(supabase, guildId, projectName, publicUrl) {
+  const { error } = await supabase
+    .from('community_fund_qr')
+    .upsert(
+      {
+        guild_id: guildId,
+        project_name: projectName,
+        qr_url: publicUrl
+      },
+      { onConflict: 'guild_id,project_name' }
+    );
+
+  if (error) {
+    throw new Error(`Failed to save Community Fund QR URL: ${error.message}`);
+  }
+}
+
 async function generateAndStoreCommunityFundQR(guildId, projectName, walletAddress) {
-  await ensureBucketExists();
+  const supabase = getSupabaseServiceClient();
+
+  await ensureBucketExists(supabase);
+
   const pngBuffer = await QRCode.toBuffer(walletAddress, {
     type: 'png',
     width: 300,
@@ -62,24 +88,13 @@ async function generateAndStoreCommunityFundQR(guildId, projectName, walletAddre
     errorCorrectionLevel: 'M'
   });
 
-  const supabase = getServiceSupabase();
   const filePath = getStoragePath(guildId);
-
-  const { error: uploadError } = await supabase.storage
-    .from(BUCKET)
-    .upload(filePath, pngBuffer, {
-      contentType: 'image/png',
-      upsert: true
-    });
-
-  if (uploadError) {
-    throw new Error(`Failed to upload Community Fund QR code: ${uploadError.message}`);
-  }
+  await uploadQrImage(supabase, filePath, pngBuffer);
 
   const { data } = supabase.storage.from(BUCKET).getPublicUrl(filePath);
   const publicUrl = data.publicUrl;
 
-  await dbServerData.setCommunityFundQR(guildId, projectName, publicUrl);
+  await saveCommunityFundQrUrl(supabase, guildId, projectName, publicUrl);
   console.log(`[QR] Generated and stored Community Fund QR for guild ${guildId}: ${publicUrl}`);
 
   return publicUrl;
@@ -87,26 +102,31 @@ async function generateAndStoreCommunityFundQR(guildId, projectName, walletAddre
 
 async function deleteCommunityFundQRAssets(guildId, projectName) {
   try {
-    await dbServerData.deleteCommunityFundQR(guildId, projectName);
-  } catch (error) {
-    console.error(`[QR] Failed to delete community_fund_qr row for guild ${guildId}:`, error.message);
-  }
-
-  try {
-    const supabase = getServiceSupabase();
-    const filePath = getStoragePath(guildId);
-    const { error } = await supabase.storage.from(BUCKET).remove([filePath]);
+    const supabase = getSupabaseServiceClient();
+    const { error } = await supabase
+      .from('community_fund_qr')
+      .delete()
+      .eq('guild_id', guildId)
+      .eq('project_name', projectName);
 
     if (error) {
-      console.error(`[QR] Failed to delete storage file for guild ${guildId}:`, error.message);
+      console.error(`[QR] Failed to delete community_fund_qr row for guild ${guildId}:`, error.message);
+    }
+
+    const filePath = getStoragePath(guildId);
+    const { error: storageError } = await supabase.storage.from(BUCKET).remove([filePath]);
+
+    if (storageError) {
+      console.error(`[QR] Failed to delete storage file for guild ${guildId}:`, storageError.message);
     }
   } catch (error) {
-    console.error(`[QR] Failed to delete Community Fund QR storage for guild ${guildId}:`, error.message);
+    console.error(`[QR] Failed to delete Community Fund QR assets for guild ${guildId}:`, error.message);
   }
 }
 
 module.exports = {
   BUCKET,
+  isSupabaseServiceRoleConfigured,
   generateAndStoreCommunityFundQR,
   deleteCommunityFundQRAssets
 };

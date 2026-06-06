@@ -55,6 +55,7 @@ console.log('Environment variables:', {
   SWAP_API_TOKEN: (process.env.SWAP_API_TOKEN || process.env.SECURE_TOKEN) ? 'Set' : 'Missing',
   SUPABASE_URL: process.env.SUPABASE_URL ? 'Set' : 'Missing',
   SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY ? 'Set' : 'Missing',
+  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY ? 'Set' : 'Missing',
   MAKEX_SUPABASE_URL: process.env.MAKEX_SUPABASE_URL ? 'Set' : 'Missing',
   MAKEX_SUPABASE_SERVICE_ROLE_KEY: process.env.MAKEX_SUPABASE_SERVICE_ROLE_KEY ? 'Set' : 'Missing',
 });
@@ -66,6 +67,10 @@ if (missingVars.length > 0) {
   console.error('[FATAL] Missing required environment variables:', missingVars.join(', '));
   console.error('[FATAL] Please set these in your .env file or environment variables.');
   process.exit(1);
+}
+
+if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn('[STARTUP] SUPABASE_SERVICE_ROLE_KEY is missing. Community Fund QR auto-generation and Supabase Storage uploads will fail until this is set on the bot host.');
 }
 
 const { Client, IntentsBitField, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags, ChannelType, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } = require('discord.js');
@@ -141,7 +146,8 @@ const {
 const { syncCommunityFundLedger, buildLedgerSyncMismatchFields } = require('./utils/community-fund-ledger-sync');
 const {
   generateAndStoreCommunityFundQR,
-  deleteCommunityFundQRAssets
+  deleteCommunityFundQRAssets,
+  isSupabaseServiceRoleConfigured
 } = require('./utils/community-fund-qr');
 
 const client = new Client({
@@ -4234,7 +4240,6 @@ client.on('interactionCreate', async (interaction) => {
 
       // Get available projects for this server
       const projects = await getProjects(guildId);
-      const communityFundProject = await getCommunityFundProject(guildId);
       
       if (!projects[projectName]) {
         await interaction.editReply({ 
@@ -4245,7 +4250,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       // Prevent using community fund project for /send-nft
-      if (projectName === communityFundProject) {
+      if (projectName === getCommunityFundProjectName()) {
         await interaction.editReply({ 
           content: `❌ **Cannot use Community Fund project for /send-nft!**\n\nThe project "${projectName}" is configured as the Community Fund and is used for virtual account deposits.\n\nPlease select a different project for admin transfers.`, 
           flags: [MessageFlags.Ephemeral] 
@@ -5082,9 +5087,17 @@ client.on('interactionCreate', async (interaction) => {
       const projectName = 'Community Fund';
       
       // Check if community fund already exists - prevent multiple community funds
-      const currentFund = await getCommunityFundProject(guildId);
+      let currentFund = await getCommunityFundProject(guildId);
       const projects = await getProjects(guildId);
       const existingCommunityFundProject = projects[projectName];
+
+      // Project was deleted but guild_settings still references the old fund display name
+      if (currentFund && !existingCommunityFundProject) {
+        console.log(`[COMMUNITY-FUND] Clearing orphaned community fund reference for guild ${guildId}: ${currentFund}`);
+        await dbServerData.updateGuildSettings(guildId, { communityFundProject: null });
+        await deleteCommunityFundQRAssets(guildId, projectName);
+        currentFund = null;
+      }
       
       // Check if Community Fund already exists
       if (currentFund || existingCommunityFundProject) {
@@ -5143,6 +5156,14 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ 
           content: '❌ **Invalid supported tokens!**\n\nPlease provide at least one valid token ticker (e.g., EGLD,USDC,USDT).', 
           flags: [MessageFlags.Ephemeral] 
+        });
+        return;
+      }
+
+      if (!isSupabaseServiceRoleConfigured()) {
+        await interaction.editReply({
+          content: '❌ **Server misconfiguration**\n\n`SUPABASE_SERVICE_ROLE_KEY` is not set on the bot host.\n\nCommunity Fund QR codes are uploaded to Supabase Storage using the service role key. Add `SUPABASE_SERVICE_ROLE_KEY` to your hosting environment variables (Cyberancee), redeploy/restart the bot, then run `/set-community-fund` again.\n\nYou can copy the value from Supabase → Project Settings → API → `service_role` secret.',
+          flags: [MessageFlags.Ephemeral]
         });
         return;
       }
@@ -5268,9 +5289,12 @@ client.on('interactionCreate', async (interaction) => {
       }
     } catch (error) {
       console.error('Error setting Community Tip Fund:', error);
+      const serviceRoleHint = /service role|SUPABASE_SERVICE_ROLE_KEY/i.test(error.message)
+        ? '\n\n**Hosting fix:** Add `SUPABASE_SERVICE_ROLE_KEY` to your Cyberancee environment variables and restart the bot.'
+        : '';
       if (interaction.deferred) {
         await interaction.editReply({ 
-          content: `❌ **Error creating Community Fund wallet:**\n\n${error.message}\n\nPlease try again or contact support if the issue persists.`, 
+          content: `❌ **Error creating Community Fund wallet:**\n\n${error.message}${serviceRoleHint}\n\nPlease try again or contact support if the issue persists.`, 
           flags: [MessageFlags.Ephemeral] 
         });
       } else {
@@ -6077,10 +6101,9 @@ client.on('interactionCreate', async (interaction) => {
       const walletAddress = projectInfo.walletAddress || 'Not set';
       const userInput = projectInfo.userInput || 'No notes';
 
-      // Check if this project is set as community fund
-      const communityFundProject = await getCommunityFundProject(guildId);
+      // Check if this is the internal Community Fund project (not the display fund name)
       let isCommunityFund = false;
-      if (communityFundProject === projectName) {
+      if (projectName === getCommunityFundProjectName()) {
         isCommunityFund = true;
         
         // First, check for live activities that would prevent safe deletion
