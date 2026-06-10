@@ -169,6 +169,23 @@ const client = new Client({
 const API_BASE_URL = process.env.API_BASE_URL;
 const API_TOKEN = process.env.API_TOKEN; // For MultiversX API
 const FD_TOKEN = process.env.FD_TOKEN; // For Football-Data.org API
+
+// football-data.org free-tier competitions (https://www.football-data.org/pricing)
+const FOOTBALL_COMPETITIONS = [
+  { code: 'WC', name: 'FIFA World Cup' },
+  { code: 'EC', name: 'UEFA European Championship' },
+  { code: 'CL', name: 'UEFA Champions League' },
+  { code: 'PL', name: 'Premier League' },
+  { code: 'ELC', name: 'Championship' },
+  { code: 'SA', name: 'Serie A' },
+  { code: 'BL1', name: 'Bundesliga' },
+  { code: 'FL1', name: 'Ligue 1' },
+  { code: 'PD', name: 'La Liga' },
+  { code: 'PPL', name: 'Primeira Liga' },
+  { code: 'NL1', name: 'Eredivisie' },
+  { code: 'BSA', name: 'Campeonato Brasileiro Série A' },
+];
+
 const SWAP_API_BASE_URL = process.env.SWAP_API_BASE_URL || 'https://swap-esdt-makex-api.onrender.com';
 const SWAP_API_TOKEN = process.env.SWAP_API_TOKEN || process.env.SECURE_TOKEN;
 const SWAP_EMBED_THUMBNAIL_QUOTE = 'https://i.ibb.co/Cs5P7Xkw/swap-thumbnail.png';
@@ -15911,26 +15928,13 @@ client.on('interactionCreate', async (interaction) => {
     try {
       const focusedValue = interaction.options.getFocused();
       
-      // Common football competition codes
-      const competitions = [
-        { name: 'Premier League', value: 'PL' },
-        { name: 'UEFA Champions League', value: 'CL' },
-        { name: 'Championship', value: 'ELC' },
-        { name: 'UEFA Europa League', value: 'EL' },
-        { name: 'Bundesliga', value: 'BL1' },
-        { name: 'La Liga', value: 'PD' },
-        { name: 'Serie A', value: 'SA' },
-        { name: 'Ligue 1', value: 'FL1' },
-        { name: 'Major League Soccer', value: 'MLS' }
-      ];
-      
-      const filtered = competitions.filter(comp =>
+      const filtered = FOOTBALL_COMPETITIONS.filter(comp =>
         comp.name.toLowerCase().includes(focusedValue.toLowerCase()) ||
-        comp.value.toLowerCase().includes(focusedValue.toLowerCase())
+        comp.code.toLowerCase().includes(focusedValue.toLowerCase())
       );
       
       await safeRespond(interaction,
-        filtered.slice(0, 25).map(comp => ({ name: `${comp.value} (${comp.name})`, value: comp.value }))
+        filtered.slice(0, 25).map(comp => ({ name: `${comp.code} (${comp.name})`, value: comp.code }))
       );
     } catch (error) {
       await safeRespond(interaction, []);
@@ -17060,21 +17064,7 @@ client.on('interactionCreate', async (interaction) => {
         console.log('[AUTOCOMPLETE] Processing football competition autocomplete');
         console.log('[AUTOCOMPLETE] Focused value:', focusedValue);
         
-        // Available football competitions
-        const competitions = [
-          { code: 'PL', name: 'Premier League' },
-          { code: 'CL', name: 'UEFA Champions League' },
-          { code: 'ELC', name: 'Championship' },
-          { code: 'EL', name: 'UEFA Europa League' },
-          { code: 'SA', name: 'Serie A' },
-          { code: 'BL1', name: 'Bundesliga' },
-          { code: 'FL1', name: 'Ligue 1' },
-          { code: 'PD', name: 'La Liga' },
-          { code: 'NL1', name: 'Eredivisie' },
-          { code: 'PPL', name: 'Primeira Liga' }
-        ];
-        
-        const filtered = competitions
+        const filtered = FOOTBALL_COMPETITIONS
           .filter(comp => 
             comp.code.toLowerCase().includes(focusedValue.toLowerCase()) ||
             comp.name.toLowerCase().includes(focusedValue.toLowerCase())
@@ -17085,7 +17075,7 @@ client.on('interactionCreate', async (interaction) => {
           }))
           .slice(0, 25);
         
-        console.log('[AUTOCOMPLETE] Available competitions:', competitions.map(c => c.code));
+        console.log('[AUTOCOMPLETE] Available competitions:', FOOTBALL_COMPETITIONS.map(c => c.code));
         console.log('[AUTOCOMPLETE] Sending', filtered.length, 'competition choices');
         
         await safeRespond(interaction, filtered);
