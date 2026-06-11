@@ -1,4 +1,5 @@
 const supabase = require('../supabase-client');
+const { isValidFtScore } = require('../utils/football-score');
 
 // Get a single match by matchId
 async function getMatch(matchId) {
@@ -693,6 +694,55 @@ async function getBetsByUser(guildId, userId) {
   }
 }
 
+// Reset bet prize flags (for manual payout corrections)
+async function resetBetPrize(betId, guildId) {
+  try {
+    const { error } = await supabase
+      .from('football_bets')
+      .update({
+        prize_sent: false,
+        prize_amount: null,
+        prize_sent_at: null
+      })
+      .eq('bet_id', betId)
+      .eq('guild_id', guildId);
+
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('[DB] Error resetting bet prize:', error);
+    throw error;
+  }
+}
+
+// Finished matches that still need a valid score or prize processing
+async function getFinishedMatchesNeedingScore() {
+  try {
+    const { data, error } = await supabase
+      .from('football_matches')
+      .select('match_id, comp_code, comp_name, home_team, away_team, status, ft_score, kickoff_iso')
+      .eq('status', 'FINISHED');
+
+    if (error) throw error;
+
+    return (data || [])
+      .filter((match) => !isValidFtScore(match.ft_score))
+      .map((match) => ({
+        matchId: match.match_id,
+        compCode: match.comp_code,
+        compName: match.comp_name,
+        home: match.home_team,
+        away: match.away_team,
+        status: match.status,
+        ftScore: match.ft_score,
+        kickoffISO: match.kickoff_iso
+      }));
+  } catch (error) {
+    console.error('[DB] Error getting finished matches needing score:', error);
+    throw error;
+  }
+}
+
 // Update bet prize
 async function updateBetPrize(betId, guildId, prizeAmount) {
   try {
@@ -911,6 +961,8 @@ module.exports = {
   getBetsByMatch,
   getBetsByUser,
   updateBetPrize,
+  resetBetPrize,
+  getFinishedMatchesNeedingScore,
   incrementMatchGuildBonusPot,
   updateMatchGuildHouseEarnings,
   updateMatchGuildStake,

@@ -144,6 +144,7 @@ const {
   fetchWalletEgldBalanceHuman
 } = require('./utils/wallet-egld-guard');
 const { syncCommunityFundLedger, buildLedgerSyncMismatchFields } = require('./utils/community-fund-ledger-sync');
+const footballScore = require('./utils/football-score');
 const {
   generateAndStoreCommunityFundQR,
   deleteCommunityFundQRAssets,
@@ -31630,9 +31631,11 @@ async function checkAndUpdateMatchResults() {
     const scheduledMatches = await dbFootball.getScheduledMatches();
     const pausedMatches = await dbFootball.getPausedMatches();
     const inPlayMatches = await dbFootball.getInPlayMatches();
-    const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches, ...inPlayMatches];
+    const finishedNeedingScore = await dbFootball.getFinishedMatchesNeedingScore();
+    const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches, ...inPlayMatches, ...finishedNeedingScore];
     const unfinishedMatches = allUnfinishedMatches.filter(match => 
-      match.status !== 'FINISHED' && match.compCode
+      (match.status !== 'FINISHED' && match.compCode) ||
+      (match.status === 'FINISHED' && !footballScore.isValidFtScore(match.ftScore))
     );
     
     // Sort matches by kickoff time (earliest first) to prioritize matches that should be starting soon
@@ -31653,8 +31656,7 @@ async function checkAndUpdateMatchResults() {
         
         // Exponential backoff retry system: 2s, 4s, 8s, 16s
         let apiData = null;
-        let newStatus = null;
-        let newScore = null;
+        let matchUpdate = null;
         let success = false;
         
         for (let attempt = 1; attempt <= 4; attempt++) {
@@ -31674,10 +31676,9 @@ async function checkAndUpdateMatchResults() {
                 
                 if (response.ok) {
               apiData = await response.json();
-              newStatus = apiData.status;
-              newScore = apiData.score?.fullTime;
+              matchUpdate = footballScore.buildMatchUpdateFromApi(apiData, match);
               success = true;
-              console.log(`[FOOTBALL] ✅ Match ${match.matchId} API success on attempt ${attempt}: status=${newStatus}, score=${newScore ? `${newScore.home}-${newScore.away}` : 'N/A'}`);
+              console.log(`[FOOTBALL] ✅ Match ${match.matchId} API success on attempt ${attempt}: status=${matchUpdate.newStatus}, score=${matchUpdate.extractedScore ? `${matchUpdate.extractedScore.home}-${matchUpdate.extractedScore.away}` : 'N/A'}`);
               break;
             } else if (response.status === 429) {
               console.log(`[FOOTBALL] ⚠️ Rate limit hit for match ${match.matchId} on attempt ${attempt}`);
@@ -31706,28 +31707,22 @@ async function checkAndUpdateMatchResults() {
           continue;
         }
         
-        console.log(`[FOOTBALL] 📊 Match ${match.matchId} API result: status=${newStatus}, score=${newScore ? `${newScore.home}-${newScore.away}` : 'N/A'}`);
+        const { newStatus, extractedScore, scoreChanged, statusChanged, updates, hasValidScore } = matchUpdate;
         
-        // Check if we have updates
-        const statusChanged = newStatus !== match.status;
-        const scoreChanged = newScore && newScore.home !== undefined && newScore.away !== undefined && 
-          (match.ftScore.home !== newScore.home || match.ftScore.away !== newScore.away);
+        console.log(`[FOOTBALL] 📊 Match ${match.matchId} API result: status=${newStatus}, score=${extractedScore ? `${extractedScore.home}-${extractedScore.away}` : 'N/A'}`);
         
         console.log(`[FOOTBALL] Debug - Match ${match.matchId}: statusChanged=${statusChanged}, scoreChanged=${scoreChanged}`);
-        console.log(`[FOOTBALL] Debug - Current: status=${match.status}, score=${match.ftScore.home}-${match.ftScore.away}`);
-        console.log(`[FOOTBALL] Debug - New: status=${newStatus}, score=${newScore ? `${newScore.home}-${newScore.away}` : 'N/A'}`);
+        console.log(`[FOOTBALL] Debug - Current: status=${match.status}, score=${match.ftScore?.home ?? 'null'}-${match.ftScore?.away ?? 'null'}`);
+        console.log(`[FOOTBALL] Debug - New: status=${newStatus}, score=${extractedScore ? `${extractedScore.home}-${extractedScore.away}` : 'N/A'}`);
         
         if (statusChanged || scoreChanged) {
           // Store old status before updating
           const oldStatus = match.status;
           
-          // Update match data in database
-          await dbFootball.updateMatch(match.matchId, {
-            status: newStatus,
-            ftScore: newScore && newScore.home !== undefined && newScore.away !== undefined 
-              ? { home: newScore.home, away: newScore.away } 
-              : undefined
-          });
+          // Update match data in database (never overwrite a valid score with null)
+          if (Object.keys(updates).length > 0) {
+            await dbFootball.updateMatch(match.matchId, updates);
+          }
           
           // Get full match data with guild relationships
           const fullMatch = await dbFootball.getMatch(match.matchId);
@@ -31744,16 +31739,20 @@ async function checkAndUpdateMatchResults() {
             }
           }
           
-          // If match is finished, process prizes for all guilds
+          // If match is finished, process prizes only when we have a valid score
           if (newStatus === 'FINISHED') {
-            console.log(`[FOOTBALL] 🏁 Match ${match.matchId} finished! Processing prizes for ${fullMatch.guildIds.length} guild(s)...`);
-            for (const guildId of fullMatch.guildIds) {
-              await processMatchPrizes(guildId, match.matchId);
+            if (hasValidScore) {
+              console.log(`[FOOTBALL] 🏁 Match ${match.matchId} finished! Processing prizes for ${fullMatch.guildIds.length} guild(s)...`);
+              for (const guildId of fullMatch.guildIds) {
+                await processMatchPrizes(guildId, match.matchId);
+              }
+            } else {
+              console.log(`[FOOTBALL] ⚠️ Match ${match.matchId} finished but no valid score yet — skipping prize distribution until score is available`);
             }
           }
                 
                 updatedMatches++;
-          console.log(`[FOOTBALL] ✅ Updated match ${match.matchId} - Status: ${newStatus}, Score: ${newScore ? `${newScore.home}-${newScore.away}` : 'N/A'}`);
+          console.log(`[FOOTBALL] ✅ Updated match ${match.matchId} - Status: ${newStatus}, Score: ${extractedScore ? `${extractedScore.home}-${extractedScore.away}` : 'N/A'}`);
               } else {
           console.log(`[FOOTBALL] No updates for match ${match.matchId}`);
               }
@@ -31895,7 +31894,7 @@ async function updateMatchEmbed(guildId, matchId) {
         { name: '🎮 Game ID', value: matchId, inline: true },
         { name: '💰 Stake', value: stakeValue, inline: true },
       { name: '🏆 Pot Size', value: potSizeValue, inline: true },
-        { name: '📊 Score', value: `${match.ftScore.home} - ${match.ftScore.away}`, inline: true },
+        { name: '📊 Score', value: footballScore.formatMatchScore(match.ftScore), inline: true },
       { name: '⏰ Status', value: statusText, inline: true }
     ];
     
@@ -31948,6 +31947,41 @@ async function updateMatchEmbed(guildId, matchId) {
 }
 
 // Process prizes for a finished match
+async function fetchFootballMatchApiData(matchId) {
+  if (!FD_TOKEN) return null;
+  try {
+    const response = await fetch(`https://api.football-data.org/v4/matches/${matchId}`, {
+      headers: { 'X-Auth-Token': FD_TOKEN }
+    });
+    if (!response.ok) {
+      console.log(`[FOOTBALL] API error fetching match ${matchId}: ${response.status} ${response.statusText}`);
+      return null;
+    }
+    return await response.json();
+  } catch (error) {
+    console.error(`[FOOTBALL] Error fetching match ${matchId} from API:`, error.message);
+    return null;
+  }
+}
+
+async function resolveMatchFtScore(match, matchId) {
+  if (footballScore.isValidFtScore(match.ftScore)) {
+    return match.ftScore;
+  }
+
+  const apiData = await fetchFootballMatchApiData(matchId);
+  if (!apiData) return null;
+
+  const extractedScore = footballScore.extractFtScoreFromApi(apiData);
+  if (footballScore.isValidFtScore(extractedScore)) {
+    await dbFootball.updateMatch(matchId, { ftScore: extractedScore });
+    match.ftScore = extractedScore;
+    return extractedScore;
+  }
+
+  return null;
+}
+
 async function processMatchPrizes(guildId, matchId) {
   try {
     const match = await dbFootball.getMatch(matchId);
@@ -31963,43 +31997,20 @@ async function processMatchPrizes(guildId, matchId) {
     
     console.log(`[FOOTBALL] Processing prizes for match ${matchId} with ${matchBets.length} bets`);
     
-    // Step 1: Use stored score (already fetched by checkAndUpdateMatchResults)
-    let matchResult = null;
-    
-    // Use the stored score from the match data (already fetched by the periodic checker)
-        if (match.ftScore && match.ftScore.home !== undefined && match.ftScore.away !== undefined) {
-          matchResult = { score: { fullTime: { home: match.ftScore.home, away: match.ftScore.away } } };
-          console.log(`[FOOTBALL] Using stored score for ${matchId}: ${match.ftScore.home}-${match.ftScore.away}`);
-        } else {
-          console.log(`[FOOTBALL] No score available for match ${matchId}, cannot determine winners`);
-          return;
-    }
-    
-    // Step 2: Determine the winning outcome
-    let winningOutcome = null;
-    if (matchResult && matchResult.score && matchResult.score.fullTime) {
-      const homeScore = matchResult.score.fullTime.home;
-      const awayScore = matchResult.score.fullTime.away;
-      
-      if (homeScore > awayScore) {
-        winningOutcome = 'H'; // Home win
-      } else if (awayScore > homeScore) {
-        winningOutcome = 'A'; // Away win
-      } else {
-        winningOutcome = 'D'; // Draw
-      }
-      
-      console.log(`[FOOTBALL] Match ${matchId} result: ${homeScore}-${awayScore}, winning outcome: ${winningOutcome}`);
-      
-      // Update stored score if we got it from API
-      if (!match.ftScore || match.ftScore.home === undefined) {
-        match.ftScore = { home: homeScore, away: awayScore };
-        // Removed - using database
-      }
-    } else {
-      console.log(`[FOOTBALL] No valid score data for match ${matchId}`);
+    // Step 1: Resolve final score (stored value or live API fallback)
+    const resolvedScore = await resolveMatchFtScore(match, matchId);
+    if (!footballScore.isValidFtScore(resolvedScore)) {
+      console.log(`[FOOTBALL] No valid score available for match ${matchId}, cannot determine winners — will retry later`);
       return;
     }
+
+    const homeScore = resolvedScore.home;
+    const awayScore = resolvedScore.away;
+    console.log(`[FOOTBALL] Using score for ${matchId}: ${homeScore}-${awayScore}`);
+    
+    // Step 2: Determine the winning outcome
+    const winningOutcome = footballScore.deriveWinningOutcome(homeScore, awayScore);
+    console.log(`[FOOTBALL] Match ${matchId} result: ${homeScore}-${awayScore}, winning outcome: ${winningOutcome}`);
     
     // Step 3: Identify winners (only those who haven't received prizes yet to prevent double-counting)
     const allWinners = matchBets.filter(bet => bet.outcome === winningOutcome);
@@ -32146,7 +32157,7 @@ async function sendWinnerNotification(guildId, matchId, winners, losers, winning
       .setTitle(`🏆 ${match.home} vs ${match.away} - WINNERS ANNOUNCED!`)
       .setDescription(`**${match.compName}** • Game ID: \`${matchId}\``)
       .addFields([
-        { name: '📊 Final Score', value: `${match.ftScore.home} - ${match.ftScore.away}`, inline: true },
+        { name: '📊 Final Score', value: footballScore.formatMatchScore(match.ftScore), inline: true },
         { name: '🎯 Winning Outcome', value: winningOutcome, inline: true },
         { name: '💰 Total Pot', value: `${totalPotHuman} ${token.ticker}`, inline: true },
         { name: '🏆 Winners', value: `${winners.length} player(s)`, inline: true },
@@ -32233,7 +32244,7 @@ async function sendNoWinnersNotification(guildId, matchId, losers, winningOutcom
     const noWinnersEmbed = new EmbedBuilder()
       .setTitle(`😱 ${match.home} vs ${match.away} - NO WINNERS!`)
       .setDescription(`**${match.compName}** • Game ID: \`${matchId}\``)
-      .addFields([{ name: '📊 Final Score', value: `${match.ftScore.home} - ${match.ftScore.away}`, inline: true },
+      .addFields([{ name: '📊 Final Score', value: footballScore.formatMatchScore(match.ftScore), inline: true },
         { name: '🎯 Winning Outcome', value: winningOutcome, inline: true },
         { name: '💰 Total Pot', value: `${totalPotHuman} ${token.ticker}`, inline: true },
         { name: '❌ All Bets Lost', value: `${losers.length} player(s)`, inline: true },
@@ -32283,9 +32294,11 @@ async function initializeMatchList() {
     const scheduledMatches = await dbFootball.getScheduledMatches();
     const pausedMatches = await dbFootball.getPausedMatches();
     const inPlayMatches = await dbFootball.getInPlayMatches();
-    const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches, ...inPlayMatches];
+    const finishedNeedingScore = await dbFootball.getFinishedMatchesNeedingScore();
+    const allUnfinishedMatches = [...scheduledMatches, ...pausedMatches, ...inPlayMatches, ...finishedNeedingScore];
     const unfinishedMatches = allUnfinishedMatches.filter(match => 
-      match.status !== 'FINISHED' && match.status !== 'CANCELED' && match.status !== 'CANCELLED' && match.compCode
+      (match.status !== 'FINISHED' && match.status !== 'CANCELED' && match.status !== 'CANCELLED' && match.compCode) ||
+      (match.status === 'FINISHED' && !footballScore.isValidFtScore(match.ftScore))
     );
   
   // Sort matches by kickoff time (earliest first) to prioritize matches starting soon
@@ -32337,27 +32350,19 @@ async function checkSingleMatch() {
     }
     
     const apiData = await response.json();
-    const newStatus = apiData.status;
-    const newScore = apiData.score?.fullTime;
+    const matchUpdate = footballScore.buildMatchUpdateFromApi(apiData, match);
+    const { newStatus, extractedScore, scoreChanged, statusChanged, updates, hasValidScore } = matchUpdate;
     
-    console.log(`[FOOTBALL] 📊 Match ${match.matchId} API result: status=${newStatus}, score=${newScore ? `${newScore.home}-${newScore.away}` : 'N/A'}`);
-    
-    // Check if we have updates
-    const statusChanged = newStatus !== match.status;
-    const scoreChanged = newScore && newScore.home !== undefined && newScore.away !== undefined && 
-      (match.ftScore.home !== newScore.home || match.ftScore.away !== newScore.away);
+    console.log(`[FOOTBALL] 📊 Match ${match.matchId} API result: status=${newStatus}, score=${extractedScore ? `${extractedScore.home}-${extractedScore.away}` : 'N/A'}`);
     
     if (statusChanged || scoreChanged) {
       // Store old status before updating
       const oldStatus = match.status;
       
-      // Update match data in database
-      await dbFootball.updateMatch(match.matchId, {
-        status: newStatus,
-        ftScore: newScore && newScore.home !== undefined && newScore.away !== undefined 
-          ? { home: newScore.home, away: newScore.away } 
-          : undefined
-      });
+      // Update match data in database (never overwrite a valid score with null)
+      if (Object.keys(updates).length > 0) {
+        await dbFootball.updateMatch(match.matchId, updates);
+      }
       
       // Get full match data with guild relationships
       // Validate dbFootball is still available
@@ -32387,20 +32392,24 @@ async function checkSingleMatch() {
         }
       }
       
-      // If match is finished, process prizes for all guilds
+      // If match is finished, process prizes only when we have a valid score
       if (newStatus === 'FINISHED') {
-        console.log(`[FOOTBALL] 🏁 Match ${match.matchId} finished! Processing prizes for ${fullMatch.guildIds.length} guild(s)...`);
-        for (const guildId of fullMatch.guildIds) {
-          await processMatchPrizes(guildId, match.matchId);
-        }
-        // Remove finished match from the list
-        allMatches = allMatches.filter(m => m.matchId !== match.matchId);
-        if (currentMatchIndex >= allMatches.length) {
-          currentMatchIndex = 0;
+        if (hasValidScore) {
+          console.log(`[FOOTBALL] 🏁 Match ${match.matchId} finished! Processing prizes for ${fullMatch.guildIds.length} guild(s)...`);
+          for (const guildId of fullMatch.guildIds) {
+            await processMatchPrizes(guildId, match.matchId);
+          }
+          // Remove fully resolved finished matches from the round-robin list
+          allMatches = allMatches.filter(m => m.matchId !== match.matchId);
+          if (currentMatchIndex >= allMatches.length) {
+            currentMatchIndex = 0;
+          }
+        } else {
+          console.log(`[FOOTBALL] ⚠️ Match ${match.matchId} finished but no valid score yet — skipping prize distribution until score is available`);
         }
       }
       
-      console.log(`[FOOTBALL] ✅ Updated match ${match.matchId} - Status: ${newStatus}, Score: ${newScore ? `${newScore.home}-${newScore.away}` : 'N/A'}`);
+      console.log(`[FOOTBALL] ✅ Updated match ${match.matchId} - Status: ${newStatus}, Score: ${extractedScore ? `${extractedScore.home}-${extractedScore.away}` : 'N/A'}`);
     } else {
       console.log(`[FOOTBALL] No updates for match ${match.matchId}`);
     }
