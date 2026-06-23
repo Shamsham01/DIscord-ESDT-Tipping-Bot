@@ -118,9 +118,11 @@ Football betting allows users to bet on real football matches.
 /create-fixtures competition token amount [channel]
 ```
 
+Creates betting opportunities for upcoming matches in the next 7 days (today through the following 6 days), including scheduled and confirmed-kickoff (`TIMED`) fixtures from football-data.org.
+
 #### Parameters Explained
 
-* **`competition`**: Competition code (e.g., `PL` for Premier League, `CL` for Champions League)
+* **`competition`**: Competition code (e.g., `PL` for Premier League, `CL` for Champions League, `WC` for FIFA World Cup)
 * **`token`**: Token ticker for bets (e.g., `REWARD-cf6eac`)
 * **`amount`**: Bet amount per match (e.g., `100`)
 * **`channel`** (Optional): Channel to post matches (default: current channel)
@@ -131,7 +133,7 @@ Football betting allows users to bet on real football matches.
 /create-fixtures PL REWARD-cf6eac 100 #betting
 ```
 
-This creates betting opportunities for all Premier League matches with:
+This creates betting opportunities for all upcoming Premier League matches in the next 7 days with:
 
 * 100 REWARD tokens per bet
 * Posted in #betting channel

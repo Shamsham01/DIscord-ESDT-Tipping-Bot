@@ -452,7 +452,7 @@ const commands = [
     },
     {
         name: 'create-fixtures',
-        description: 'Create football fixtures for today with betting (Admin only)',
+        description: 'Create upcoming football fixtures for the next 7 days with betting (Admin only)',
         options: [
             {
                 name: 'competition',

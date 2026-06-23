@@ -182,15 +182,17 @@ Create a new lottery game.
 ```
 
 ### `/create-fixtures`
-Create football matches for betting.
+Create football matches for betting from the next 7 days of scheduled and confirmed fixtures.
 
 **Usage**: `/create-fixtures competition token amount [channel]`
 
 **Parameters**:
-- `competition`: Competition code (e.g., `PL` for Premier League)
+- `competition`: Competition code (e.g., `PL` for Premier League, `WC` for FIFA World Cup)
 - `token`: Token ticker for bets
 - `amount`: Bet amount per match
 - `channel` (Optional): Channel to post matches
+
+**Note**: Fetches upcoming matches for today through the next 7 days with status `SCHEDULED` or `TIMED` (confirmed kickoff) from football-data.org.
 
 **Example**:
 ```

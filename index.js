@@ -6930,47 +6930,22 @@ client.on('interactionCreate', async (interaction) => {
       const decimals = await getTokenDecimals(tokenIdentifier);
       const requiredAmountWei = toBlockchainAmount(amount, decimals);
 
-      // Fetch today's fixtures for the competition
-      await interaction.editReply({ content: `🔍 Fetching today's fixtures for competition ${competition}...`, flags: [MessageFlags.Ephemeral] });
+      // Fetch upcoming fixtures for the competition (today + next 7 days)
+      await interaction.editReply({ content: `🔍 Fetching upcoming fixtures for ${competition} (next 7 days)...`, flags: [MessageFlags.Ephemeral] });
 
       try {
         console.log(`[FOOTBALL] Fetching fixtures for competition: ${competition}`);
-        let fixtures = await fdGetTodayFixtures(competition);
+        const fixtures = await fdGetUpcomingFixtures(competition);
         console.log(`[FOOTBALL] Received fixtures response:`, fixtures);
-        
-        // If no fixtures today, try to get fixtures for the next few days
+
         if (!fixtures.matches || fixtures.matches.length === 0) {
-          await interaction.editReply({ content: `No fixtures today for competition ${competition}. Checking next few days...`, flags: [MessageFlags.Ephemeral] });
-          
-          // Try to get fixtures for the next 7 days
-          const today = new Date();
-          const nextWeek = new Date(today);
-          nextWeek.setDate(today.getDate() + 7);
-          
-          const dateFrom = today.toISOString().split('T')[0];
-          const dateTo = nextWeek.toISOString().split('T')[0];
-          
-          console.log(`[FOOTBALL] Trying to get fixtures from ${dateFrom} to ${dateTo}`);
-          
-          const response = await fetch(`https://api.football-data.org/v4/competitions/${competition}/matches?dateFrom=${dateFrom}&dateTo=${dateTo}&status=SCHEDULED`, {
-            headers: {
-              'X-Auth-Token': process.env.FD_TOKEN
-            }
-          });
-          
-          if (response.ok) {
-            fixtures = await response.json();
-            if (fixtures.matches && fixtures.matches.length > 0) {
-              await interaction.editReply({ content: `Found ${fixtures.matches.length} upcoming fixtures for ${competition}. Creating games for the next available matches...`, flags: [MessageFlags.Ephemeral] });
-            } else {
-              await interaction.editReply({ content: `No upcoming fixtures found for competition ${competition} in the next week. This competition may not have matches scheduled or may be inactive.`, flags: [MessageFlags.Ephemeral] });
-              return;
-            }
-          } else {
-            await interaction.editReply({ content: `No fixtures today for competition ${competition} and unable to fetch upcoming fixtures. Choose a different competition or try again later.`, flags: [MessageFlags.Ephemeral] });
-            return;
-          }
+          await interaction.editReply({ content: `No upcoming fixtures found for competition ${competition} in the next 7 days. This competition may not have matches scheduled or may be inactive.`, flags: [MessageFlags.Ephemeral] });
+          return;
         }
+
+        await interaction.editReply({ content: `Found ${fixtures.matches.length} upcoming fixtures for ${competition}. Creating games...`, flags: [MessageFlags.Ephemeral] });
+
+        fixtures.matches.sort((a, b) => new Date(a.utcDate).getTime() - new Date(b.utcDate).getTime());
 
         // Store last competition used
         await dbServerData.updateGuildSettings(guildId, {
@@ -7030,7 +7005,7 @@ client.on('interactionCreate', async (interaction) => {
               decimals: decimals 
             },
             requiredAmountWei: requiredAmountWei,
-            status: 'SCHEDULED',
+            status: ['SCHEDULED', 'TIMED'].includes(fixture.status) ? fixture.status : 'SCHEDULED',
             ftScore: { home: 0, away: 0 },
             guildIds: existingMatch ? (existingMatch.guildIds || []).concat(existingMatch.guildIds && existingMatch.guildIds.includes(guildId) ? [] : [guildId]) : [guildId],
             embeds: existingMatch && existingMatch.embeds ? existingMatch.embeds : {}
@@ -29966,19 +29941,29 @@ async function resolveTokenIdentifier(guildId, tokenInput) {
 }
 
 // Football API functions
-async function fdGetTodayFixtures(competition) {
+async function fdGetUpcomingFixtures(competition, days = 7) {
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const response = await fetch(`https://api.football-data.org/v4/competitions/${competition}/matches?dateFrom=${today}&dateTo=${today}&status=SCHEDULED`, {
-      headers: {
-        'X-Auth-Token': FD_TOKEN
+    const today = new Date();
+    const dateFrom = today.toISOString().split('T')[0];
+    const dateTo = new Date(today);
+    dateTo.setUTCDate(dateTo.getUTCDate() + days);
+    const dateToStr = dateTo.toISOString().split('T')[0];
+
+    console.log(`[FOOTBALL] Fetching fixtures from ${dateFrom} to ${dateToStr} (status=SCHEDULED,TIMED)`);
+
+    const response = await fetch(
+      `https://api.football-data.org/v4/competitions/${competition}/matches?dateFrom=${dateFrom}&dateTo=${dateToStr}&status=SCHEDULED,TIMED`,
+      {
+        headers: {
+          'X-Auth-Token': FD_TOKEN
+        }
       }
-    });
-    
+    );
+
     if (!response.ok) {
       throw new Error(`Football API error: ${response.status} ${response.statusText}`);
     }
-    
+
     return await response.json();
   } catch (error) {
     console.error('[FOOTBALL] Error fetching fixtures:', error.message);
