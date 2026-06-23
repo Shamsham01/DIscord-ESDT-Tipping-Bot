@@ -6651,7 +6651,8 @@ client.on('interactionCreate', async (interaction) => {
         for (const [projectName, project] of Object.entries(projects)) {
           const isFund = projectName === fundProject;
           projectDetails += `${isFund ? '💰 ' : '📁 '}**${projectName}**\n`;
-          projectDetails += `• Wallet: \`${project.walletAddress ? project.walletAddress.slice(0, 10) + '...' : 'Not set'}\`\n`;
+          const wallet = project.walletAddress;
+          projectDetails += `• Wallet: \`${wallet ? `${wallet.slice(0, 12)}...${wallet.slice(-8)}` : 'Not set'}\`\n`;
           projectDetails += `• Tokens: ${project.supportedTokens?.join(', ') || 'None'}\n`;
           projectDetails += `• Registered: <t:${Math.floor(project.registeredAt / 1000)}:R>\n\n`;
         }
@@ -10842,7 +10843,13 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Polling Interval', value: `${status.pollingInterval / 1000}s`, inline: true },
             { name: 'Monitored Wallets', value: status.monitoredWallets.toString(), inline: true },
             { name: 'Processed Transactions', value: status.processedTransactions.toString(), inline: true },
-            { name: 'Last Updated', value: new Date(status.timestamp).toLocaleString(), inline: false }
+            {
+              name: 'Last Updated',
+              value: status.lastUpdated === 'Never'
+                ? 'Never'
+                : new Date(status.lastUpdated).toLocaleString('en-GB', { timeZone: 'UTC' }),
+              inline: false
+            }
           ])
           .setFooter({ text: 'Blockchain monitoring status', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
           .setTimestamp();
@@ -13908,7 +13915,8 @@ client.on('interactionCreate', async (interaction) => {
       if (whitelistEntries.length > 0) {
         const summary = whitelistEntries.slice(0, 5).map(entry => {
           const end = new Date(entry.whitelist_end).toLocaleDateString('en-GB', { timeZone: 'UTC' });
-          return `\`${entry.wallet_address.slice(0, 12)}...\` — ${entry.status} until ${end}`;
+          const addr = entry.wallet_address;
+          return `\`${addr.slice(0, 12)}...${addr.slice(-8)}\` — ${entry.status} until ${end}`;
         }).join('\n');
         embed.addFields({
           name: 'Whitelist Preview',
