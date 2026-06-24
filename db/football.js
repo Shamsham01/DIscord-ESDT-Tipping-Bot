@@ -331,13 +331,13 @@ async function getPausedMatches() {
   }
 }
 
-// Get all in-play matches (status = 'IN_PLAY')
+// Get all in-play matches (status = 'IN_PLAY' or legacy 'LIVE')
 async function getInPlayMatches() {
   try {
     const { data, error } = await supabase
       .from('football_matches')
       .select('*')
-      .eq('status', 'IN_PLAY');
+      .in('status', ['IN_PLAY', 'LIVE']);
     
     if (error) throw error;
     

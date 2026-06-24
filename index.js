@@ -791,7 +791,7 @@ async function checkLiveActivities(guildId) {
     // Check for active football matches (SCHEDULED, TIMED, IN_PLAY)
     const matches = await dbFootball.getMatchesByGuild(guildId);
     const activeMatches = Object.values(matches || {}).filter(match => 
-      ['SCHEDULED', 'TIMED', 'IN_PLAY'].includes(match.status)
+      ['SCHEDULED', 'TIMED', 'IN_PLAY', 'LIVE', 'PAUSED'].includes(match.status)
     );
     if (activeMatches.length > 0) {
       issues.push({
@@ -7196,8 +7196,8 @@ client.on('interactionCreate', async (interaction) => {
       }
       
       // Validate match is active
-      if (!['SCHEDULED', 'TIMED', 'IN_PLAY'].includes(match.status)) {
-        await interaction.editReply({ content: `Match is not active (current status: ${match.status}). Only SCHEDULED, TIMED, or IN_PLAY matches can be updated.`, flags: [MessageFlags.Ephemeral] });
+      if (!['SCHEDULED', 'TIMED', 'IN_PLAY', 'LIVE', 'PAUSED'].includes(match.status)) {
+        await interaction.editReply({ content: `Match is not active (current status: ${match.status}). Only SCHEDULED, TIMED, IN_PLAY, or PAUSED matches can be updated.`, flags: [MessageFlags.Ephemeral] });
         return;
       }
       
@@ -16651,7 +16651,7 @@ client.on('interactionCreate', async (interaction) => {
           });
           return false;
         }
-        const isActive = ['SCHEDULED', 'TIMED', 'IN_PLAY'].includes(match.status);
+        const isActive = ['SCHEDULED', 'TIMED', 'IN_PLAY', 'LIVE', 'PAUSED'].includes(match.status);
         if (!isActive) {
           console.log('[AUTOCOMPLETE] Match not active (status:', match.status, '):', match.matchId);
         }
@@ -31832,7 +31832,7 @@ async function updateMatchEmbed(guildId, matchId) {
       statusText = '❌ Match Canceled';
       color = '#FF0000';
       footerText = 'Match canceled - all bets will be refunded';
-    } else if (match.status === 'IN_PLAY') {
+    } else if (match.status === 'IN_PLAY' || match.status === 'LIVE') {
       title = `⚽ ${match.home} vs ${match.away} - LIVE`;
       statusText = '🔴 Match In Progress';
       color = '#FFA500';
@@ -32313,6 +32313,10 @@ async function initializeMatchList() {
 
 // Check a single match
 async function checkSingleMatch() {
+  if (!FD_TOKEN) {
+    return;
+  }
+
   // Reinitialize match list every 10 cycles (2.5 minutes) to pick up new matches
   if (allMatches.length === 0 || (currentMatchIndex % 10 === 0)) {
     await initializeMatchList();

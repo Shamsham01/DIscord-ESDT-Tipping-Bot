@@ -37,7 +37,7 @@ function extractFtScoreFromApi(apiData) {
   const halfTime = apiData.score?.halfTime;
   if (
     isValidFtScore(halfTime) &&
-    ['IN_PLAY', 'PAUSED', 'HALFTIME'].includes(apiData.status)
+    ['IN_PLAY', 'PAUSED', 'HALFTIME', 'LIVE'].includes(apiData.status)
   ) {
     return { home: halfTime.home, away: halfTime.away };
   }
@@ -70,14 +70,27 @@ function formatMatchScore(ftScore) {
   return `${ftScore.home} - ${ftScore.away}`;
 }
 
+/** Map legacy/custom statuses to football-data.org equivalents. */
+function normalizeMatchStatus(status) {
+  if (status === 'LIVE') return 'IN_PLAY';
+  return status;
+}
+
+function isInProgressMatchStatus(status) {
+  return ['IN_PLAY', 'LIVE', 'PAUSED'].includes(status);
+}
+
 function buildMatchUpdateFromApi(apiData, currentMatch) {
-  const newStatus = apiData.status;
+  const newStatus = normalizeMatchStatus(apiData.status);
+  const currentStatus = normalizeMatchStatus(currentMatch?.status);
   const extractedScore = extractFtScoreFromApi(apiData);
   const currentScore = currentMatch?.ftScore;
   const hasValidCurrent = isValidFtScore(currentScore);
   const hasValidExtracted = isValidFtScore(extractedScore);
 
-  const statusChanged = newStatus !== currentMatch.status;
+  // Also rewrite legacy LIVE rows to IN_PLAY even when the API status is unchanged
+  const statusChanged =
+    newStatus !== currentStatus || currentMatch?.status === 'LIVE';
   const scoreChanged =
     hasValidExtracted &&
     (!hasValidCurrent ||
@@ -106,5 +119,7 @@ module.exports = {
   deriveWinningOutcome,
   deriveWinningOutcomeFromApi,
   formatMatchScore,
+  normalizeMatchStatus,
+  isInProgressMatchStatus,
   buildMatchUpdateFromApi
 };
