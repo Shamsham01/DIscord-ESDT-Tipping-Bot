@@ -764,6 +764,28 @@ async function updateBetPrize(betId, guildId, prizeAmount) {
   }
 }
 
+// Mark bet as refunded (insufficient participants)
+async function updateBetRefund(betId, guildId, refundAmount) {
+  try {
+    const { error } = await supabase
+      .from('football_bets')
+      .update({
+        status: 'REFUNDED',
+        prize_sent: true,
+        prize_amount: refundAmount,
+        prize_sent_at: new Date().toISOString()
+      })
+      .eq('bet_id', betId)
+      .eq('guild_id', guildId);
+    
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('[DB] Error updating bet refund:', error);
+    throw error;
+  }
+}
+
 // Atomically increment bonus pot to prevent race conditions
 async function incrementMatchGuildBonusPot(matchId, guildId, incrementAmountWei) {
   try {
@@ -961,6 +983,7 @@ module.exports = {
   getBetsByMatch,
   getBetsByUser,
   updateBetPrize,
+  updateBetRefund,
   resetBetPrize,
   getFinishedMatchesNeedingScore,
   incrementMatchGuildBonusPot,

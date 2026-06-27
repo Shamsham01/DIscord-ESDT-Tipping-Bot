@@ -31126,6 +31126,55 @@ async function trackHouseSpending(guildId, amountWei, tokenIdentifier, reason = 
   }
 }
 
+// Reverse betting house spending (e.g. bonus pot returned when a match is void)
+async function reverseHouseBettingSpending(guildId, amountWei, tokenIdentifier, reason = 'match void') {
+  try {
+    const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
+    if (!esdtIdentifierRegex.test(tokenIdentifier)) {
+      console.error(`[HOUSE] Invalid token identifier format: ${tokenIdentifier}`);
+      return { success: false, error: `Invalid token identifier format: ${tokenIdentifier}` };
+    }
+
+    const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+    const tokenTicker = tokenMetadata[tokenIdentifier]?.ticker || tokenIdentifier.split('-')[0];
+    const currentBalance = await getHouseBalance(guildId, tokenIdentifier);
+    const houseBalance = currentBalance || {
+      bettingEarnings: {},
+      bettingSpending: {},
+      bettingPNL: {},
+      auctionEarnings: {},
+      auctionSpending: {},
+      auctionPNL: {},
+      lotteryEarnings: {},
+      lotterySpending: {},
+      lotteryPNL: {},
+      dropEarnings: {},
+      dropSpending: {},
+      dropPNL: {}
+    };
+
+    const currentBettingSpending = new BigNumber(houseBalance.bettingSpending[tokenIdentifier] || '0');
+    const refundAmount = new BigNumber(amountWei);
+    const newBettingSpending = BigNumber.maximum(currentBettingSpending.minus(refundAmount), 0);
+    houseBalance.bettingSpending[tokenIdentifier] = newBettingSpending.toString();
+
+    const bettingEarnings = new BigNumber(houseBalance.bettingEarnings[tokenIdentifier] || '0');
+    houseBalance.bettingPNL[tokenIdentifier] = bettingEarnings.minus(newBettingSpending).toString();
+
+    await dbServerData.updateHouseBalance(guildId, tokenIdentifier, houseBalance);
+
+    const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
+    const displayDecimals = storedDecimals !== null ? storedDecimals : 8;
+    const humanAmount = refundAmount.dividedBy(new BigNumber(10).pow(displayDecimals)).toString();
+    console.log(`[HOUSE] Reversed betting spending for match void: +${humanAmount} ${tokenTicker} (${reason})`);
+
+    return { success: true };
+  } catch (error) {
+    console.error(`[HOUSE] Error reversing betting house spending:`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
 // Track house earnings when no winners (betting)
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f")
 async function trackHouseEarnings(guildId, matchId, totalPotWei, tokenDecimals, tokenIdentifier) {
@@ -31975,6 +32024,63 @@ async function resolveMatchFtScore(match, matchId) {
   return null;
 }
 
+async function processMatchInsufficientBetsRefunds(guildId, matchId, matchBets, match) {
+  const settlementTracked = match.houseEarningsTrackedByGuild?.[guildId] || false;
+  if (settlementTracked) {
+    console.log(`[FOOTBALL] Match ${matchId} insufficient-bet refunds already processed for guild ${guildId}, skipping`);
+    return;
+  }
+
+  const token = getMatchTokenForGuild(match, guildId);
+  if (!token) {
+    console.error(`[FOOTBALL] No token configuration found for match ${matchId} in guild ${guildId}`);
+    return;
+  }
+
+  const bonusPotWei = match.bonusPotWeiByGuild?.[guildId] || '0';
+  let refundedCount = 0;
+
+  for (const bet of matchBets) {
+    if (bet.prizeSent && bet.status === 'REFUNDED') {
+      continue;
+    }
+
+    const refundHuman = new BigNumber(bet.amountWei).dividedBy(new BigNumber(10).pow(token.decimals)).toString();
+    console.log(`[FOOTBALL] Refunding ${refundHuman} ${token.ticker} to user ${bet.userId} for match ${matchId} (insufficient bets)`);
+
+    const refundResult = await virtualAccounts.addFundsToAccount(
+      guildId,
+      bet.userId,
+      token.identifier,
+      refundHuman,
+      null,
+      'football_refund'
+    );
+
+    if (refundResult.success) {
+      await dbFootball.updateBetRefund(bet.betId, guildId, refundHuman);
+      refundedCount++;
+    } else {
+      console.error(`[FOOTBALL] Failed to refund bet ${bet.betId} for user ${bet.userId}: ${refundResult.error}`);
+    }
+  }
+
+  if (new BigNumber(bonusPotWei).isGreaterThan(0)) {
+    await reverseHouseBettingSpending(
+      guildId,
+      bonusPotWei,
+      token.identifier,
+      `Bonus pot return for match ${matchId} (insufficient bets)`
+    );
+    await dbFootball.updateMatchGuildBonusPot(matchId, guildId, '0');
+  }
+
+  await dbFootball.updateMatchGuildHouseEarnings(matchId, guildId, true);
+  await sendInsufficientBetsRefundNotification(guildId, matchId, matchBets.length, refundedCount, token);
+
+  console.log(`[FOOTBALL] Completed insufficient-bet refunds for match ${matchId}: ${refundedCount}/${matchBets.length} bet(s) refunded`);
+}
+
 async function processMatchPrizes(guildId, matchId) {
   try {
     const match = await dbFootball.getMatch(matchId);
@@ -31982,9 +32088,10 @@ async function processMatchPrizes(guildId, matchId) {
     
     const matchBetsObj = await dbFootball.getBetsByMatch(guildId, matchId);
     const matchBets = Object.values(matchBetsObj || {});
-    
-    if (matchBets.length === 0) {
-      console.log(`[FOOTBALL] No bets found for match ${matchId}, skipping prize distribution`);
+
+    if (matchBets.length < 2) {
+      console.log(`[FOOTBALL] Match ${matchId} has ${matchBets.length} bet(s) — refunding (minimum 2 required for prize pool)`);
+      await processMatchInsufficientBetsRefunds(guildId, matchId, matchBets, match);
       return;
     }
     
@@ -32263,6 +32370,44 @@ async function sendNoWinnersNotification(guildId, matchId, losers, winningOutcom
     
   } catch (error) {
     console.error(`[FOOTBALL] Error sending no-winners notification for match ${matchId}:`, error.message);
+  }
+}
+
+async function sendInsufficientBetsRefundNotification(guildId, matchId, betCount, refundedCount, token) {
+  try {
+    const match = await dbFootball.getMatch(matchId);
+    if (!match || !match.guildIds || !match.guildIds.includes(guildId) || !match.embeds[guildId]?.threadId) {
+      console.log(`[FOOTBALL] No thread found for match ${matchId}, cannot send insufficient-bets notification`);
+      return;
+    }
+
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return;
+
+    const thread = await guild.channels.fetch(match.embeds[guildId].threadId);
+    if (!thread) return;
+
+    const refundEmbed = new EmbedBuilder()
+      .setTitle(`↩️ ${match.home} vs ${match.away} - MATCH VOID`)
+      .setDescription(`**${match.compName}** • Game ID: \`${matchId}\``)
+      .addFields([
+        { name: '📊 Final Score', value: footballScore.formatMatchScore(match.ftScore), inline: true },
+        { name: '🎫 Bets Placed', value: `${betCount}`, inline: true },
+        { name: '↩️ Refunds Issued', value: `${refundedCount}`, inline: true },
+        {
+          name: 'ℹ️ Reason',
+          value: 'Fewer than 2 bets were placed on this match. Stakes have been refunded to virtual accounts.',
+          inline: false
+        }
+      ])
+      .setColor('#FFA500')
+      .setFooter({ text: 'Refunds have been added to your virtual account. Use /check-balance-esdt to verify.', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
+      .setTimestamp();
+
+    await thread.send({ embeds: [refundEmbed] });
+    console.log(`[FOOTBALL] Insufficient-bets refund notification sent to thread ${match.embeds[guildId].threadId} for match ${matchId}`);
+  } catch (error) {
+    console.error(`[FOOTBALL] Error sending insufficient-bets notification for match ${matchId}:`, error.message);
   }
 }
 
