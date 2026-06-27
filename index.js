@@ -26714,20 +26714,28 @@ async function createDropRoundEmbed(guildId, roundId, game, round, isClosed = fa
     // Get token ticker for display
     const tokenTickerDisplay = game.tokenTicker ? (game.tokenTicker.includes('-') ? game.tokenTicker.split('-')[0] : game.tokenTicker) : 'None';
     
-    // Get house balance and USD value
+    // Get base amount, house balance, and USD values
+    let baseAmountText = 'N/A';
     let houseBalanceText = 'N/A';
     let houseBalanceUsd = null;
     if (game.tokenTicker) {
       try {
+        const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
+        const tokenDecimals = tokenMetadata[game.tokenTicker]?.decimals || 8;
+        let baseAmountHuman = null;
+
+        if (game.baseAmountWei) {
+          baseAmountHuman = new BigNumber(game.baseAmountWei)
+            .dividedBy(new BigNumber(10).pow(tokenDecimals))
+            .toFixed(2);
+          baseAmountText = `${baseAmountHuman} ${tokenTickerDisplay}`;
+        }
+
         const houseBalance = await getHouseBalance(guildId, game.tokenTicker);
         if (houseBalance) {
           const dropEarnings = new BigNumber(houseBalance.dropEarnings?.[game.tokenTicker] || '0');
           const dropSpending = new BigNumber(houseBalance.dropSpending?.[game.tokenTicker] || '0');
           const dropBalance = dropEarnings.minus(dropSpending);
-          
-          // Get token decimals
-          const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
-          const tokenDecimals = tokenMetadata[game.tokenTicker]?.decimals || 8;
           const balanceHuman = dropBalance.dividedBy(new BigNumber(10).pow(tokenDecimals)).toFixed(2);
           
           // Get USD price
@@ -26736,6 +26744,13 @@ async function createDropRoundEmbed(guildId, roundId, game, round, isClosed = fa
             if (tokenPriceUsd > 0) {
               const balanceBN = new BigNumber(balanceHuman);
               houseBalanceUsd = balanceBN.multipliedBy(tokenPriceUsd).toFixed(2);
+
+              if (baseAmountHuman) {
+                const baseAmountUsd = new BigNumber(baseAmountHuman)
+                  .multipliedBy(tokenPriceUsd)
+                  .toFixed(2);
+                baseAmountText += ` (≈ $${baseAmountUsd})`;
+              }
             }
           } catch (error) {
             console.error('[DROP] Error fetching token price:', error.message);
@@ -26747,7 +26762,7 @@ async function createDropRoundEmbed(guildId, roundId, game, round, isClosed = fa
           }
         }
       } catch (error) {
-        console.error('[DROP] Error fetching house balance:', error.message);
+        console.error('[DROP] Error fetching drop game token info:', error.message);
       }
     }
     
@@ -26758,6 +26773,7 @@ async function createDropRoundEmbed(guildId, roundId, game, round, isClosed = fa
       .addFields(
         { name: 'Current Droppers', value: `${round.currentDroppers}/${round.minDroppers}`, inline: true },
         { name: 'Reward Token', value: tokenTickerDisplay, inline: true },
+        { name: 'Base Amount', value: baseAmountText, inline: true },
         { name: 'House Balance', value: houseBalanceText, inline: false }
       )
       .setImage(isClosed ? 'https://i.ibb.co/LynfM9F/Round-Closed.png' : 'https://i.ibb.co/kTvPqzj/Round-Live.png')
