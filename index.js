@@ -502,6 +502,110 @@ async function waitForMultiversXTransactionTerminalOutcome(txHash) {
   };
 }
 
+/** Poll MultiversX until a tx reaches a terminal state. Returns 'success', 'fail', or 'pending'. */
+async function checkTransactionStatus(txHash) {
+  const outcome = await waitForMultiversXTransactionTerminalOutcome(txHash);
+  if (outcome.status === 'success') return 'success';
+  if (outcome.status === 'failed') return 'fail';
+  return 'pending';
+}
+
+function extractEsdtTransferApiFields(parsedResponse, response) {
+  let txHash = null;
+  if (parsedResponse.txHash) {
+    txHash = parsedResponse.txHash;
+  } else if (parsedResponse.result && parsedResponse.result.txHash) {
+    txHash = parsedResponse.result.txHash;
+  } else if (parsedResponse.data && parsedResponse.data.txHash) {
+    txHash = parsedResponse.data.txHash;
+  } else if (parsedResponse.transaction && parsedResponse.transaction.txHash) {
+    txHash = parsedResponse.transaction.txHash;
+  }
+
+  let txStatus = null;
+  if (parsedResponse.result && parsedResponse.result.status) {
+    txStatus = parsedResponse.result.status;
+  } else if (parsedResponse.status) {
+    txStatus = parsedResponse.status;
+  }
+  if (txStatus && typeof txStatus === 'object') {
+    txStatus = txStatus.status || txStatus.value || String(txStatus);
+  }
+
+  const errorMessage = parsedResponse.error ||
+    (parsedResponse.result && parsedResponse.result.error) ||
+    (parsedResponse.data && parsedResponse.data.error) ||
+    (!response.ok ? `API error (${response.status})` : null);
+
+  return { txHash, txStatus, errorMessage };
+}
+
+function isEsdtTransferApiImmediateSuccess(response, parsedResponse, txStatus, txHash) {
+  const statusStr = txStatus != null ? String(txStatus) : '';
+  const isStatusSuccess = statusStr === 'success' || statusStr === 'Success' || statusStr === 'SUCCESS';
+  return (response.ok || parsedResponse.success === true) && isStatusSuccess && !!txHash;
+}
+
+/**
+ * Resolve ESDT transfer outcome. When the API returns a txHash without immediate success,
+ * poll MultiversX before treating the transfer as failed (prevents false ledger rollbacks).
+ */
+async function finalizeEsdtTransferResult(parsedResponse, response, logPrefix = '[TRANSFER]') {
+  const { txHash, txStatus, errorMessage } = extractEsdtTransferApiFields(parsedResponse, response);
+
+  if (isEsdtTransferApiImmediateSuccess(response, parsedResponse, txStatus, txHash)) {
+    return {
+      success: true,
+      txHash,
+      errorMessage: null,
+      rawResponse: parsedResponse,
+      httpStatus: response.status
+    };
+  }
+
+  if (txHash) {
+    console.log(`${logPrefix} API returned txHash ${txHash} (status: ${txStatus ?? 'unknown'}); verifying on-chain...`);
+    const chainStatus = await checkTransactionStatus(txHash);
+    if (chainStatus === 'success') {
+      console.log(`${logPrefix} On-chain success confirmed for tx ${txHash}`);
+      return {
+        success: true,
+        txHash,
+        errorMessage: null,
+        rawResponse: parsedResponse,
+        httpStatus: response.status
+      };
+    }
+    if (chainStatus === 'fail') {
+      console.error(`${logPrefix} On-chain failure confirmed for tx ${txHash}`);
+      return {
+        success: false,
+        txHash,
+        errorMessage: errorMessage || 'Transaction failed on-chain.',
+        rawResponse: parsedResponse,
+        httpStatus: response.status
+      };
+    }
+    console.warn(`${logPrefix} Tx ${txHash} not confirmed within polling window`);
+    return {
+      success: false,
+      txHash,
+      pendingConfirmation: true,
+      errorMessage: `Transaction submitted but not confirmed within ${Math.round(MULTIVERSX_TX_POLL_MAX_WAIT_MS / 1000)}s. Do not retry — check the explorer or contact an admin.`,
+      rawResponse: parsedResponse,
+      httpStatus: response.status
+    };
+  }
+
+  return {
+    success: false,
+    txHash: null,
+    errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
+    rawResponse: parsedResponse,
+    httpStatus: response.status
+  };
+}
+
 // Pending swap quotes (key: guildId:userId:messageId)
 const pendingSwapQuotes = new Map();
 
@@ -2438,52 +2542,18 @@ async function transferESDT(recipientWallet, tokenIdentifier, amount, projectNam
         console.error('Error parsing API response:', parseError.message);
         parsedResponse = { success: response.ok, message: responseText };
       }
-      
-      let txHash = null;
-      let txStatus = null;
-      
-      if (parsedResponse.txHash) {
-        txHash = parsedResponse.txHash;
-      } else if (parsedResponse.result && parsedResponse.result.txHash) {
-        txHash = parsedResponse.result.txHash;
-      } else if (parsedResponse.data && parsedResponse.data.txHash) {
-        txHash = parsedResponse.data.txHash;
-      } else if (parsedResponse.transaction && parsedResponse.transaction.txHash) {
-        txHash = parsedResponse.transaction.txHash;
-      }
-      
-      // Check for transaction status in the response
-      if (parsedResponse.result && parsedResponse.result.status) {
-        txStatus = parsedResponse.result.status;
-      } else if (parsedResponse.status) {
-        txStatus = parsedResponse.status;
-      }
-      
-      const errorMessage = parsedResponse.error || 
-                          (parsedResponse.result && parsedResponse.result.error) ||
-                          (parsedResponse.data && parsedResponse.data.error) ||
-                          (!response.ok ? `API error (${response.status})` : null);
-      
-      // Only treat as success if status is 'success', HTTP is OK, and txHash exists
-      const isApiSuccess = (response.ok || parsedResponse.success === true) && txStatus === 'success' && !!txHash;
-      
-      const result = {
-        success: isApiSuccess,
-        txHash: txHash,
-        errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
-        rawResponse: parsedResponse,
-        httpStatus: response.status
-      };
-      
+
+      const result = await finalizeEsdtTransferResult(parsedResponse, response, '[TRANSFER]');
+
       if (result.success) {
-        console.log(`Successfully sent ${amount} ${tokenTicker} to: ${recipientWallet} using project: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
+        console.log(`Successfully sent ${amount} ${tokenTicker} to: ${recipientWallet} using project: ${projectName}${result.txHash ? ` (txHash: ${result.txHash})` : ''}`);
       } else {
-        console.error(`API reported failure for ${tokenTicker} transfer: ${errorMessage || 'Unknown error'}`);
-        if (txHash) {
-          console.log(`Transaction hash was returned (${txHash}), but transaction failed (status: ${txStatus}).`);
+        console.error(`API reported failure for ${tokenTicker} transfer: ${result.errorMessage || 'Unknown error'}`);
+        if (result.txHash) {
+          console.log(`Transaction hash was returned (${result.txHash}), outcome: ${result.pendingConfirmation ? 'pending confirmation' : 'failed'}.`);
         }
       }
-      
+
       return result;
     } catch (fetchError) {
       clearTimeout(timeoutId);
@@ -2625,52 +2695,18 @@ async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, a
         console.error('[WITHDRAW] Error parsing API response:', parseError.message);
         parsedResponse = { success: response.ok, message: responseText };
       }
-      
-      let txHash = null;
-      let txStatus = null;
-      
-      if (parsedResponse.txHash) {
-        txHash = parsedResponse.txHash;
-      } else if (parsedResponse.result && parsedResponse.result.txHash) {
-        txHash = parsedResponse.result.txHash;
-      } else if (parsedResponse.data && parsedResponse.data.txHash) {
-        txHash = parsedResponse.data.txHash;
-      } else if (parsedResponse.transaction && parsedResponse.transaction.txHash) {
-        txHash = parsedResponse.transaction.txHash;
-      }
-      
-      // Check for transaction status in the response
-      if (parsedResponse.result && parsedResponse.result.status) {
-        txStatus = parsedResponse.result.status;
-      } else if (parsedResponse.status) {
-        txStatus = parsedResponse.status;
-      }
-      
-      const errorMessage = parsedResponse.error || 
-                          (parsedResponse.result && parsedResponse.result.error) ||
-                          (parsedResponse.data && parsedResponse.data.error) ||
-                          (!response.ok ? `API error (${response.status})` : null);
-      
-      // Only treat as success if status is 'success', HTTP is OK, and txHash exists
-      const isApiSuccess = (response.ok || parsedResponse.success === true) && txStatus === 'success' && !!txHash;
-      
-      const result = {
-        success: isApiSuccess,
-        txHash: txHash,
-        errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
-        rawResponse: parsedResponse,
-        httpStatus: response.status
-      };
-      
+
+      const result = await finalizeEsdtTransferResult(parsedResponse, response, '[WITHDRAW]');
+
       if (result.success) {
-        console.log(`[WITHDRAW] Successfully sent ${amount} ${tokenIdentifier} to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
+        console.log(`[WITHDRAW] Successfully sent ${amount} ${tokenIdentifier} to: ${recipientWallet} using Community Fund: ${projectName}${result.txHash ? ` (txHash: ${result.txHash})` : ''}`);
       } else {
-        console.error(`[WITHDRAW] API reported failure for ${tokenIdentifier} transfer: ${errorMessage || 'Unknown error'}`);
-        if (txHash) {
-          console.log(`[WITHDRAW] Transaction hash was returned (${txHash}), but transaction failed (status: ${txStatus}).`);
+        console.error(`[WITHDRAW] API reported failure for ${tokenIdentifier} transfer: ${result.errorMessage || 'Unknown error'}`);
+        if (result.txHash) {
+          console.log(`[WITHDRAW] Transaction hash was returned (${result.txHash}), outcome: ${result.pendingConfirmation ? 'pending confirmation' : 'failed'}.`);
         }
       }
-      
+
       return result;
     } catch (fetchError) {
       clearTimeout(timeoutId);
@@ -11852,8 +11888,16 @@ client.on('interactionCreate', async (interaction) => {
           });
           
           console.log(`Withdrawal successful: ${withdrawAmount} ${tokenTicker} sent to ${userWallet}, new balance: ${deductResult.newBalance}`);
+        } else if (transferResult.pendingConfirmation && transferResult.txHash) {
+          // Tx was submitted but not confirmed in time — do NOT restore balance (tx may have succeeded)
+          console.error(`[WITHDRAW] Withdrawal pending confirmation. TxHash: ${transferResult.txHash}. Balance NOT restored.`);
+          const explorerUrl = `https://explorer.multiversx.com/transactions/${transferResult.txHash}`;
+          await interaction.editReply({
+            content: `⚠️ **Withdrawal status unknown**\n\nYour transaction was submitted on-chain but could not be confirmed in time.\n\n**Do not retry** until an admin verifies the outcome.\n\nTransaction: [\`${transferResult.txHash}\`](${explorerUrl})\n\nYour virtual account balance remains deducted (${deductResult.newBalance} ${tokenTicker} remaining). If the transaction succeeded on-chain, no further action is needed.`,
+            flags: [MessageFlags.Ephemeral]
+          });
         } else {
-          // Blockchain transaction failed - RESTORE the balance
+          // Blockchain transaction failed - RESTORE the balance only when no pending/successful on-chain tx
           console.error(`[WITHDRAW] Blockchain transaction failed. Restoring balance...`);
           console.error(`[WITHDRAW] Error: ${transferResult.errorMessage || 'Unknown error'}`);
           
