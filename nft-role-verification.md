@@ -45,6 +45,8 @@ When you **create** a rule, the bot posts a **confirmation embed** in the **noti
 
 On each **sync run**, the bot sends **batched embeds** to that same channel listing **grants** and **removals** (when there are changes).
 
+**Daily (scheduled) runs** also post a **completion summary embed** per rule (members checked, grants, removals, errors) even when nothing changed. Manual **`run-now`** replies to the admin ephemerally instead.
+
 ## Commands (Administrator only)
 
 All subcommands are under **`/nft-role-verification`**.

@@ -98,7 +98,7 @@ const dropHelpers = require('./utils/drop-helpers');
 const dbActivityAggregations = require('./db/activity-aggregations');
 const dbSwapTransactions = require('./db/swap-transactions');
 const nftRoleVerificationHandlers = require('./handlers/nft-role-verification');
-const { runNftRoleSync } = require('./jobs/sync-nft-role-verifications');
+const { runNftRoleSync, scheduleNftRoleVerificationSync } = require('./jobs/sync-nft-role-verifications');
 const dbNftRoleRules = require('./db/nft-role-verification');
 const dbOnChainSubscriptions = require('./db/on-chain-subscriptions');
 const makexWhitelist = require('./db/makex-whitelist');
@@ -28720,15 +28720,9 @@ client.on('ready', async () => {
   console.log('Lottery draw check scheduled (every minute)');
   console.log('Lottery embed update scheduled (every 10 minutes)');
   
-  // NFT role verification: wallet + VA dual check (daily)
-  setInterval(async () => {
-    try {
-      await runNftRoleSync(client);
-    } catch (error) {
-      console.error('[NFT-ROLE-SYNC] Scheduled run error:', error.message);
-    }
-  }, 24 * 60 * 60 * 1000);
-  console.log('NFT role verification sync scheduled (every 24 hours)');
+  // NFT role verification: wallet + VA dual check (daily; first run ~1m after ready)
+  scheduleNftRoleVerificationSync(client);
+  console.log('NFT role verification sync scheduled (every 24 hours, hourly due check)');
 
   setInterval(async () => {
     try {

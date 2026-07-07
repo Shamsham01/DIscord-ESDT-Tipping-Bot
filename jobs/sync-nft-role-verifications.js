@@ -188,12 +188,17 @@ function canBotManageRole(guild, role) {
 
 let syncInFlight = false;
 
+const NFT_ROLE_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const NFT_ROLE_SYNC_CHECK_MS = 60 * 60 * 1000;
+const NFT_ROLE_SYNC_STARTUP_DELAY_MS = 60 * 1000;
+let lastScheduledRunAt = 0;
+
 /**
  * @param {import('discord.js').Client} client
- * @param {{ guildId?: string }} [opts]
+ * @param {{ guildId?: string, scheduled?: boolean }} [opts]
  */
 async function runNftRoleSync(client, opts = {}) {
-  const { guildId: filterGuildId } = opts;
+  const { guildId: filterGuildId, scheduled = false } = opts;
   if (syncInFlight) {
     console.log('[NFT-ROLE-SYNC] Skipped: sync already running');
     return { skipped: true };
@@ -273,6 +278,7 @@ async function runNftRoleSync(client, opts = {}) {
         const revokedLines = [];
         const tickers = rule.collectionTickers || [];
         let revokeDiagSamples = 0;
+        let ruleErrors = 0;
         const REVOKE_DIAG_MAX = 8;
 
         for (const userId of candidateIds) {
@@ -406,6 +412,7 @@ async function runNftRoleSync(client, opts = {}) {
           } catch (e) {
             console.error(`[NFT-ROLE-SYNC] User ${userId} rule ${rule.id}:`, e.message);
             summary.errors += 1;
+            ruleErrors += 1;
           }
         }
 
@@ -428,6 +435,47 @@ async function runNftRoleSync(client, opts = {}) {
               EMBED_CHUNKSIZE
             );
           }
+          if (scheduled) {
+            const modeHuman = String(rule.eligibilityMode || 'wallet_or_va').replace(/_/g, ' ');
+            const summaryEmbed = new EmbedBuilder()
+              .setTitle('NFT role verification — daily sync complete')
+              .setDescription(
+                grantedLines.length || revokedLines.length
+                  ? '_Per-member details are in the grant/removal embeds above._'
+                  : '_No role changes were needed._'
+              )
+              .addFields(
+                { name: 'Role', value: `<@&${rule.discordRoleId}>`, inline: true },
+                { name: 'Rule ID', value: `\`${rule.id}\``, inline: true },
+                { name: 'Members checked', value: String(candidateIds.size), inline: true },
+                { name: 'Granted', value: String(grantedLines.length), inline: true },
+                { name: 'Removed', value: String(revokedLines.length), inline: true },
+                { name: 'Errors', value: String(ruleErrors), inline: true },
+                {
+                  name: 'Collections',
+                  value: (tickers.join(', ') || '—').slice(0, 1024),
+                  inline: false
+                },
+                {
+                  name: 'Eligibility',
+                  value: `${modeHuman} · match **${rule.matchMode}**, min **${rule.minCountPerCollection}**`,
+                  inline: false
+                }
+              )
+              .setColor(
+                ruleErrors > 0 ? 0xe74c3c : grantedLines.length || revokedLines.length ? 0x5865f2 : 0x57f287
+              )
+              .setTimestamp();
+            try {
+              await notifyChannel.send({ embeds: [summaryEmbed] });
+            } catch (e) {
+              console.error(`[NFT-ROLE-SYNC] Failed to send scheduled summary:`, e.message);
+            }
+          }
+        } else if (scheduled) {
+          console.warn(
+            `[NFT-ROLE-SYNC] Notification channel ${rule.notificationChannelId} unavailable for rule ${rule.id}`
+          );
         }
       }
     }
@@ -444,7 +492,41 @@ async function runNftRoleSync(client, opts = {}) {
   return summary;
 }
 
+async function runScheduledNftRoleSync(client) {
+  const now = Date.now();
+  if (syncInFlight) {
+    console.log('[NFT-ROLE-SYNC] Scheduled tick skipped: sync already running');
+    return;
+  }
+  if (lastScheduledRunAt > 0 && now - lastScheduledRunAt < NFT_ROLE_SYNC_INTERVAL_MS) {
+    return;
+  }
+
+  console.log('[NFT-ROLE-SYNC] Starting scheduled sync');
+  try {
+    await runNftRoleSync(client, { scheduled: true });
+    lastScheduledRunAt = Date.now();
+  } catch (error) {
+    console.error('[NFT-ROLE-SYNC] Scheduled run error:', error.message);
+  }
+}
+
+/**
+ * Runs the first sync shortly after ready, then re-checks hourly so 24h cadence survives restarts.
+ * @param {import('discord.js').Client} client
+ */
+function scheduleNftRoleVerificationSync(client) {
+  setTimeout(() => {
+    runScheduledNftRoleSync(client);
+  }, NFT_ROLE_SYNC_STARTUP_DELAY_MS);
+
+  setInterval(() => {
+    runScheduledNftRoleSync(client);
+  }, NFT_ROLE_SYNC_CHECK_MS);
+}
+
 module.exports = {
   runNftRoleSync,
-  fetchWalletCollectionCounts
+  fetchWalletCollectionCounts,
+  scheduleNftRoleVerificationSync
 };
