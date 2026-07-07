@@ -155,6 +155,43 @@ function calculatePrizeDistribution(totalPrizeWei, winnerCount, commissionPercen
   };
 }
 
+/** Max tickets one user may hold per lottery, as a fraction of total unique combinations. */
+const MAX_TICKETS_PER_USER_PERCENT = 10;
+
+/**
+ * Total unique number combinations: C(totalPoolNumbers, winningNumbersCount)
+ * @param {number} winningNumbersCount
+ * @param {number} totalPoolNumbers
+ * @returns {number}
+ */
+function calculateTotalCombinations(winningNumbersCount, totalPoolNumbers) {
+  if (winningNumbersCount < 1 || totalPoolNumbers < 1 || winningNumbersCount > totalPoolNumbers) {
+    return 0;
+  }
+  if (winningNumbersCount === 1) {
+    return totalPoolNumbers;
+  }
+  let numerator = new BigNumber(1);
+  let denominator = new BigNumber(1);
+  for (let i = 0; i < winningNumbersCount; i++) {
+    numerator = numerator.multipliedBy(totalPoolNumbers - i);
+    denominator = denominator.multipliedBy(i + 1);
+  }
+  return numerator.dividedBy(denominator).integerValue(BigNumber.ROUND_DOWN).toNumber();
+}
+
+/**
+ * Max tickets a single user may buy for one lottery (10% of combinations, minimum 1).
+ * @param {number} winningNumbersCount
+ * @param {number} totalPoolNumbers
+ * @returns {number}
+ */
+function calculateMaxTicketsPerUser(winningNumbersCount, totalPoolNumbers) {
+  const combinations = calculateTotalCombinations(winningNumbersCount, totalPoolNumbers);
+  if (combinations <= 0) return 1;
+  return Math.max(1, Math.floor(combinations * MAX_TICKETS_PER_USER_PERCENT / 100));
+}
+
 /**
  * Calculate lottery odds (1 in X) for matching all winning numbers
  * Odds = C(totalPoolNumbers, winningNumbersCount) = 1 in X combinations
@@ -163,21 +200,11 @@ function calculatePrizeDistribution(totalPrizeWei, winnerCount, commissionPercen
  * @returns {string} Odds as "1/X" (e.g., "1/19600" or "1/440")
  */
 function calculateLotteryOdds(winningNumbersCount, totalPoolNumbers) {
-  if (winningNumbersCount < 1 || totalPoolNumbers < 1 || winningNumbersCount > totalPoolNumbers) {
+  const combinations = calculateTotalCombinations(winningNumbersCount, totalPoolNumbers);
+  if (combinations <= 0) {
     return '1/0';
   }
-  if (winningNumbersCount === 1) {
-    return `1/${totalPoolNumbers}`;
-  }
-  // C(n,k) = n! / (k! * (n-k)!) = (n * (n-1) * ... * (n-k+1)) / (1 * 2 * ... * k)
-  let numerator = new BigNumber(1);
-  let denominator = new BigNumber(1);
-  for (let i = 0; i < winningNumbersCount; i++) {
-    numerator = numerator.multipliedBy(totalPoolNumbers - i);
-    denominator = denominator.multipliedBy(i + 1);
-  }
-  const combinations = numerator.dividedBy(denominator).integerValue(BigNumber.ROUND_DOWN);
-  return `1/${combinations.toString()}`;
+  return `1/${combinations}`;
 }
 
 /**
@@ -217,7 +244,10 @@ module.exports = {
   checkTicketMatch,
   calculatePrizePool,
   calculatePrizeDistribution,
+  calculateTotalCombinations,
+  calculateMaxTicketsPerUser,
   calculateLotteryOdds,
+  MAX_TICKETS_PER_USER_PERCENT,
   formatNumbersForDisplay,
   parseNumbersFromString
 };

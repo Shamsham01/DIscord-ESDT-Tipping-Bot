@@ -12734,9 +12734,10 @@ client.on('interactionCreate', async (interaction) => {
       
       // Create embed
       const oddsDisplay = lotteryHelpers.calculateLotteryOdds(winningNumbersCount, totalPoolNumbers);
+      const maxTicketsPerUser = lotteryHelpers.calculateMaxTicketsPerUser(winningNumbersCount, totalPoolNumbers);
       const lotteryEmbed = new EmbedBuilder()
         .setTitle('🎰 Lottery')
-        .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${winningNumbersCount} numbers from 1 to ${totalPoolNumbers} • **Odds:** ${oddsDisplay}`)
+        .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${winningNumbersCount} numbers from 1 to ${totalPoolNumbers} • **Odds:** ${oddsDisplay} • **Max tickets/user:** ${maxTicketsPerUser}`)
         .addFields([
           { name: '🎫 Ticket Price', value: ticketPriceDisplay, inline: true },
           { name: '💰 Prize Pool', value: prizePoolDisplay, inline: true },
@@ -24022,6 +24023,17 @@ function scheduleLotteryEmbedUpdate(guildId, lotteryId) {
 // Process ticket purchase
 async function processTicketPurchase(guildId, lotteryId, userId, userTag, numbers, lottery) {
   try {
+    const maxTicketsPerUser = lotteryHelpers.calculateMaxTicketsPerUser(
+      lottery.winningNumbersCount,
+      lottery.totalPoolNumbers
+    );
+    const userTicketCount = await dbLottery.getTicketsCountByUserForLottery(guildId, userId, lotteryId, 'LIVE');
+    if (userTicketCount >= maxTicketsPerUser) {
+      throw new Error(
+        `Ticket limit reached! You can hold up to **${maxTicketsPerUser}** ticket(s) for this lottery (${lotteryHelpers.MAX_TICKETS_PER_USER_PERCENT}% of unique combinations). You currently have **${userTicketCount}**.`
+      );
+    }
+
     // Get token decimals using identifier
     const tokenMetadata = await dbServerData.getTokenMetadata(guildId);
     let tokenDecimals = 8;
@@ -24204,9 +24216,10 @@ async function updateLotteryEmbed(guildId, lotteryId) {
     const thumbnailUrl = tokenLogoUrl || 'https://i.ibb.co/20MLJZNH/lottery-logo.png';
     
     const oddsDisplay = lotteryHelpers.calculateLotteryOdds(lottery.winningNumbersCount, lottery.totalPoolNumbers);
+    const maxTicketsPerUser = lotteryHelpers.calculateMaxTicketsPerUser(lottery.winningNumbersCount, lottery.totalPoolNumbers);
     const lotteryEmbed = new EmbedBuilder()
       .setTitle(lottery.isRollover ? '🎰 Lottery (Rollover)' : '🎰 Lottery')
-      .setDescription(`${lottery.isRollover ? `**Rollover #${lottery.rolloverCount}** - No winners in previous draw!\n\n` : ''}**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers} • **Odds:** ${oddsDisplay}`)
+      .setDescription(`${lottery.isRollover ? `**Rollover #${lottery.rolloverCount}** - No winners in previous draw!\n\n` : ''}**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers} • **Odds:** ${oddsDisplay} • **Max tickets/user:** ${maxTicketsPerUser}`)
       .addFields([
         { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${lottery.tokenTicker} (≈ $${ticketPriceUsdValue})`, inline: true },
         { name: '💰 Prize Pool', value: `${prizePoolHuman} ${lottery.tokenTicker} (≈ $${prizePoolUsdValue})`, inline: true },
@@ -24791,9 +24804,11 @@ async function processLotteryDraw(guildId, lotteryId) {
           const tokenLogoUrl = await getTokenLogoUrl(lottery.tokenIdentifier);
           const thumbnailUrl = tokenLogoUrl || 'https://i.ibb.co/20MLJZNH/lottery-logo.png';
           
+          const oddsDisplay = lotteryHelpers.calculateLotteryOdds(lottery.winningNumbersCount, lottery.totalPoolNumbers);
+          const maxTicketsPerUser = lotteryHelpers.calculateMaxTicketsPerUser(lottery.winningNumbersCount, lottery.totalPoolNumbers);
           const rolloverEmbed = new EmbedBuilder()
             .setTitle('🎰 Lottery (Rollover)')
-            .setDescription(`**Lottery ID:** \`${rolloverLotteryId}\`\n\n**Rollover #${lottery.rolloverCount + 1}** - No winners in previous draw!\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers}`)
+            .setDescription(`**Lottery ID:** \`${rolloverLotteryId}\`\n\n**Rollover #${lottery.rolloverCount + 1}** - No winners in previous draw!\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers} • **Odds:** ${oddsDisplay} • **Max tickets/user:** ${maxTicketsPerUser}`)
             .addFields([
               { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${lottery.tokenTicker} (≈ $${ticketPriceUsdValue})`, inline: true },
               { name: '💰 Prize Pool', value: `${prizePoolHuman} ${lottery.tokenTicker} (≈ $${prizePoolUsdValue})`, inline: true },
@@ -28484,9 +28499,10 @@ async function forwardLotteryToSubscribers(sourceGuildId, lotteryId) {
     
     // Create forward embed
     const oddsDisplay = lotteryHelpers.calculateLotteryOdds(lottery.winningNumbersCount, lottery.totalPoolNumbers);
+    const maxTicketsPerUser = lotteryHelpers.calculateMaxTicketsPerUser(lottery.winningNumbersCount, lottery.totalPoolNumbers);
     const forwardEmbed = new EmbedBuilder()
       .setTitle(`🎰 ESDT Lottery`)
-      .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers} • **Odds:** ${oddsDisplay}`)
+      .setDescription(`**Lottery ID:** \`${lotteryId}\`\n\nPick ${lottery.winningNumbersCount} numbers from 1 to ${lottery.totalPoolNumbers} • **Odds:** ${oddsDisplay} • **Max tickets/user:** ${maxTicketsPerUser}`)
       .addFields([
         { name: '🎫 Ticket Price', value: `${ticketPriceHuman} ${tokenTicker}`, inline: true },
         { name: '💰 Prize Pool', value: `${prizePoolHuman} ${tokenTicker}`, inline: true },

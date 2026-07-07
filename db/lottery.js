@@ -482,6 +482,29 @@ async function getTicketsCountByLottery(guildId, lotteryId, status = null) {
   }
 }
 
+async function getTicketsCountByUserForLottery(guildId, userId, lotteryId, status = null) {
+  try {
+    let query = supabase
+      .from('lottery_tickets')
+      .select('*', { count: 'exact', head: true })
+      .eq('guild_id', guildId)
+      .eq('user_id', userId)
+      .eq('lottery_id', lotteryId);
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { count, error } = await query;
+
+    if (error) throw error;
+    return count || 0;
+  } catch (error) {
+    console.error('[DB] Error getting tickets count by user for lottery:', error);
+    throw error;
+  }
+}
+
 async function getTicketsCountByUser(guildId, userId, tokenTicker = null, status = null) {
   try {
     let query = supabase
@@ -824,6 +847,7 @@ module.exports = {
   getTicketsByLottery,
   getTicketsByUser,
   getTicketsCountByLottery,
+  getTicketsCountByUserForLottery,
   getTicketsCountByUser,
   getUniqueParticipantsCountByLottery,
   getWinningTickets,
