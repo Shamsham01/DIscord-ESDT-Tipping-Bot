@@ -195,10 +195,10 @@ let lastScheduledRunAt = 0;
 
 /**
  * @param {import('discord.js').Client} client
- * @param {{ guildId?: string, scheduled?: boolean }} [opts]
+ * @param {{ guildId?: string, ruleId?: string, scheduled?: boolean }} [opts]
  */
 async function runNftRoleSync(client, opts = {}) {
-  const { guildId: filterGuildId, scheduled = false } = opts;
+  const { guildId: filterGuildId, ruleId: filterRuleId, scheduled = false } = opts;
   if (syncInFlight) {
     console.log('[NFT-ROLE-SYNC] Skipped: sync already running');
     return { skipped: true };
@@ -211,6 +211,8 @@ async function runNftRoleSync(client, opts = {}) {
     revoked: 0,
     errors: 0,
     walletCheckSkipped: 0,
+    /** @type {string|null} When run-now targets a single rule */
+    ruleId: filterRuleId || null,
     /** @type {string[]} Sample diagnostic blocks for /run-now ephemeral embed */
     grantDiagBlocks: [],
     /** @type {string[]} Sample diagnostic blocks for /run-now ephemeral embed */
@@ -225,6 +227,9 @@ async function runNftRoleSync(client, opts = {}) {
     let rules = await dbNftRoleRules.listEnabledRulesGlobally();
     if (filterGuildId) {
       rules = rules.filter(r => r.guildId === filterGuildId);
+    }
+    if (filterRuleId) {
+      rules = rules.filter(r => r.id === filterRuleId);
     }
     summary.rules = rules.length;
     if (rules.length === 0) {

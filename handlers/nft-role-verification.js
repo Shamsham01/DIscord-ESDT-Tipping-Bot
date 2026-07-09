@@ -218,17 +218,41 @@ async function handleNftRoleVerificationCommand(interaction, client) {
 
   if (sub === 'run-now') {
     await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-    const summary = await runNftRoleSync(client, { guildId });
+    const ruleId = (interaction.options.getString('rule-id') || '').trim();
+
+    if (ruleId) {
+      const existing = await dbNftRoleRules.getRuleById(guildId, ruleId);
+      if (!existing) {
+        await interaction.editReply({ content: 'Rule not found for this server (check **rule-id**).' });
+        return;
+      }
+      if (!existing.enabled) {
+        await interaction.editReply({
+          content:
+            `Rule \`${ruleId}\` is **disabled**. Enable it with **/nft-role-verification toggle**, or omit **rule-id** to sync all enabled rules.`
+        });
+        return;
+      }
+    }
+
+    const summary = await runNftRoleSync(client, {
+      guildId,
+      ...(ruleId ? { ruleId } : {})
+    });
     if (summary.skipped) {
       await interaction.editReply({ content: 'Sync already running; try again shortly.' });
       return;
     }
 
     let desc =
+      (ruleId ? `**Rule:** \`${ruleId}\`\n` : '') +
       `**Rules scanned:** ${summary.rules}\n` +
       `**Granted:** ${summary.granted} · **Removed:** ${summary.revoked} · **Errors:** ${summary.errors}`;
     if (summary.walletCheckSkipped > 0) {
       desc += `\n**Wallet API unresolved** (members left unchanged): ${summary.walletCheckSkipped}`;
+    }
+    if (ruleId && summary.rules === 0) {
+      desc += '\n_No matching enabled rule was synced._';
     }
 
     const revokeDiag = summary.revokeDiagBlocks || [];

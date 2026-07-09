@@ -1810,7 +1810,17 @@ const commands = [
             {
                 type: ApplicationCommandOptionType.Subcommand,
                 name: 'run-now',
-                description: 'Run verification sync for this server now'
+                description: 'Run verification sync for this server now (all enabled rules, or one rule)',
+                options: [
+                    {
+                        name: 'rule-id',
+                        description:
+                            'Optional: sync only this rule (autocomplete). Omit to sync all enabled rules.',
+                        type: ApplicationCommandOptionType.String,
+                        required: false,
+                        autocomplete: true
+                    }
+                ]
             }
         ],
         default_member_permissions: '8'

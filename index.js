@@ -14990,7 +14990,7 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // NFT role verification — rule-id autocomplete (delete / toggle / create)
+  // NFT role verification — rule-id autocomplete (delete / toggle / create / run-now)
   if (interaction.commandName === 'nft-role-verification') {
     const sub = interaction.options.getSubcommand(false);
     let focused;
@@ -15000,7 +15000,10 @@ client.on('interactionCreate', async (interaction) => {
       await safeRespond(interaction, []);
       return;
     }
-    if ((sub === 'delete' || sub === 'toggle' || sub === 'create') && focused.name === 'rule-id') {
+    if (
+      (sub === 'delete' || sub === 'toggle' || sub === 'create' || sub === 'run-now') &&
+      focused.name === 'rule-id'
+    ) {
       try {
         const guildId = interaction.guildId;
         const focusedRaw = interaction.options.getFocused();
@@ -27759,7 +27762,7 @@ async function handleHelpCommand(interaction, page = 1) {
           ],
           '🪪 NFT role verification': [
             '`/nft-role-verification create` 🔴 Admin — new rule (**role**, **notification-channel**, **collections**); default **eligibility** `wallet_or_va` (MvX wallet **or** VA). Set **rule-id** + **eligibility** to patch an existing rule (omit other fields).',
-            '`/nft-role-verification list` 🔴 • `delete` 🔴 • `toggle` 🔴 • `run-now` 🔴 — list UUIDs/toggle/disable rules or sync now.',
+            '`/nft-role-verification list` 🔴 • `delete` 🔴 • `toggle` 🔴 • `run-now` 🔴 — list UUIDs/toggle/disable rules or sync now (optional **rule-id** for one rule).',
             'Bot needs **Manage Roles** OAuth/permission; bot role **above** roles it assigns. Daily sync applies grants/removals.'
           ],
           '🔧 Utilities & Debug': [

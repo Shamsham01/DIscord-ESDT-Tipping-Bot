@@ -542,9 +542,12 @@ Flips `enabled` for the rule.
 
 ### `/nft-role-verification run-now`
 
-**Usage**: `/nft-role-verification run-now`
+**Usage**: `/nft-role-verification run-now [rule-id]`
 
 Runs the sync immediately for this guild and returns a short summary.
+
+**Parameters**:
+- `rule-id` (Optional): Sync **only** this rule — pick from **autocomplete** or paste the full UUID. Omit to sync **all enabled** rules.
 
 ---
 

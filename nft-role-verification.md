@@ -91,7 +91,11 @@ Enables or disables a rule by UUID (same as using the list menu toggle).
 
 ### `run-now`
 
-Runs the verification sync **immediately** for the **current server** only (useful after changing rules or for testing). Replies with a short summary (rules processed, grants, revokes, errors).
+Runs the verification sync **immediately** for the **current server** (useful after changing rules or for testing). Replies with a short summary (rules processed, grants, revokes, errors).
+
+**Parameters**
+
+- `rule-id` (optional) — If set: sync **only** this rule (use **autocomplete**). Omit to sync **all enabled** rules in the server. Disabled rules are rejected when targeted explicitly.
 
 ## Bot and Supabase requirements
 
