@@ -97,6 +97,26 @@ async function setRuleEligibilityMode(guildId, ruleId, eligibilityMode) {
   return mapRow(data);
 }
 
+async function updateRuleFields(guildId, ruleId, fields) {
+  const patch = { updated_at: new Date().toISOString() };
+  if (fields.discordRoleId !== undefined) patch.discord_role_id = fields.discordRoleId;
+  if (fields.notificationChannelId !== undefined) patch.notification_channel_id = fields.notificationChannelId;
+  if (fields.collectionTickers !== undefined) patch.collection_tickers = fields.collectionTickers;
+  if (fields.matchMode !== undefined) patch.match_mode = fields.matchMode;
+  if (fields.minCountPerCollection !== undefined) patch.min_count_per_collection = fields.minCountPerCollection;
+  if (fields.eligibilityMode !== undefined) patch.eligibility_mode = coerceEligibilityMode(fields.eligibilityMode);
+
+  const { data, error } = await supabase
+    .from('guild_nft_role_rules')
+    .update(patch)
+    .eq('guild_id', guildId)
+    .eq('id', ruleId)
+    .select()
+    .single();
+  if (error) throw error;
+  return mapRow(data);
+}
+
 async function deleteRule(guildId, ruleId) {
   const { error } = await supabase
     .from('guild_nft_role_rules')
@@ -114,5 +134,6 @@ module.exports = {
   listEnabledRulesGlobally,
   setRuleEnabled,
   setRuleEligibilityMode,
+  updateRuleFields,
   deleteRule
 };

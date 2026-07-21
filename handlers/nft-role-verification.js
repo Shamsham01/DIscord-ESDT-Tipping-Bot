@@ -36,7 +36,8 @@ async function handleNftRoleVerificationCommand(interaction, client) {
 
   if (sub === 'create') {
     await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-    const eligibilityChoice = interaction.options.getString('eligibility') || 'wallet_or_va';
+    const eligibilityRaw = interaction.options.getString('eligibility');
+    const eligibilityChoice = eligibilityRaw || 'wallet_or_va';
     const patchRuleId = (interaction.options.getString('rule-id') || '').trim();
 
     if (patchRuleId) {
@@ -45,11 +46,82 @@ async function handleNftRoleVerificationCommand(interaction, client) {
         await interaction.editReply({ content: 'Rule not found for this server (check **rule-id**).' });
         return;
       }
-      const updatedPatch = await dbNftRoleRules.setRuleEligibilityMode(guildId, patchRuleId, eligibilityChoice);
+
+      const patch = {};
+      const changed = [];
+
+      const patchRole = interaction.options.getRole('role');
+      if (patchRole) {
+        if (patchRole.managed || patchRole.id === interaction.guildId) {
+          await interaction.editReply({ content: 'Pick a normal role (not @everyone or bot-managed roles).' });
+          return;
+        }
+        patch.discordRoleId = patchRole.id;
+        changed.push(`role → <@&${patchRole.id}>`);
+      }
+
+      const patchChannel = interaction.options.getChannel('notification-channel');
+      if (patchChannel) {
+        if (
+          patchChannel.type !== ChannelType.GuildText &&
+          patchChannel.type !== ChannelType.GuildAnnouncement &&
+          patchChannel.type !== ChannelType.PublicThread &&
+          patchChannel.type !== ChannelType.PrivateThread
+        ) {
+          await interaction.editReply({ content: 'Notification channel must be text, announcement, or a thread.' });
+          return;
+        }
+        const me = interaction.guild.members.me;
+        const perms = patchChannel.permissionsFor(me);
+        if (!perms || !perms.has(['ViewChannel', 'SendMessages', 'EmbedLinks'])) {
+          await interaction.editReply({
+            content: 'I need **View Channel**, **Send Messages**, and **Embed Links** in the notification channel.'
+          });
+          return;
+        }
+        patch.notificationChannelId = patchChannel.id;
+        changed.push(`notification channel → <#${patchChannel.id}>`);
+      }
+
+      const patchCollectionsRaw = interaction.options.getString('collections');
+      if (patchCollectionsRaw != null && String(patchCollectionsRaw).trim() !== '') {
+        const patchTickers = parseCollections(patchCollectionsRaw);
+        if (patchTickers.length === 0) {
+          await interaction.editReply({ content: 'Provide at least one collection ticker (comma-separated).' });
+          return;
+        }
+        patch.collectionTickers = patchTickers;
+        changed.push(`collections → ${patchTickers.join(', ')}`);
+      }
+
+      const patchMatchMode = interaction.options.getString('match-mode');
+      if (patchMatchMode) {
+        patch.matchMode = patchMatchMode === 'all' ? 'all' : 'any';
+        changed.push(`match → **${patch.matchMode}**`);
+      }
+
+      const patchMinCount = interaction.options.getInteger('min-count');
+      if (patchMinCount != null) {
+        patch.minCountPerCollection = patchMinCount;
+        changed.push(`min per collection → **${patchMinCount}**`);
+      }
+
+      if (eligibilityRaw) {
+        patch.eligibilityMode = eligibilityRaw;
+        changed.push(`eligibility → **${describeEligibilityMode(eligibilityRaw).replace(/\*\*/g, '')}**`);
+      }
+
+      if (Object.keys(patch).length === 0) {
+        await interaction.editReply({
+          content:
+            'Nothing to update. With **rule-id**, provide at least one field to change: **eligibility**, **notification-channel**, **role**, **collections**, **match-mode**, or **min-count**.'
+        });
+        return;
+      }
+
+      await dbNftRoleRules.updateRuleFields(guildId, patchRuleId, patch);
       await interaction.editReply({
-        content: `Updated rule \`${patchRuleId}\`: eligibility → **${describeEligibilityMode(
-          updatedPatch.eligibilityMode
-        ).replace(/\*\*/g, '')}**. Run **/nft-role-verification run-now** to sync.`
+        content: `Updated rule \`${patchRuleId}\`: ${changed.join(' · ')}. Run **/nft-role-verification run-now** to sync.`
       });
       return;
     }
