@@ -1,12 +1,101 @@
 const supabase = require('../supabase-client');
 const { isValidFtScore } = require('../utils/football-score');
 
+const MATCH_COLUMNS = 'match_id,comp_code,comp_name,home_team,away_team,kickoff_iso,status,ft_score,created_at,updated_at';
+const MATCH_GUILD_COLUMNS = 'match_id,guild_id,message_id,thread_id,token_data,required_amount_wei,bonus_pot_wei,house_earnings_tracked';
+
+function buildMatchObject(matchData, rels) {
+  const embeds = {};
+  const guildIds = [];
+  const tokenByGuild = {};
+  const requiredAmountWeiByGuild = {};
+  const bonusPotWeiByGuild = {};
+  const houseEarningsTrackedByGuild = {};
+
+  if (rels) {
+    for (const rel of rels) {
+      guildIds.push(rel.guild_id);
+      embeds[rel.guild_id] = {
+        messageId: rel.message_id || null,
+        threadId: rel.thread_id || null
+      };
+      // Populate per-guild token and stake from match_guilds table
+      // (token_data and required_amount_wei are now stored per-guild in match_guilds)
+      if (rel.token_data) {
+        tokenByGuild[rel.guild_id] = rel.token_data;
+      }
+      if (rel.required_amount_wei) {
+        requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
+      }
+      bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
+      houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
+    }
+  }
+
+  // Get a default token/amount from the first guild if available (for backward compatibility)
+  const firstGuildRel = rels && rels.length > 0 ? rels[0] : null;
+  const defaultToken = firstGuildRel?.token_data || null;
+  const defaultRequiredAmountWei = firstGuildRel?.required_amount_wei || null;
+
+  return {
+    matchId: matchData.match_id,
+    compCode: matchData.comp_code,
+    compName: matchData.comp_name,
+    home: matchData.home_team,
+    away: matchData.away_team,
+    kickoffISO: matchData.kickoff_iso,
+    token: defaultToken, // For backward compatibility
+    requiredAmountWei: defaultRequiredAmountWei, // For backward compatibility
+    tokenByGuild: tokenByGuild,
+    requiredAmountWeiByGuild: requiredAmountWeiByGuild,
+    bonusPotWeiByGuild: bonusPotWeiByGuild,
+    status: matchData.status,
+    ftScore: matchData.ft_score || { home: 0, away: 0 },
+    houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
+    houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
+    guildIds: guildIds,
+    embeds: embeds,
+    createdAt: matchData.created_at,
+    updatedAt: matchData.updated_at
+  };
+}
+
+async function attachGuildRelsToMatches(matchesData) {
+  if (!matchesData || matchesData.length === 0) return [];
+
+  const ids = matchesData.map((m) => m.match_id);
+  const { data: guildRelations, error: guildError } = await supabase
+    .from('match_guilds')
+    .select(MATCH_GUILD_COLUMNS)
+    .in('match_id', ids);
+
+  if (guildError) throw guildError;
+
+  const relsByMatchId = {};
+  for (const rel of guildRelations || []) {
+    if (!relsByMatchId[rel.match_id]) relsByMatchId[rel.match_id] = [];
+    relsByMatchId[rel.match_id].push(rel);
+  }
+
+  return matchesData.map((matchData) =>
+    buildMatchObject(matchData, relsByMatchId[matchData.match_id] || [])
+  );
+}
+
+async function getMatchesByStatusFilter(filterFn) {
+  let query = supabase.from('football_matches').select(MATCH_COLUMNS);
+  query = filterFn(query);
+  const { data, error } = await query;
+  if (error) throw error;
+  return attachGuildRelsToMatches(data || []);
+}
+
 // Get a single match by matchId
 async function getMatch(matchId) {
   try {
     const { data: matchData, error: matchError } = await supabase
       .from('football_matches')
-      .select('*')
+      .select(MATCH_COLUMNS)
       .eq('match_id', matchId)
       .single();
     
@@ -16,65 +105,12 @@ async function getMatch(matchId) {
     // Get all guild relationships for this match
     const { data: guildRelations, error: guildError } = await supabase
       .from('match_guilds')
-      .select('*')
+      .select(MATCH_GUILD_COLUMNS)
       .eq('match_id', matchId);
     
     if (guildError) throw guildError;
     
-    // Build embeds object from guild relationships
-    const embeds = {};
-    const guildIds = [];
-    const tokenByGuild = {};
-    const requiredAmountWeiByGuild = {};
-    const bonusPotWeiByGuild = {};
-    const houseEarningsTrackedByGuild = {};
-    
-    if (guildRelations) {
-      for (const rel of guildRelations) {
-        guildIds.push(rel.guild_id);
-        embeds[rel.guild_id] = {
-          messageId: rel.message_id || null,
-          threadId: rel.thread_id || null
-        };
-        // Populate per-guild token and stake from match_guilds table
-        // (token_data and required_amount_wei are now stored per-guild in match_guilds)
-        if (rel.token_data) {
-          tokenByGuild[rel.guild_id] = rel.token_data;
-        }
-        if (rel.required_amount_wei) {
-          requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
-        }
-        bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
-        houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
-      }
-    }
-    
-    // Get a default token/amount from the first guild if available (for backward compatibility)
-    const firstGuildRel = guildRelations && guildRelations.length > 0 ? guildRelations[0] : null;
-    const defaultToken = firstGuildRel?.token_data || null;
-    const defaultRequiredAmountWei = firstGuildRel?.required_amount_wei || null;
-    
-    return {
-      matchId: matchData.match_id,
-      compCode: matchData.comp_code,
-      compName: matchData.comp_name,
-      home: matchData.home_team,
-      away: matchData.away_team,
-      kickoffISO: matchData.kickoff_iso,
-      token: defaultToken, // For backward compatibility
-      requiredAmountWei: defaultRequiredAmountWei, // For backward compatibility
-      tokenByGuild: tokenByGuild,
-      requiredAmountWeiByGuild: requiredAmountWeiByGuild,
-      bonusPotWeiByGuild: bonusPotWeiByGuild,
-      status: matchData.status,
-      ftScore: matchData.ft_score || { home: 0, away: 0 },
-      houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
-      houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
-      guildIds: guildIds,
-      embeds: embeds,
-      createdAt: matchData.created_at,
-      updatedAt: matchData.updated_at
-    };
+    return buildMatchObject(matchData, guildRelations || []);
   } catch (error) {
     console.error('[DB] Error getting match:', error);
     throw error;
@@ -96,74 +132,16 @@ async function getMatchesByGuild(guildId) {
     
     const { data: matchesData, error: matchesError } = await supabase
       .from('football_matches')
-      .select('*')
+      .select(MATCH_COLUMNS)
       .in('match_id', matchIds);
     
     if (matchesError) throw matchesError;
     
+    const matches = await attachGuildRelsToMatches(matchesData || []);
     const result = {};
-    
-    for (const matchData of matchesData || []) {
-      // Get guild relationships for this match
-      const { data: rels } = await supabase
-        .from('match_guilds')
-        .select('*')
-        .eq('match_id', matchData.match_id);
-      
-      const embeds = {};
-      const guildIds = [];
-      const tokenByGuild = {};
-      const requiredAmountWeiByGuild = {};
-      const bonusPotWeiByGuild = {};
-      const houseEarningsTrackedByGuild = {};
-      
-      if (rels) {
-        for (const rel of rels) {
-          guildIds.push(rel.guild_id);
-          embeds[rel.guild_id] = {
-            messageId: rel.message_id || null,
-            threadId: rel.thread_id || null
-          };
-          // Populate per-guild token and stake from match_guilds table
-          if (rel.token_data) {
-            tokenByGuild[rel.guild_id] = rel.token_data;
-          }
-          if (rel.required_amount_wei) {
-            requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
-          }
-          bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
-          houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
-        }
-      }
-      
-      // Get default token/amount from the first guild if available (for backward compatibility)
-      const firstGuildRel = rels && rels.length > 0 ? rels[0] : null;
-      const defaultToken = firstGuildRel?.token_data || null;
-      const defaultRequiredAmountWei = firstGuildRel?.required_amount_wei || null;
-      
-      result[matchData.match_id] = {
-        matchId: matchData.match_id,
-        compCode: matchData.comp_code,
-        compName: matchData.comp_name,
-        home: matchData.home_team,
-        away: matchData.away_team,
-        kickoffISO: matchData.kickoff_iso,
-        token: defaultToken, // For backward compatibility
-        requiredAmountWei: defaultRequiredAmountWei, // For backward compatibility
-        tokenByGuild: tokenByGuild,
-        requiredAmountWeiByGuild: requiredAmountWeiByGuild,
-        bonusPotWeiByGuild: bonusPotWeiByGuild,
-        status: matchData.status,
-        ftScore: matchData.ft_score || { home: 0, away: 0 },
-        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
-        houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
-        guildIds: guildIds,
-        embeds: embeds,
-        createdAt: matchData.created_at,
-        updatedAt: matchData.updated_at
-      };
+    for (const match of matches) {
+      result[match.matchId] = match;
     }
-    
     return result;
   } catch (error) {
     console.error('[DB] Error getting matches by guild:', error);
@@ -174,77 +152,7 @@ async function getMatchesByGuild(guildId) {
 // Get all scheduled matches (status = 'SCHEDULED' or 'TIMED')
 async function getScheduledMatches() {
   try {
-    const { data, error } = await supabase
-      .from('football_matches')
-      .select('*')
-      .in('status', ['SCHEDULED', 'TIMED']);
-    
-    if (error) throw error;
-    
-    const matches = [];
-    
-    for (const matchData of data || []) {
-      // Get guild relationships
-      const { data: rels } = await supabase
-        .from('match_guilds')
-        .select('*')
-        .eq('match_id', matchData.match_id);
-      
-      const embeds = {};
-      const guildIds = [];
-      const tokenByGuild = {};
-      const requiredAmountWeiByGuild = {};
-      const bonusPotWeiByGuild = {};
-      const houseEarningsTrackedByGuild = {};
-      
-      if (rels) {
-        for (const rel of rels) {
-          guildIds.push(rel.guild_id);
-          embeds[rel.guild_id] = {
-            messageId: rel.message_id || null,
-            threadId: rel.thread_id || null
-          };
-          // Populate per-guild token and stake from match_guilds table
-          if (rel.token_data) {
-            tokenByGuild[rel.guild_id] = rel.token_data;
-          }
-          if (rel.required_amount_wei) {
-            requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
-          }
-          bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
-          houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
-        }
-      }
-      
-      // Get default token/amount from the first guild if available (for backward compatibility)
-      const firstGuildRel = rels && rels.length > 0 ? rels[0] : null;
-      const defaultToken = firstGuildRel?.token_data || null;
-      const defaultRequiredAmountWei = firstGuildRel?.required_amount_wei || null;
-      
-      matches.push({
-        matchId: matchData.match_id,
-        compCode: matchData.comp_code,
-        compName: matchData.comp_name,
-        home: matchData.home_team,
-        away: matchData.away_team,
-        kickoffISO: matchData.kickoff_iso,
-        token: defaultToken, // For backward compatibility
-        requiredAmountWei: defaultRequiredAmountWei, // For backward compatibility
-        tokenByGuild: tokenByGuild,
-        requiredAmountWeiByGuild: requiredAmountWeiByGuild,
-        bonusPotWeiByGuild: bonusPotWeiByGuild,
-        status: matchData.status,
-        ftScore: matchData.ft_score || { home: 0, away: 0 },
-        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
-        houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
-        guildIds: guildIds,
-        embeds: embeds,
-        createdAt: matchData.created_at,
-        updatedAt: matchData.updated_at
-      });
-    }
-    
-    return matches;
+    return await getMatchesByStatusFilter((q) => q.in('status', ['SCHEDULED', 'TIMED']));
   } catch (error) {
     console.error('[DB] Error getting scheduled matches:', error);
     throw error;
@@ -254,77 +162,7 @@ async function getScheduledMatches() {
 // Get all paused matches (status = 'PAUSED')
 async function getPausedMatches() {
   try {
-    const { data, error } = await supabase
-      .from('football_matches')
-      .select('*')
-      .eq('status', 'PAUSED');
-    
-    if (error) throw error;
-    
-    const matches = [];
-    
-    for (const matchData of data || []) {
-      // Get guild relationships
-      const { data: rels } = await supabase
-        .from('match_guilds')
-        .select('*')
-        .eq('match_id', matchData.match_id);
-      
-      const embeds = {};
-      const guildIds = [];
-      const tokenByGuild = {};
-      const requiredAmountWeiByGuild = {};
-      const bonusPotWeiByGuild = {};
-      const houseEarningsTrackedByGuild = {};
-      
-      if (rels) {
-        for (const rel of rels) {
-          guildIds.push(rel.guild_id);
-          embeds[rel.guild_id] = {
-            messageId: rel.message_id || null,
-            threadId: rel.thread_id || null
-          };
-          // Populate per-guild token and stake from match_guilds table
-          if (rel.token_data) {
-            tokenByGuild[rel.guild_id] = rel.token_data;
-          }
-          if (rel.required_amount_wei) {
-            requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
-          }
-          bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
-          houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
-        }
-      }
-      
-      // Get default token/amount from the first guild if available (for backward compatibility)
-      const firstGuildRel = rels && rels.length > 0 ? rels[0] : null;
-      const defaultToken = firstGuildRel?.token_data || null;
-      const defaultRequiredAmountWei = firstGuildRel?.required_amount_wei || null;
-      
-      matches.push({
-        matchId: matchData.match_id,
-        compCode: matchData.comp_code,
-        compName: matchData.comp_name,
-        home: matchData.home_team,
-        away: matchData.away_team,
-        kickoffISO: matchData.kickoff_iso,
-        token: defaultToken, // For backward compatibility
-        requiredAmountWei: defaultRequiredAmountWei, // For backward compatibility
-        tokenByGuild: tokenByGuild,
-        requiredAmountWeiByGuild: requiredAmountWeiByGuild,
-        bonusPotWeiByGuild: bonusPotWeiByGuild,
-        status: matchData.status,
-        ftScore: matchData.ft_score || { home: 0, away: 0 },
-        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
-        houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
-        guildIds: guildIds,
-        embeds: embeds,
-        createdAt: matchData.created_at,
-        updatedAt: matchData.updated_at
-      });
-    }
-    
-    return matches;
+    return await getMatchesByStatusFilter((q) => q.eq('status', 'PAUSED'));
   } catch (error) {
     console.error('[DB] Error getting paused matches:', error);
     throw error;
@@ -334,77 +172,7 @@ async function getPausedMatches() {
 // Get all in-play matches (status = 'IN_PLAY' or legacy 'LIVE')
 async function getInPlayMatches() {
   try {
-    const { data, error } = await supabase
-      .from('football_matches')
-      .select('*')
-      .in('status', ['IN_PLAY', 'LIVE']);
-    
-    if (error) throw error;
-    
-    const matches = [];
-    
-    for (const matchData of data || []) {
-      // Get guild relationships
-      const { data: rels } = await supabase
-        .from('match_guilds')
-        .select('*')
-        .eq('match_id', matchData.match_id);
-      
-      const embeds = {};
-      const guildIds = [];
-      const tokenByGuild = {};
-      const requiredAmountWeiByGuild = {};
-      const bonusPotWeiByGuild = {};
-      const houseEarningsTrackedByGuild = {};
-      
-      if (rels) {
-        for (const rel of rels) {
-          guildIds.push(rel.guild_id);
-          embeds[rel.guild_id] = {
-            messageId: rel.message_id || null,
-            threadId: rel.thread_id || null
-          };
-          // Populate per-guild token and stake from match_guilds table
-          if (rel.token_data) {
-            tokenByGuild[rel.guild_id] = rel.token_data;
-          }
-          if (rel.required_amount_wei) {
-            requiredAmountWeiByGuild[rel.guild_id] = rel.required_amount_wei;
-          }
-          bonusPotWeiByGuild[rel.guild_id] = rel.bonus_pot_wei || '0';
-          houseEarningsTrackedByGuild[rel.guild_id] = rel.house_earnings_tracked || false;
-        }
-      }
-      
-      // Get default token/amount from the first guild if available (for backward compatibility)
-      const firstGuildRel = rels && rels.length > 0 ? rels[0] : null;
-      const defaultToken = firstGuildRel?.token_data || null;
-      const defaultRequiredAmountWei = firstGuildRel?.required_amount_wei || null;
-      
-      matches.push({
-        matchId: matchData.match_id,
-        compCode: matchData.comp_code,
-        compName: matchData.comp_name,
-        home: matchData.home_team,
-        away: matchData.away_team,
-        kickoffISO: matchData.kickoff_iso,
-        token: defaultToken, // For backward compatibility
-        requiredAmountWei: defaultRequiredAmountWei, // For backward compatibility
-        tokenByGuild: tokenByGuild,
-        requiredAmountWeiByGuild: requiredAmountWeiByGuild,
-        bonusPotWeiByGuild: bonusPotWeiByGuild,
-        status: matchData.status,
-        ftScore: matchData.ft_score || { home: 0, away: 0 },
-        houseEarningsTracked: firstGuildRel?.house_earnings_tracked || false, // For backward compatibility
-        houseEarningsTrackedByGuild: houseEarningsTrackedByGuild, // Per-guild tracking
-        guildIds: guildIds,
-        embeds: embeds,
-        createdAt: matchData.created_at,
-        updatedAt: matchData.updated_at
-      });
-    }
-    
-    return matches;
+    return await getMatchesByStatusFilter((q) => q.in('status', ['IN_PLAY', 'LIVE']));
   } catch (error) {
     console.error('[DB] Error getting in-play matches:', error);
     throw error;

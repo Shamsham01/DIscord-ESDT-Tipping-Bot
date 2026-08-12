@@ -286,6 +286,22 @@ async function runNftRoleSync(client, opts = {}) {
         let ruleErrors = 0;
         const REVOKE_DIAG_MAX = 8;
 
+        const eligibilityMode = coerceEligibilityMode(rule.eligibilityMode);
+        let vaCountsByUser = new Map();
+        if (eligibilityUsesVa(eligibilityMode)) {
+          try {
+            vaCountsByUser = await dbVirtualAccountsNft.batchCountEligibleVirtualInventoryForRoleRule(
+              gid,
+              [...candidateIds],
+              tickers
+            );
+          } catch (batchErr) {
+            console.error(`[NFT-ROLE-SYNC] Batch VA count failed for guild ${gid}:`, batchErr.message);
+            summary.errors += 1;
+            continue;
+          }
+        }
+
         for (const userId of candidateIds) {
           try {
             const member = await guild.members.fetch({ user: userId, force: false }).catch(() => null);
@@ -301,12 +317,14 @@ async function runNftRoleSync(client, opts = {}) {
 
             const discordIdentity = discordIdentityFromMember(member);
             const walletAddress = walletsMap[userId];
-            const eligibilityMode = coerceEligibilityMode(rule.eligibilityMode);
 
             let vaCounts = {};
             let vaPass = false;
             if (eligibilityUsesVa(eligibilityMode)) {
-              vaCounts = await dbVirtualAccountsNft.countEligibleVirtualInventoryForRoleRule(gid, userId, tickers);
+              vaCounts = vaCountsByUser.get(userId) || {};
+              for (const t of tickers) {
+                if (vaCounts[t] === undefined) vaCounts[t] = 0;
+              }
               vaPass = evaluateRuleAgainstCounts(
                 vaCounts,
                 tickers,

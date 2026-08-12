@@ -116,7 +116,7 @@ async function getActiveDropGames() {
   try {
     const { data, error } = await supabase
       .from('drop_games')
-      .select('*')
+      .select('id,guild_id,channel_id,message_id,status,token_ticker,supported_tokens,base_amount_wei,min_droppers,collection_identifier,nft_collection_multiplier,created_at,updated_at')
       .eq('status', 'ACTIVE');
     
     if (error) throw error;

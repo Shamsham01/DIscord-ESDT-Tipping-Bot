@@ -417,11 +417,24 @@ async function deleteCommunityFundQR(guildId, projectName) {
 }
 
 // Token Metadata
+const TOKEN_METADATA_CACHE_MS = 10 * 60 * 1000; // 10 minutes
+const tokenMetadataCache = new Map(); // guildId -> { at, data }
+
+function invalidateTokenMetadataCache(guildId) {
+  if (guildId) tokenMetadataCache.delete(guildId);
+  else tokenMetadataCache.clear();
+}
+
 async function getTokenMetadata(guildId) {
   try {
+    const cached = tokenMetadataCache.get(guildId);
+    if (cached && Date.now() - cached.at < TOKEN_METADATA_CACHE_MS) {
+      return cached.data;
+    }
+
     const { data, error } = await supabase
       .from('token_metadata')
-      .select('*')
+      .select('token_identifier,ticker,name,decimals,is_paused,last_updated')
       .eq('guild_id', guildId);
     
     if (error) throw error;
@@ -437,6 +450,7 @@ async function getTokenMetadata(guildId) {
         lastUpdated: row.last_updated
       };
     });
+    tokenMetadataCache.set(guildId, { at: Date.now(), data: metadata });
     return metadata;
   } catch (error) {
     console.error('[DB] Error getting token metadata:', error);
@@ -461,6 +475,7 @@ async function setTokenMetadata(guildId, tokenIdentifier, metadata) {
       });
     
     if (error) throw error;
+    invalidateTokenMetadataCache(guildId);
     return true;
   } catch (error) {
     console.error('[DB] Error setting token metadata:', error);
@@ -680,6 +695,7 @@ module.exports = {
   deleteCommunityFundQR,
   getTokenMetadata,
   setTokenMetadata,
+  invalidateTokenMetadataCache,
   getHouseBalance,
   getAllHouseBalances,
   updateHouseBalance,

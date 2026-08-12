@@ -141,9 +141,10 @@ async function getActiveLotteries(guildId) {
 /** All LIVE lotteries in one query; grouped by guild_id for embed refresh loops. */
 async function getActiveLotteriesByGuildMap() {
   try {
+    // Embed refresh only needs ids; updateLotteryEmbed reloads full lottery
     const { data, error } = await supabase
       .from('lotteries')
-      .select('*')
+      .select('lottery_id,guild_id')
       .eq('status', 'LIVE')
       .order('created_at', { ascending: false });
     
@@ -156,31 +157,7 @@ async function getActiveLotteriesByGuildMap() {
       byGuild[gid][row.lottery_id] = {
         lotteryId: row.lottery_id,
         guildId: row.guild_id,
-        winningNumbersCount: row.winning_numbers_count,
-        totalPoolNumbers: row.total_pool_numbers,
-        tokenIdentifier: row.token_identifier,
-        tokenTicker: row.token_ticker,
-        drawingFrequency: row.drawing_frequency,
-        houseCommissionPercent: row.house_commission_percent,
-        ticketPriceWei: row.ticket_price_wei,
-        prizePoolWei: row.prize_pool_wei,
-        prizePoolUsd: row.prize_pool_usd,
-        startTime: row.start_time,
-        endTime: row.end_time,
-        nextDrawTime: row.next_draw_time,
-        status: row.status,
-        hasWinners: row.has_winners,
-        winningNumbers: row.winning_numbers,
-        channelId: row.channel_id,
-        messageId: row.message_id,
-        threadId: row.thread_id,
-        totalTickets: row.total_tickets,
-        uniqueParticipants: row.unique_participants,
-        isRollover: row.is_rollover,
-        originalLotteryId: row.original_lottery_id,
-        rolloverCount: row.rollover_count,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at
+        status: 'LIVE'
       };
     });
     return byGuild;
@@ -198,7 +175,7 @@ async function getAllLotteriesForDrawCheck() {
     
     const { data, error } = await supabase
       .from('lotteries')
-      .select('*')
+      .select('lottery_id,guild_id,status,next_draw_time,updated_at')
       .or(`status.eq.LIVE,status.eq.PROCESSING`)
       .lte('next_draw_time', Date.now());
     
@@ -219,30 +196,8 @@ async function getAllLotteriesForDrawCheck() {
     return lotteriesToProcess.map(row => ({
       lotteryId: row.lottery_id,
       guildId: row.guild_id,
-      winningNumbersCount: row.winning_numbers_count,
-      totalPoolNumbers: row.total_pool_numbers,
-      tokenIdentifier: row.token_identifier,
-      tokenTicker: row.token_ticker,
-      drawingFrequency: row.drawing_frequency,
-      houseCommissionPercent: row.house_commission_percent,
-      ticketPriceWei: row.ticket_price_wei,
-      prizePoolWei: row.prize_pool_wei,
-      prizePoolUsd: row.prize_pool_usd,
-      startTime: row.start_time,
-      endTime: row.end_time,
-      nextDrawTime: row.next_draw_time,
       status: row.status,
-      hasWinners: row.has_winners,
-      winningNumbers: row.winning_numbers,
-      channelId: row.channel_id,
-      messageId: row.message_id,
-      threadId: row.thread_id,
-      totalTickets: row.total_tickets,
-      uniqueParticipants: row.unique_participants,
-      isRollover: row.is_rollover,
-      originalLotteryId: row.original_lottery_id,
-      rolloverCount: row.rollover_count,
-      createdAt: row.created_at,
+      nextDrawTime: row.next_draw_time,
       updatedAt: row.updated_at
     }));
   } catch (error) {
@@ -412,7 +367,7 @@ async function getTicketsByUser(guildId, userId, tokenTicker = null, status = nu
   try {
     let query = supabase
       .from('lottery_tickets')
-      .select('*')
+      .select('ticket_id,guild_id,lottery_id,user_id,user_tag,numbers,token_identifier,token_ticker,ticket_price_wei,status,is_winner,matched_numbers,created_at,expired_at')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
@@ -456,6 +411,48 @@ async function getTicketsByUser(guildId, userId, tokenTicker = null, status = nu
     }));
   } catch (error) {
     console.error('[DB] Error getting tickets by user:', error);
+    throw error;
+  }
+}
+
+/** User tickets for one lottery (avoids dumping all lottery tickets for UI buttons). */
+async function getTicketsByUserForLottery(guildId, lotteryId, userId, statuses = null) {
+  try {
+    let query = supabase
+      .from('lottery_tickets')
+      .select('ticket_id,guild_id,lottery_id,user_id,user_tag,numbers,token_identifier,token_ticker,ticket_price_wei,status,is_winner,matched_numbers,created_at,expired_at')
+      .eq('guild_id', guildId)
+      .eq('lottery_id', lotteryId)
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (statuses && statuses.length === 1) {
+      query = query.eq('status', statuses[0]);
+    } else if (statuses && statuses.length > 1) {
+      query = query.in('status', statuses);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    return (data || []).map(row => ({
+      ticketId: row.ticket_id,
+      guildId: row.guild_id,
+      lotteryId: row.lottery_id,
+      userId: row.user_id,
+      userTag: row.user_tag,
+      numbers: row.numbers,
+      tokenIdentifier: row.token_identifier,
+      tokenTicker: row.token_ticker,
+      ticketPriceWei: row.ticket_price_wei,
+      status: row.status,
+      isWinner: row.is_winner,
+      matchedNumbers: row.matched_numbers,
+      createdAt: row.created_at,
+      expiredAt: row.expired_at
+    }));
+  } catch (error) {
+    console.error('[DB] Error getting user tickets for lottery:', error);
     throw error;
   }
 }
@@ -846,6 +843,7 @@ module.exports = {
   createTicket,
   getTicketsByLottery,
   getTicketsByUser,
+  getTicketsByUserForLottery,
   getTicketsCountByLottery,
   getTicketsCountByUserForLottery,
   getTicketsCountByUser,

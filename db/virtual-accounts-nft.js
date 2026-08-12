@@ -75,11 +75,14 @@ function getWithdrawBlockReason(nft, stakedKeys, activeListings, activeAuctions)
   return null;
 }
 
-async function getUserNFTBalances(guildId, userId, collection = null, includeStaked = false) {
+const NFT_BALANCE_LEAN_COLUMNS = 'guild_id,user_id,collection,nonce,amount,identifier,nft_name,nft_image_url,staked,created_at,updated_at';
+
+async function getUserNFTBalances(guildId, userId, collection = null, includeStaked = false, options = {}) {
   try {
+    const includeMetadata = options.includeMetadata === true;
     let query = supabase
       .from('virtual_account_nft_balances')
-      .select('*')
+      .select(includeMetadata ? '*' : NFT_BALANCE_LEAN_COLUMNS)
       .eq('guild_id', guildId)
       .eq('user_id', userId);
     
@@ -158,7 +161,7 @@ async function countEligibleVirtualInventoryForRoleRule(guildId, userId, collect
     return counts;
   }
 
-  const balances = await getUserNFTBalances(guildId, userId, null, true);
+  const balances = await getUserNFTBalances(guildId, userId, null, true, { includeMetadata: false });
   const filtered = balances.filter(b => canonicalLower.has(String(b.collection || '').toLowerCase()));
   const activeListings = await getUserListings(guildId, userId, 'ACTIVE');
   const activeAuctions = await dbAuctions.getUserActiveAuctions(guildId, userId);
@@ -175,6 +178,104 @@ async function countEligibleVirtualInventoryForRoleRule(guildId, userId, collect
     }
   }
   return counts;
+}
+
+/**
+ * Batch VA eligibility counts for many users in one guild (role sync).
+ * One balances query + one listings query + one auctions query instead of per-user dumps.
+ * @returns {Promise<Map<string, Record<string, number>>>} userId -> collection counts
+ */
+async function batchCountEligibleVirtualInventoryForRoleRule(guildId, userIds, collectionTickers) {
+  const tickers = [...new Set((collectionTickers || []).filter(Boolean))];
+  const userIdList = [...new Set((userIds || []).filter(Boolean))];
+  const userIdSet = new Set(userIdList);
+  const result = new Map();
+  for (const uid of userIdSet) {
+    const counts = {};
+    tickers.forEach(t => { counts[String(t)] = 0; });
+    result.set(uid, counts);
+  }
+  if (tickers.length === 0 || userIdSet.size === 0) {
+    return result;
+  }
+
+  const canonicalLower = new Map();
+  tickers.forEach(t => {
+    const s = String(t);
+    canonicalLower.set(s.toLowerCase(), s);
+  });
+
+  const CHUNK = 200;
+  const balances = [];
+  const listings = [];
+  for (let i = 0; i < userIdList.length; i += CHUNK) {
+    const chunk = userIdList.slice(i, i + CHUNK);
+    const { data: balChunk, error: balErr } = await supabase
+      .from('virtual_account_nft_balances')
+      .select('user_id,collection,nonce,amount')
+      .eq('guild_id', guildId)
+      .in('user_id', chunk);
+    if (balErr) throw balErr;
+    if (balChunk) balances.push(...balChunk);
+
+    const { data: listChunk, error: listErr } = await supabase
+      .from('nft_listings')
+      .select('seller_id,collection,nonce,amount,status')
+      .eq('guild_id', guildId)
+      .eq('status', 'ACTIVE')
+      .in('seller_id', chunk);
+    if (listErr) throw listErr;
+    if (listChunk) listings.push(...listChunk);
+  }
+
+  const { data: auctions, error: aucErr } = await supabase
+    .from('auctions')
+    .select('creator_id,seller_id,collection,nft_nonce,amount,status')
+    .eq('guild_id', guildId)
+    .eq('status', 'ACTIVE');
+  if (aucErr) throw aucErr;
+
+  const listingsByUser = new Map();
+  for (const row of listings) {
+    if (!listingsByUser.has(row.seller_id)) listingsByUser.set(row.seller_id, []);
+    listingsByUser.get(row.seller_id).push({
+      collection: row.collection,
+      nonce: row.nonce,
+      amount: row.amount || 1
+    });
+  }
+
+  const auctionsByUser = new Map();
+  for (const row of auctions || []) {
+    const owners = new Set([row.creator_id, row.seller_id].filter(Boolean));
+    for (const uid of owners) {
+      if (!userIdSet.has(uid)) continue;
+      if (!auctionsByUser.has(uid)) auctionsByUser.set(uid, []);
+      auctionsByUser.get(uid).push({
+        collection: row.collection,
+        nftNonce: row.nft_nonce,
+        amount: row.amount || 1
+      });
+    }
+  }
+
+  for (const nft of balances) {
+    const uid = nft.user_id;
+    if (!userIdSet.has(uid)) continue;
+    const lk = String(nft.collection || '').toLowerCase();
+    const canon = canonicalLower.get(lk);
+    if (!canon) continue;
+    const counts = result.get(uid);
+    const totalBalance = nft.amount || 1;
+    const lockedL = getLockedInListingsForNft(nft, listingsByUser.get(uid) || []);
+    const lockedA = getLockedInAuctionsForNft(nft, auctionsByUser.get(uid) || []);
+    const effective = Math.max(0, totalBalance - lockedL - lockedA);
+    if (effective > 0) {
+      counts[canon] += effective;
+    }
+  }
+
+  return result;
 }
 
 async function getDistinctUserIdsWithNftBalances(guildId) {
@@ -1140,6 +1241,7 @@ module.exports = {
   getLockedInListingsForNft,
   getLockedInAuctionsForNft,
   countEligibleVirtualInventoryForRoleRule,
+  batchCountEligibleVirtualInventoryForRoleRule,
   getDistinctUserIdsWithNftBalances,
   validateNFTsForWithdrawal,
   getUserNFTBalance,

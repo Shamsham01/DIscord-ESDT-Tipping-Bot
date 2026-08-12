@@ -75,7 +75,7 @@ async function getActiveRounds(guildId) {
   try {
     const { data, error } = await supabase
       .from('drop_rounds')
-      .select('*')
+      .select('id,round_id,guild_id,channel_id,message_id,status,created_at,closed_at,draw_time,min_droppers,current_droppers,winner_id,winner_tag,airdrop_status,week_start,week_end,created_at_ts,updated_at')
       .eq('guild_id', guildId)
       .eq('status', 'LIVE')
       .order('created_at', { ascending: false });
@@ -111,33 +111,18 @@ async function getActiveRounds(guildId) {
 // Get all active rounds across all guilds (for timer processing)
 async function getAllActiveRounds() {
   try {
+    // Timer only needs ids; processDropRound reloads the full round
     const { data, error } = await supabase
       .from('drop_rounds')
-      .select('*')
+      .select('round_id,guild_id')
       .eq('status', 'LIVE')
       .order('draw_time', { ascending: true });
     
     if (error) throw error;
     
     return (data || []).map(row => ({
-      id: row.id,
       roundId: row.round_id,
-      guildId: row.guild_id,
-      channelId: row.channel_id,
-      messageId: row.message_id,
-      status: row.status,
-      createdAt: row.created_at,
-      closedAt: row.closed_at,
-      drawTime: row.draw_time,
-      minDroppers: row.min_droppers,
-      currentDroppers: row.current_droppers || 0,
-      winnerId: row.winner_id,
-      winnerTag: row.winner_tag,
-      airdropStatus: row.airdrop_status || false,
-      weekStart: row.week_start,
-      weekEnd: row.week_end,
-      createdAtTs: row.created_at_ts,
-      updatedAt: row.updated_at
+      guildId: row.guild_id
     }));
   } catch (error) {
     console.error('[DB] Error getting all active rounds:', error);

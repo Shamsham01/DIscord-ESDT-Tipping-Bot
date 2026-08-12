@@ -1932,15 +1932,12 @@ async function cleanupExpiredChallenges() {
   let changed = false;
   
   try {
-    // Get all guilds
-    const allGuilds = await client.guilds.fetch();
+    const expirableGames = await dbRpsGames.getExpirableGamesGlobally();
     
-    for (const [guildId, guild] of allGuilds) {
+    for (const challenge of expirableGames) {
+      const guildId = challenge.guildId;
+      const gameId = challenge.gameId;
       try {
-        // Get all games (both waiting and active) that might be expired
-        const allGames = await dbRpsGames.getGamesByGuild(guildId);
-        
-        for (const [gameId, challenge] of Object.entries(allGames)) {
           let shouldExpire = false;
           let isActiveGameTimeout = false;
           
@@ -2046,9 +2043,8 @@ async function cleanupExpiredChallenges() {
               }
             }
           }
-        }
       } catch (error) {
-        console.error(`[RPS CLEANUP] Error processing guild ${guildId}:`, error.message);
+        console.error(`[RPS CLEANUP] Error processing game ${gameId} in guild ${guildId}:`, error.message);
       }
     }
     
@@ -5374,6 +5370,9 @@ client.on('interactionCreate', async (interaction) => {
 
       // Initialize wallet timestamp in blockchain listener immediately
       await blockchainListener.initializeWalletTimestamp(wallet.address, fundName);
+      if (typeof blockchainListener.invalidateCommunityFundWalletsCache === 'function') {
+        blockchainListener.invalidateCommunityFundWalletsCache();
+      }
       console.log(`[COMMUNITY-FUND] Wallet timestamp initialized for blockchain listener`);
       
       // Build success message
@@ -6364,6 +6363,9 @@ client.on('interactionCreate', async (interaction) => {
       // Clean up wallet timestamp if this was a Community Fund project
       if (isCommunityFund && walletAddress) {
         await blockchainListener.removeWalletTimestamp(walletAddress, projectName);
+        if (typeof blockchainListener.invalidateCommunityFundWalletsCache === 'function') {
+          blockchainListener.invalidateCommunityFundWalletsCache();
+        }
         console.log(`[DELETE-PROJECT] Removed timestamp for deleted Community Fund wallet: ${walletAddress}`);
       }
 
@@ -6607,6 +6609,10 @@ client.on('interactionCreate', async (interaction) => {
         console.log(`[DELETE-ALL] Removed timestamp for Community Fund wallet: ${communityFundWalletAddress}`);
       }
       
+      if (typeof blockchainListener.invalidateCommunityFundWalletsCache === 'function') {
+        blockchainListener.invalidateCommunityFundWalletsCache();
+      }
+
       // Also run cleanup as a safety net to catch any other orphaned timestamps
       await blockchainListener.cleanupOrphanedTimestamps();
       console.log(`[DELETE-ALL] Cleaned up orphaned timestamps for guild ${guildId}`);
@@ -19463,10 +19469,8 @@ client.on('interactionCreate', async (interaction) => {
       const lotteryId = customId.split(':')[1];
       const userId = interaction.user.id;
       
-      // Get all tickets for this specific lottery and filter by user (no limit)
-      const allTickets = await dbLottery.getTicketsByLottery(guildId, lotteryId);
-      const lotteryTickets = Object.values(allTickets)
-        .filter(t => t.userId === userId && t.status === 'LIVE')
+      // Get this user's LIVE tickets for this lottery only
+      const lotteryTickets = (await dbLottery.getTicketsByUserForLottery(guildId, lotteryId, userId, ['LIVE']))
         .sort((a, b) => b.createdAt - a.createdAt); // Sort by newest first
       
       if (lotteryTickets.length === 0) {
@@ -19535,11 +19539,8 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Get all tickets for this specific lottery and user (no limit)
-      // Include both EXPIRED and WINNER tickets
-      const allTickets = await dbLottery.getTicketsByLottery(guildId, lotteryId);
-      const lotteryTickets = Object.values(allTickets)
-        .filter(t => t.userId === userId && (t.status === 'EXPIRED' || t.status === 'WINNER'))
+      // Get this user's result tickets for this lottery only
+      const lotteryTickets = (await dbLottery.getTicketsByUserForLottery(guildId, lotteryId, userId, ['EXPIRED', 'WINNER']))
         .sort((a, b) => b.createdAt - a.createdAt); // Sort by newest first
       
       if (lotteryTickets.length === 0) {
@@ -32489,6 +32490,8 @@ console.log('[FOOTBALL] ⏰ Setting up simple round-robin match checking every 1
 
 let currentMatchIndex = 0;
 let allMatches = [];
+let lastMatchListInitAt = 0;
+const MATCH_LIST_REINIT_MS = 10 * 60 * 1000; // 10 min — was every ~2.5 min (10 ticks × 15s)
 
 // Initialize the match list
 async function initializeMatchList() {
@@ -32518,6 +32521,7 @@ async function initializeMatchList() {
     const timeB = new Date(b.kickoffISO).getTime();
     return timeA - timeB;
   });
+  lastMatchListInitAt = Date.now();
   
     console.log(`[FOOTBALL] 📋 Loaded ${allMatches.length} matches for round-robin checking (sorted by kickoff time)`);
     if (allMatches.length > 0) {
@@ -32535,8 +32539,9 @@ async function checkSingleMatch() {
     return;
   }
 
-  // Reinitialize match list every 10 cycles (2.5 minutes) to pick up new matches
-  if (allMatches.length === 0 || (currentMatchIndex % 10 === 0)) {
+  // Reinitialize match list every 10 minutes (or when empty) — still check one match every 15s
+  const needsReinit = allMatches.length === 0 || (Date.now() - lastMatchListInitAt >= MATCH_LIST_REINIT_MS);
+  if (needsReinit) {
     await initializeMatchList();
     if (allMatches.length === 0) {
       return;

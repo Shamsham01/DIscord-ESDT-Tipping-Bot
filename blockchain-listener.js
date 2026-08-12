@@ -34,6 +34,20 @@ const API_BASE_URL = 'https://api.multiversx.com';
 /** In-memory copy of wallet_timestamps; updated on init and after each successful poll (no full-table read every tick). */
 let cachedWalletTimestamps = {};
 
+/** Cache community-fund wallet list to avoid 2 Supabase queries every poll tick. */
+const COMMUNITY_FUND_WALLETS_CACHE_MS = (() => {
+  const n = Number(process.env.COMMUNITY_FUND_WALLETS_CACHE_MS);
+  return Number.isFinite(n) && n >= 30000 ? n : 120000; // default 2 min
+})();
+let cachedCommunityFundWallets = null;
+let cachedCommunityFundWalletsAt = 0;
+
+/** Invalidate CF wallet cache (call after register/delete community fund). */
+function invalidateCommunityFundWalletsCache() {
+  cachedCommunityFundWallets = null;
+  cachedCommunityFundWalletsAt = 0;
+}
+
 // Rate limiting configuration for MultiversX API
 const MAX_RETRIES = 3;
 const INITIAL_RETRY_DELAY = 1000; // 1 second
@@ -228,9 +242,18 @@ async function updateWalletTimestamp(walletAddress, transactionTimestamp, curren
   console.log(`[BLOCKCHAIN] ⏰ Updated timestamp for ${walletAddress}: ${transactionTimestamp} → ${newTimestamp}`);
 }
 
-// Get all community fund wallets from database
-async function getAllCommunityFundWallets() {
+// Get all community fund wallets from database (cached; invalidate via invalidateCommunityFundWalletsCache)
+async function getAllCommunityFundWallets(forceRefresh = false) {
   try {
+    const now = Date.now();
+    if (
+      !forceRefresh &&
+      cachedCommunityFundWallets &&
+      now - cachedCommunityFundWalletsAt < COMMUNITY_FUND_WALLETS_CACHE_MS
+    ) {
+      return cachedCommunityFundWallets;
+    }
+
     const supabase = require('./supabase-client');
     
     // Get all guild settings to find community fund projects
@@ -241,11 +264,12 @@ async function getAllCommunityFundWallets() {
     
     if (settingsError) {
       console.error('[BLOCKCHAIN] Error fetching guild settings:', settingsError);
-      return [];
+      return cachedCommunityFundWallets || [];
     }
     
     if (!guildSettings || guildSettings.length === 0) {
-      console.log('[BLOCKCHAIN] No community fund projects found');
+      cachedCommunityFundWallets = [];
+      cachedCommunityFundWalletsAt = now;
       return [];
     }
     
@@ -255,6 +279,8 @@ async function getAllCommunityFundWallets() {
     );
     
     if (guildIds.length === 0) {
+      cachedCommunityFundWallets = [];
+      cachedCommunityFundWalletsAt = now;
       return [];
     }
     
@@ -267,7 +293,7 @@ async function getAllCommunityFundWallets() {
     
     if (projError) {
       console.error('[BLOCKCHAIN] Error fetching Community Fund projects:', projError);
-      return [];
+      return cachedCommunityFundWallets || [];
     }
     
     const wallets = [];
@@ -282,11 +308,13 @@ async function getAllCommunityFundWallets() {
       });
     }
     
-    console.log(`[BLOCKCHAIN] Found ${wallets.length} community fund wallets to monitor`);
+    cachedCommunityFundWallets = wallets;
+    cachedCommunityFundWalletsAt = now;
+    console.log(`[BLOCKCHAIN] Found ${wallets.length} community fund wallets to monitor (cache ${COMMUNITY_FUND_WALLETS_CACHE_MS / 1000}s)`);
     return wallets;
   } catch (error) {
     console.error('[BLOCKCHAIN] Error getting community fund wallets:', error.message);
-    return [];
+    return cachedCommunityFundWallets || [];
   }
 }
 
@@ -1285,7 +1313,8 @@ module.exports = {
   initializeWalletTimestamp,
   removeWalletTimestamp,
   cleanupOrphanedTimestamps,
-  processPendingTransactionsForWallet
+  processPendingTransactionsForWallet,
+  invalidateCommunityFundWalletsCache
 };
 
 // Start listener if this file is run directly

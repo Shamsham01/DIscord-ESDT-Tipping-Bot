@@ -88,7 +88,7 @@ async function getNFTMetadata(collection, nonce, forceRefresh = false, identifie
     if (!forceRefresh) {
       const { data: cached, error: cacheError } = await supabase
         .from('nft_metadata_cache')
-        .select('*')
+        .select('attributes,expires_at')
         .eq('identifier', identifier)
         .single();
       

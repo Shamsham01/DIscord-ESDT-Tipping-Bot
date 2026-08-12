@@ -264,11 +264,43 @@ async function getRpsGames(guildId) {
   return await getGamesByGuild(guildId);
 }
 
+/** Waiting + active games across all guilds for expiry cleanup (avoids full-table per guild). */
+async function getExpirableGamesGlobally() {
+  try {
+    const { data, error } = await supabase
+      .from('rps_games')
+      .select('game_id,guild_id,challenger_id,challenged_id,human_amount,token,status,created_at,expires_at,joined_at,channel_id,message_id,thread_id')
+      .in('status', ['waiting', 'active']);
+    
+    if (error) throw error;
+    
+    return (data || []).map(row => ({
+      gameId: row.game_id,
+      guildId: row.guild_id,
+      challengerId: row.challenger_id,
+      challengedId: row.challenged_id,
+      humanAmount: row.human_amount,
+      token: row.token,
+      status: row.status,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      joinedAt: row.joined_at,
+      channelId: row.channel_id,
+      messageId: row.message_id,
+      threadId: row.thread_id
+    }));
+  } catch (error) {
+    console.error('[DB] Error getting expirable RPS games:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   getGame,
   getGamesByGuild,
   getRpsGames,
   getActiveGames,
+  getExpirableGamesGlobally,
   createGame,
   updateGame,
   deleteGame

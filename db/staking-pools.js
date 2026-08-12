@@ -107,9 +107,10 @@ async function getStakingPoolsByCreator(guildId, creatorId) {
 async function getStakingPoolsForGuildIds(guildIds, statuses = ['ACTIVE', 'CLOSED']) {
   if (!guildIds || guildIds.length === 0) return [];
   try {
+    // Embed loop only needs ids + status/messageId for skip logic; updateStakingPoolEmbed reloads full pool
     let query = supabase
       .from('staking_pools')
-      .select('*')
+      .select('pool_id,guild_id,status,message_id')
       .in('guild_id', guildIds);
     if (statuses && statuses.length > 0) {
       query = query.in('status', statuses);
@@ -117,7 +118,12 @@ async function getStakingPoolsForGuildIds(guildIds, statuses = ['ACTIVE', 'CLOSE
     const { data, error } = await query.order('created_at', { ascending: false });
     
     if (error) throw error;
-    return (data || []).map(mapPoolFromDb);
+    return (data || []).map(row => ({
+      poolId: row.pool_id,
+      guildId: row.guild_id,
+      status: row.status,
+      messageId: row.message_id
+    }));
   } catch (error) {
     console.error('[DB] Error getting staking pools for guild ids:', error);
     throw error;
@@ -165,14 +171,18 @@ async function updateStakingPool(guildId, poolId, updates) {
 async function getPoolsForRewardDistribution() {
   try {
     const now = Date.now();
+    // Cron filter only; processStakingPoolRewards reloads full pool
     const { data, error } = await supabase
       .from('staking_pools')
-      .select('*')
+      .select('pool_id,guild_id')
       .eq('status', 'ACTIVE')
       .lte('next_reward_distribution_at', now);
     
     if (error) throw error;
-    return (data || []).map(mapPoolFromDb);
+    return (data || []).map(row => ({
+      poolId: row.pool_id,
+      guildId: row.guild_id
+    }));
   } catch (error) {
     console.error('[DB] Error getting pools for distribution:', error);
     throw error;
@@ -184,13 +194,16 @@ async function getPoolsForAutoClose() {
     const now = Date.now();
     const { data, error } = await supabase
       .from('staking_pools')
-      .select('*')
+      .select('pool_id,guild_id')
       .eq('status', 'PAUSED')
       .not('auto_close_at', 'is', null)
       .lte('auto_close_at', now);
     
     if (error) throw error;
-    return (data || []).map(mapPoolFromDb);
+    return (data || []).map(row => ({
+      poolId: row.pool_id,
+      guildId: row.guild_id
+    }));
   } catch (error) {
     console.error('[DB] Error getting pools for auto-close:', error);
     throw error;
@@ -580,14 +593,15 @@ async function claimUserReward(guildId, poolId, userId, distributionId) {
 async function expireOldRewards() {
   try {
     const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
+    const cutoffIso = new Date(twentyFourHoursAgo).toISOString();
     
-    // Get all rewards that should be expired (grouped by pool)
+    // Only columns needed to return expired amounts to pool supply
     const { data: rewardsToExpire, error: fetchError } = await supabase
       .from('staking_pool_user_rewards')
-      .select('*')
+      .select('guild_id,pool_id,reward_amount_wei')
       .eq('claimed', false)
       .eq('expired', false)
-      .lt('created_at', new Date(twentyFourHoursAgo).toISOString());
+      .lt('created_at', cutoffIso);
     
     if (fetchError) throw fetchError;
     
@@ -617,7 +631,7 @@ async function expireOldRewards() {
       })
       .eq('claimed', false)
       .eq('expired', false)
-      .lt('created_at', new Date(twentyFourHoursAgo).toISOString());
+      .lt('created_at', cutoffIso);
     
     if (updateError) throw updateError;
     
