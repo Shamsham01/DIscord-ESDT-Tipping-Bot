@@ -29219,11 +29219,15 @@ client.on('ready', async () => {
               });
               if (!guild) {
                 // Mark as cleaned if guild not found (bot likely left)
-                await supabase
+                const { error: clearMsgError } = await supabase
                   .from('staking_pools')
                   .update({ message_id: null })
                   .eq('pool_id', pool.pool_id)
                   .eq('guild_id', pool.guild_id);
+                if (clearMsgError) {
+                  console.error(`[CLEANUP] Failed to clear message_id for staking pool ${pool.pool_id} (guild missing):`, clearMsgError.message);
+                  errors++;
+                }
                 continue;
               }
               
@@ -29233,11 +29237,15 @@ client.on('ready', async () => {
               });
               if (!channel) {
                 // Mark as cleaned if channel not found
-                await supabase
+                const { error: clearMsgError } = await supabase
                   .from('staking_pools')
                   .update({ message_id: null })
                   .eq('pool_id', pool.pool_id)
                   .eq('guild_id', pool.guild_id);
+                if (clearMsgError) {
+                  console.error(`[CLEANUP] Failed to clear message_id for staking pool ${pool.pool_id} (channel missing):`, clearMsgError.message);
+                  errors++;
+                }
                 continue;
               }
               
@@ -29314,11 +29322,15 @@ client.on('ready', async () => {
               // Mark message_id as null in database if message was deleted or already deleted
               // This prevents re-checking the same deleted messages on next cleanup
               if (messageDeleted) {
-                await supabase
+                const { error: clearMsgError } = await supabase
                   .from('staking_pools')
                   .update({ message_id: null })
                   .eq('pool_id', pool.pool_id)
                   .eq('guild_id', pool.guild_id);
+                if (clearMsgError) {
+                  console.error(`[CLEANUP] Failed to clear message_id for staking pool ${pool.pool_id}:`, clearMsgError.message);
+                  errors++;
+                }
               }
               
               await new Promise(resolve => setTimeout(resolve, 500));
