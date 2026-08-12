@@ -161,6 +161,7 @@ const client = new Client({
   partials: [
     Partials.Message,
     Partials.Channel,
+    Partials.Reaction,
     Partials.User,
     Partials.GuildMember,
   ],
@@ -28130,17 +28131,69 @@ async function handleShowDropLeaderboard(interaction) {
 }
 
 // Reaction handler for 🪂 emoji
+async function ensureDropReactionContext(reaction) {
+  if (reaction.partial) {
+    try {
+      await reaction.fetch();
+    } catch (error) {
+      console.error('[DROP] Failed to fetch partial reaction:', error.message);
+      return null;
+    }
+  }
+  if (reaction.message?.partial) {
+    try {
+      await reaction.message.fetch();
+    } catch (error) {
+      console.error('[DROP] Failed to fetch partial reaction message:', error.message);
+      return null;
+    }
+  }
+  const message = reaction.message;
+  if (!message) return null;
+  const guildId = message.guildId || message.guild?.id || null;
+  if (!guildId || !message.id) return null;
+  return { message, guildId };
+}
+
+async function refreshDropRoundEmbedFromReaction(guildId, roundId, message) {
+  const game = await dbDropGames.getDropGame(guildId);
+  if (!game) return;
+  const updatedRound = await dbDropRounds.getRound(guildId, roundId);
+  if (!updatedRound) return;
+  const embed = await createDropRoundEmbed(guildId, roundId, game, updatedRound);
+  if (!embed) return;
+
+  try {
+    await message.edit({ embeds: [embed] });
+  } catch (e) {
+    if (e.code === 10008 || e.status === 404) {
+      const channel = message.channel || await client.channels.fetch(updatedRound.channelId).catch(() => null);
+      if (!channel) return;
+      try {
+        const newMessage = await channel.send({ embeds: [embed] });
+        await newMessage.react('🪂');
+        await dbDropRounds.updateRound(guildId, roundId, { messageId: newMessage.id });
+        await dbDropGames.updateDropGame(guildId, { messageId: newMessage.id });
+      } catch (createError) {
+        console.error('[DROP] Error recreating message after deletion in reaction handler:', createError);
+      }
+    } else {
+      console.error('[DROP] Error updating embed in reaction handler:', e.message);
+    }
+  }
+}
+
 client.on('messageReactionAdd', async (reaction, user) => {
   try {
     // Ignore bot reactions
     if (user.bot) return;
-    
-    // Check if reaction is 🪂 emoji
+
+    const ctx = await ensureDropReactionContext(reaction);
+    if (!ctx) return;
+    const { message, guildId } = ctx;
+
+    // Check if reaction is 🪂 emoji (after fetch — partials may lack emoji.name)
     if (reaction.emoji.name !== '🪂') return;
-    
-    const message = reaction.message;
-    const guildId = message.guildId;
-    if (!guildId) return;
     
     // Check if message is a drop round embed
     const round = await dbDropRounds.getLiveRoundByMessageId(guildId, message.id);
@@ -28154,7 +28207,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
       const participantCount = await dbDropRounds.getParticipantCount(guildId, round.roundId);
       if (participantCount >= round.minDroppers) {
         // Round should be closed, remove reaction
-        await reaction.users.remove(user.id);
+        await reaction.users.remove(user.id).catch(() => null);
         return;
       }
     }
@@ -28167,41 +28220,18 @@ client.on('messageReactionAdd', async (reaction, user) => {
     });
     
     if (result.alreadyEntered) {
-      // User already entered, remove duplicate reaction
-      await reaction.users.remove(user.id);
+      // Keep the reaction (user is already registered). Refresh embed so count stays correct.
+      // Do NOT remove the reaction — that used to fire removeParticipant and break toggle UX.
+      const participantCount = await dbDropRounds.getParticipantCount(guildId, round.roundId);
+      await dbDropRounds.updateRound(guildId, round.roundId, { currentDroppers: participantCount });
+      await refreshDropRoundEmbedFromReaction(guildId, round.roundId, message);
       return;
     }
     
     // Update round count
     const participantCount = await dbDropRounds.getParticipantCount(guildId, round.roundId);
     await dbDropRounds.updateRound(guildId, round.roundId, { currentDroppers: participantCount });
-    
-    // Update embed
-    const game = await dbDropGames.getDropGame(guildId);
-    if (game) {
-      const updatedRound = await dbDropRounds.getRound(guildId, round.roundId);
-      const embed = await createDropRoundEmbed(guildId, round.roundId, game, updatedRound);
-      if (embed) {
-        try {
-          await message.edit({ embeds: [embed] });
-        } catch (e) {
-          // If message was deleted, try to recreate it
-          if (e.code === 10008 || e.status === 404) {
-            const channel = message.channel;
-            try {
-              const newMessage = await channel.send({ embeds: [embed] });
-              await newMessage.react('🪂');
-              await dbDropRounds.updateRound(guildId, round.roundId, { messageId: newMessage.id });
-              await dbDropGames.updateDropGame(guildId, { messageId: newMessage.id });
-            } catch (createError) {
-              console.error('[DROP] Error recreating message after deletion in reaction handler:', createError);
-            }
-          } else {
-            console.error('[DROP] Error updating embed in reaction handler:', e.message);
-          }
-        }
-      }
-    }
+    await refreshDropRoundEmbedFromReaction(guildId, round.roundId, message);
   } catch (error) {
     console.error('[DROP] Error handling reaction:', error);
   }
@@ -28212,13 +28242,13 @@ client.on('messageReactionRemove', async (reaction, user) => {
   try {
     // Ignore bot reactions
     if (user.bot) return;
-    
-    // Check if reaction is 🪂 emoji
+
+    const ctx = await ensureDropReactionContext(reaction);
+    if (!ctx) return;
+    const { message, guildId } = ctx;
+
+    // Check if reaction is 🪂 emoji (after fetch — partials may lack emoji.name)
     if (reaction.emoji.name !== '🪂') return;
-    
-    const message = reaction.message;
-    const guildId = message.guildId;
-    if (!guildId) return;
     
     // Check if message is a drop round embed
     const round = await dbDropRounds.getLiveRoundByMessageId(guildId, message.id);
@@ -28231,7 +28261,7 @@ client.on('messageReactionRemove', async (reaction, user) => {
       // Round expired, but might be waiting for min droppers
       const participantCount = await dbDropRounds.getParticipantCount(guildId, round.roundId);
       if (participantCount >= round.minDroppers) {
-        // Round should be closed, don't allow removal
+        // Round should be closed, don't allow removal from DB mid-close
         return;
       }
     }
@@ -28242,33 +28272,7 @@ client.on('messageReactionRemove', async (reaction, user) => {
     // Update round count
     const participantCount = await dbDropRounds.getParticipantCount(guildId, round.roundId);
     await dbDropRounds.updateRound(guildId, round.roundId, { currentDroppers: participantCount });
-    
-    // Update embed
-    const game = await dbDropGames.getDropGame(guildId);
-    if (game) {
-      const updatedRound = await dbDropRounds.getRound(guildId, round.roundId);
-      const embed = await createDropRoundEmbed(guildId, round.roundId, game, updatedRound);
-      if (embed) {
-        try {
-          await message.edit({ embeds: [embed] });
-        } catch (e) {
-          // If message was deleted, try to recreate it
-          if (e.code === 10008 || e.status === 404) {
-            const channel = message.channel;
-            try {
-              const newMessage = await channel.send({ embeds: [embed] });
-              await newMessage.react('🪂');
-              await dbDropRounds.updateRound(guildId, round.roundId, { messageId: newMessage.id });
-              await dbDropGames.updateDropGame(guildId, { messageId: newMessage.id });
-            } catch (createError) {
-              console.error('[DROP] Error recreating message after deletion in reaction removal handler:', createError);
-            }
-          } else {
-            console.error('[DROP] Error updating embed in reaction removal handler:', e.message);
-          }
-        }
-      }
-    }
+    await refreshDropRoundEmbedFromReaction(guildId, round.roundId, message);
   } catch (error) {
     console.error('[DROP] Error handling reaction removal:', error);
   }
