@@ -28143,8 +28143,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
     if (!guildId) return;
     
     // Check if message is a drop round embed
-    const activeRounds = await dbDropRounds.getAllActiveRounds();
-    const round = activeRounds.find(r => r.messageId === message.id && r.guildId === guildId);
+    const round = await dbDropRounds.getLiveRoundByMessageId(guildId, message.id);
     
     if (!round || round.status !== 'LIVE') return;
     
@@ -28222,8 +28221,7 @@ client.on('messageReactionRemove', async (reaction, user) => {
     if (!guildId) return;
     
     // Check if message is a drop round embed
-    const activeRounds = await dbDropRounds.getAllActiveRounds();
-    const round = activeRounds.find(r => r.messageId === message.id && r.guildId === guildId);
+    const round = await dbDropRounds.getLiveRoundByMessageId(guildId, message.id);
     
     if (!round || round.status !== 'LIVE') return;
     

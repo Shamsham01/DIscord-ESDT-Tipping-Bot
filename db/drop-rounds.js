@@ -130,6 +130,36 @@ async function getAllActiveRounds() {
   }
 }
 
+/** Look up a LIVE round by Discord message id (reaction add/remove). */
+async function getLiveRoundByMessageId(guildId, messageId) {
+  try {
+    if (!guildId || !messageId) return null;
+    const { data, error } = await supabase
+      .from('drop_rounds')
+      .select('round_id,guild_id,message_id,status,draw_time,min_droppers,current_droppers')
+      .eq('guild_id', guildId)
+      .eq('message_id', messageId)
+      .eq('status', 'LIVE')
+      .maybeSingle();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    if (!data) return null;
+
+    return {
+      roundId: data.round_id,
+      guildId: data.guild_id,
+      messageId: data.message_id,
+      status: data.status,
+      drawTime: data.draw_time,
+      minDroppers: data.min_droppers,
+      currentDroppers: data.current_droppers || 0
+    };
+  } catch (error) {
+    console.error('[DB] Error getting live round by message id:', error);
+    throw error;
+  }
+}
+
 // Get rounds for a specific week
 async function getRoundsForWeek(guildId, weekStart, weekEnd) {
   try {
@@ -581,6 +611,7 @@ module.exports = {
   getRound,
   getActiveRounds,
   getAllActiveRounds,
+  getLiveRoundByMessageId,
   getRoundsForWeek,
   tryCompleteRoundAsWinner,
   tryCloseRoundLive,
