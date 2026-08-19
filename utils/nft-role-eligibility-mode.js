@@ -45,12 +45,13 @@ function shouldFetchWalletNft(mode, vaPass) {
  * @param {boolean} walletPass
  * @param {boolean} vaPass
  * @param {unknown} mode
+ * @param {boolean} [combinedPass] wallet_or_va: per-collection wallet+VA totals meet the rule
  */
-function computeEligibility(walletPass, vaPass, mode) {
+function computeEligibility(walletPass, vaPass, mode, combinedPass) {
   const m = coerceEligibilityMode(mode);
   if (m === 'wallet_only') return walletPass;
   if (m === 'va_only') return vaPass;
-  if (m === 'wallet_or_va') return walletPass || vaPass;
+  if (m === 'wallet_or_va') return Boolean(combinedPass) || walletPass || vaPass;
   return walletPass && vaPass;
 }
 
@@ -77,7 +78,7 @@ function describeEligibilityMode(mode) {
     case 'va_only':
       return 'Virtual Account only';
     case 'wallet_or_va':
-      return 'wallet **or** Virtual Account (either qualifies)';
+      return 'wallet **or** Virtual Account (holdings added together)';
     default:
       return 'wallet **and** Virtual Account';
   }

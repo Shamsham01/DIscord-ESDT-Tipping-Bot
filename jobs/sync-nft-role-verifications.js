@@ -3,7 +3,7 @@ const fetch = require('node-fetch');
 const dbServerData = require('../db/server-data');
 const dbNftRoleRules = require('../db/nft-role-verification');
 const dbVirtualAccountsNft = require('../db/virtual-accounts-nft');
-const { evaluateRuleAgainstCounts } = require('../utils/nft-role-rule-evaluator');
+const { evaluateRuleAgainstCounts, countAtTickerIc, mergeCollectionCounts } = require('../utils/nft-role-rule-evaluator');
 const { formatNftRuleMemberDiag, discordIdentityFromMember } = require('../utils/nft-role-verification-diagnostics');
 const {
   coerceEligibilityMode,
@@ -145,6 +145,61 @@ async function fetchWalletCollectionCounts(walletAddress, collectionTickers) {
   return { counts, walletLegVerified: true };
 }
 
+/**
+ * Reuse MvX paging results within one sync run. Dolphin/Shark/Whale/Mega-Whale all query EMP-897b49
+ * for the same wallets; without a cache that is 4× the public API quota (429s, skipped members).
+ */
+function createWalletNftCountCache() {
+  /** @type {Map<string, { verified: boolean, counts: Record<string, number>, fetchedLower: Set<string> }>} */
+  const byAddress = new Map();
+
+  return async function fetchWalletCollectionCountsCached(walletAddress, collectionTickers) {
+    const wanted = [...new Set((collectionTickers || []).filter(Boolean).map(String))];
+    const entry = byAddress.get(walletAddress);
+
+    if (entry && !entry.verified) {
+      return { counts: {}, walletLegVerified: false };
+    }
+
+    if (entry && entry.verified) {
+      const missing = wanted.filter(t => !entry.fetchedLower.has(t.toLowerCase()));
+      if (missing.length === 0) {
+        const counts = {};
+        for (const t of wanted) {
+          counts[t] = countAtTickerIc(entry.counts, t);
+        }
+        return { counts, walletLegVerified: true };
+      }
+      const extra = await fetchWalletCollectionCounts(walletAddress, missing);
+      if (!extra.walletLegVerified) {
+        byAddress.set(walletAddress, { verified: false, counts: {}, fetchedLower: new Set() });
+        return extra;
+      }
+      Object.assign(entry.counts, extra.counts);
+      for (const t of missing) {
+        entry.fetchedLower.add(String(t).toLowerCase());
+      }
+      const counts = {};
+      for (const t of wanted) {
+        counts[t] = countAtTickerIc(entry.counts, t);
+      }
+      return { counts, walletLegVerified: true };
+    }
+
+    const result = await fetchWalletCollectionCounts(walletAddress, wanted);
+    if (!result.walletLegVerified) {
+      byAddress.set(walletAddress, { verified: false, counts: {}, fetchedLower: new Set() });
+      return result;
+    }
+    byAddress.set(walletAddress, {
+      verified: true,
+      counts: { ...result.counts },
+      fetchedLower: new Set(wanted.map(t => t.toLowerCase()))
+    });
+    return result;
+  };
+}
+
 function chunkLines(lines, maxPerChunk = 12) {
   const chunks = [];
   for (let i = 0; i < lines.length; i += maxPerChunk) {
@@ -224,6 +279,7 @@ async function runNftRoleSync(client, opts = {}) {
   const EMBED_CHUNKSIZE = 3;
 
   try {
+    const fetchWalletCollectionCountsCached = createWalletNftCountCache();
     let rules = await dbNftRoleRules.listEnabledRulesGlobally();
     if (filterGuildId) {
       rules = rules.filter(r => r.guildId === filterGuildId);
@@ -344,7 +400,7 @@ async function runNftRoleSync(client, opts = {}) {
             if (needWalletMvX) {
               if (walletAddress && typeof walletAddress === 'string' && walletAddress.startsWith('erd1')) {
                 walletMvXRan = true;
-                const { counts: wCounts, walletLegVerified: wlOk } = await fetchWalletCollectionCounts(
+                const { counts: wCounts, walletLegVerified: wlOk } = await fetchWalletCollectionCountsCached(
                   walletAddress,
                   tickers
                 );
@@ -370,7 +426,19 @@ async function runNftRoleSync(client, opts = {}) {
               continue;
             }
 
-            const eligible = computeEligibility(walletPass, vaPass, eligibilityMode);
+            let combinedCounts = null;
+            let combinedPass = false;
+            if (eligibilityMode === 'wallet_or_va' && wCountsForLog && walletLegVerified) {
+              combinedCounts = mergeCollectionCounts(wCountsForLog, vaCounts);
+              combinedPass = evaluateRuleAgainstCounts(
+                combinedCounts,
+                tickers,
+                rule.matchMode,
+                rule.minCountPerCollection
+              );
+            }
+
+            const eligible = computeEligibility(walletPass, vaPass, eligibilityMode, combinedPass);
             const hasRole = member.roles.cache.has(rule.discordRoleId);
 
             if (eligible && !hasRole) {
@@ -388,6 +456,7 @@ async function runNftRoleSync(client, opts = {}) {
                 walletLegVerified,
                 wCounts: wCountsForLog || {},
                 vaCounts,
+                combinedCounts,
                 collectionTickers: tickers,
                 matchMode: rule.matchMode,
                 minCountPerCollection: rule.minCountPerCollection
@@ -422,6 +491,7 @@ async function runNftRoleSync(client, opts = {}) {
                 walletLegVerified,
                 wCounts: wCountsForLog || {},
                 vaCounts,
+                combinedCounts,
                 collectionTickers: tickers,
                 matchMode: rule.matchMode,
                 minCountPerCollection: rule.minCountPerCollection

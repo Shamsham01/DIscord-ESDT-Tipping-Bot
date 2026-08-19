@@ -55,7 +55,7 @@ function formatCollectionMarks(tickers, countsByCollection, minCount) {
 }
 
 /**
- * @param {{ granted: boolean, userId: string, eligibilityMode?: unknown, walletFetched?: boolean, guildSnowflakeId?: string|null, discordIdentity?: { userId: string, username?: string|null, globalName?: string|null, nickname?: string|null }|null, walletAddress?: string|null, walletPass: boolean, vaPass: boolean, walletLegVerified?: boolean, wCounts: Record<string, number>|null|undefined, vaCounts: Record<string, number>|null|undefined, collectionTickers: string[], matchMode: string, minCountPerCollection: number|string }} opts
+ * @param {{ granted: boolean, userId: string, eligibilityMode?: unknown, walletFetched?: boolean, guildSnowflakeId?: string|null, discordIdentity?: { userId: string, username?: string|null, globalName?: string|null, nickname?: string|null }|null, walletAddress?: string|null, walletPass: boolean, vaPass: boolean, walletLegVerified?: boolean, wCounts: Record<string, number>|null|undefined, vaCounts: Record<string, number>|null|undefined, combinedCounts?: Record<string, number>|null|undefined, collectionTickers: string[], matchMode: string, minCountPerCollection: number|string }} opts
  * @returns {string} Multiline plaintext (one revoke/grant diagnostic block).
  */
 function formatNftRuleMemberDiag(opts) {
@@ -72,6 +72,7 @@ function formatNftRuleMemberDiag(opts) {
     walletLegVerified = true,
     wCounts,
     vaCounts,
+    combinedCounts,
     collectionTickers,
     matchMode,
     minCountPerCollection
@@ -130,7 +131,12 @@ function formatNftRuleMemberDiag(opts) {
     vaSection = `**VA** (Supabase): leg ${vaPass ? '✅' : '❌'}`;
   }
 
-  return [identityLine, mentionLine, walletSection, vaSection].join('\n');
+  let combinedSection = null;
+  if (emode === 'wallet_or_va' && combinedCounts) {
+    combinedSection = `**Combined** (wallet + VA): ${formatCollectionMarks(tickers, combinedCounts, min)}`;
+  }
+
+  return [identityLine, mentionLine, walletSection, vaSection, combinedSection].filter(Boolean).join('\n');
 }
 
 /** @param {string|null|undefined} guildId */

@@ -35,7 +35,34 @@ function evaluateRuleAgainstCounts(countsByCollection, collectionTickers, matchM
   return tickers.some(t => countAtTickerIc(countsByCollection, t) >= min);
 }
 
+/**
+ * Sum per-collection counts from multiple sources (wallet + VA). Keys match case-insensitively.
+ * @param {...Record<string, number>|null|undefined} countMaps
+ * @returns {Record<string, number>}
+ */
+function mergeCollectionCounts(...countMaps) {
+  const result = {};
+  const lowerToKey = new Map();
+  for (const map of countMaps) {
+    if (!map) continue;
+    for (const [k, v] of Object.entries(map)) {
+      const n = Number(v) || 0;
+      if (!n) continue;
+      const lk = String(k).toLowerCase();
+      const existingKey = lowerToKey.get(lk);
+      if (existingKey) {
+        result[existingKey] += n;
+      } else {
+        result[k] = n;
+        lowerToKey.set(lk, k);
+      }
+    }
+  }
+  return result;
+}
+
 module.exports = {
   evaluateRuleAgainstCounts,
-  countAtTickerIc
+  countAtTickerIc,
+  mergeCollectionCounts
 };

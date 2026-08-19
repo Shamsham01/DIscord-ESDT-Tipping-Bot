@@ -68,9 +68,9 @@ If the bot responds with an embed, permissions are correctly set.
 
 ## NFT holder roles (optional)
 
-Admins tie a Discord role to MultiversX **NFT collection tickers** with **`/nft-role-verification`**. Each rule chooses **how** linked-wallet (MvX) counts and **Virtual Account** inventory combine—for example **`wallet_or_va`** (default on **`create`**) vs strict **`wallet_and_va`**. Confirm the bot has **`Manage Roles`** OAuth / channel permissions and ranks **above** the role being managed.
+Admins tie a Discord role to MultiversX **NFT collection tickers** with **`/nft-role-verification`**. Each rule chooses **how** linked-wallet (MvX) counts and **Virtual Account** inventory combine—for example **`wallet_or_va`** (default on **`create`**, holdings **added together**) vs strict **`wallet_and_va`**. Confirm the bot has **`Manage Roles`** OAuth / channel permissions and ranks **above** the role being managed.
 
-See **[NFT Role Verification](nft-role-verification.md)** for eligibility modes, Supabase migration, and **`rule-id`**-only **`create`** for quick eligibility tweaks.
+See **[NFT Role Verification](nft-role-verification.md)** for eligibility modes, Supabase migration, and updating an existing rule in place via **`create`** + **`rule-id`** (change the notification channel, collections, thresholds, or eligibility without recreating it).
 
 ***
 

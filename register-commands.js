@@ -1753,7 +1753,7 @@ const commands = [
                     },
                     {
                         name: 'eligibility',
-                        description: 'Wallet vs VA (default: wallet OR Virtual Account). Used on create + when updating rule-id.',
+                        description: 'Wallet vs VA (default: combined holdings). Used on create + when updating rule-id.',
                         type: ApplicationCommandOptionType.String,
                         required: false,
                         choices: [
@@ -1762,7 +1762,7 @@ const commands = [
                                 value: 'wallet_and_va'
                             },
                             {
-                                name: 'Linked wallet OR Virtual Account (recommended for hodlers)',
+                                name: 'Wallet + VA combined (recommended for hodlers)',
                                 value: 'wallet_or_va'
                             },
                             { name: 'Linked wallet (MvX) only — ignore VA counts', value: 'wallet_only' },

@@ -14,20 +14,20 @@ Each rule has an **`eligibility_mode`** (`wallet_and_va`, `wallet_or_va`, `walle
 | Mode | Meaning |
 | --- | --- |
 | **`wallet_and_va`** | MvX-linked wallet **and** Virtual Account must satisfy the collection rule. |
-| **`wallet_or_va`** *(default on **slash create**, recommended)* | Satisfy **either** the MvX wallet leg **or** the VA leg. If VA already qualifies, the bot **skips MvX paging** for that member (fewer API calls). |
+| **`wallet_or_va`** *(default on **slash create**, recommended)* | **Wallet and VA counts are added together** per collection (e.g. 218 on-chain + 35 staked in VA = 253). If VA **alone** already meets the minimum, the bot **skips MvX paging** for that member (fewer API calls). |
 | **`wallet_only`** | Only the linked wallet (MvX) counts; VA is ignored. |
 | **`va_only`** | Only VA (Supabase) counts; MvX is not queried. |
 
-**Match mode (`any` / `all`)** and **minimum count per collection** apply **per leg that runs** — e.g. with `wallet_or_va`, the member passes if **either** leg meets the thresholds.
+**Match mode (`any` / `all`)** and **minimum count per collection** apply to the counts used for that mode. With **`wallet_or_va`**, the threshold is applied to **wallet + VA combined** per ticker (a split holding that only totals over the min still qualifies). With **`wallet_and_va`**, each source must meet the threshold **on its own**.
 
-Legacy rows keep DB default **`wallet_and_va`** unless you patch them via **`create`** → **`rule-id`** (below).
+Legacy rows keep DB default **`wallet_and_va`** unless you update them via **`create`** → **`rule-id`** (below).
 
 ## Wallet vs Virtual Account legs
 
 1. **Wallet (MvX)** — Uses `/set-wallet` for the Discord user. Counts NFTs/SFTs via [MultiversX API](https://api.multiversx.com) `/accounts/{address}/nfts?collections=...`. Requests are paced with backoff on 429/5xx. **If MvX cannot be verified** for a decision that depends on the wallet leg, that member may be left **unchanged**. Collection matching is **ASCII case-insensitive**.
 2. **Virtual Account** — Uses Supabase NFT VA balances (**staked** counts; excludes balance fully locked in **active listing/auction** when applicable logic runs).
 
-Notifications and diag embeds show which legs were evaluated and ✅/❌ per collection ticker.
+Notifications and diag embeds show wallet vs VA counts (and a **Combined** total for **`wallet_or_va`**) with ✅/❌ per collection ticker.
 
 ## Who is checked
 
@@ -55,19 +55,19 @@ All subcommands are under **`/nft-role-verification`**.
 
 **New rule** — Provide **`role`**, **`notification-channel`**, **`collections`**, optional **`match-mode`**, **`min-count`**, and **`eligibility`**. Slash default for **`eligibility`** is **`wallet_or_va`** (both strict still available via explicit choice).
 
-**Update eligibility only** — Set **`rule-id`** (autocomplete); set **`eligibility`** to the new mode and **omit** role, notification channel, and collections. Saves one subcommand versus recreating rules.
+**Update an existing rule** — Set **`rule-id`** (autocomplete), then supply **only** the field(s) you want to change: any of **`role`**, **`notification-channel`**, **`collections`**, **`match-mode`**, **`min-count`**, or **`eligibility`**. Fields you omit are left untouched, and the reply lists exactly what changed. Saves recreating rules just to move a channel or tweak a threshold.
 
 Confirmation embed posts to the channel only on **new** rule creation.
 
 **Parameters**
 
-- `rule-id` (optional) — If set: **updates eligibility** for this rule UUID (use **autocomplete**). Other create fields omitted.
-- `role` — Required **unless** patching via `rule-id` only.
-- `notification-channel` — Required **unless** patching via `rule-id` only.
-- `collections` — Required **unless** patching via `rule-id` only.
-- `match-mode` (optional) — `any` (default) or `all` (creates only).
-- `min-count` (optional) — Minimum NFT count per collection (integer ≥ 1, default `1`, creates only).
-- `eligibility` (optional, default **`wallet_or_va`** on create / patch path) — `wallet_and_va`, `wallet_or_va`, `wallet_only`, or `va_only`.
+- `rule-id` (optional) — If set: **updates** this rule UUID (use **autocomplete**). Provide any subset of the fields below to change them; omitted fields are unchanged.
+- `role` — Required **when creating**; optional when updating via `rule-id`.
+- `notification-channel` — Required **when creating**; optional when updating via `rule-id`. Changing it reroutes future setup/sync notifications to the new channel.
+- `collections` — Required **when creating**; optional when updating via `rule-id`.
+- `match-mode` (optional) — `any` (default) or `all`.
+- `min-count` (optional) — Minimum NFT count per collection (integer ≥ 1, default `1`).
+- `eligibility` (optional, default **`wallet_or_va`** on create; only changed on update when explicitly provided) — `wallet_and_va`, `wallet_or_va` (wallet + VA **summed** per collection), `wallet_only`, or `va_only`.
 
 ### `list`
 
@@ -105,7 +105,9 @@ Runs the verification sync **immediately** for the **current server** (useful af
 
 ## Operational tips
 
-- For **on-wallet-only** holders without VA inventory mirrored in Supabase, use **`wallet_or_va`** or **`wallet_only`**.
+- For **on-wallet-only** holders without VA inventory mirrored in Supabase, use **`wallet_or_va`** or **`wallet_only`**. **`wallet_or_va`** also covers split holdings (part on-chain, part in VA).
 - **`wallet_and_va`** is strict; if VA is wrong or stale, deserving members will not be granted roles.
 - MvX-linked **wallet counts** still require **`/set-wallet`** for that Discord user unless the rule is **`va_only`**.
-- Run **`run-now`** after changing **`eligibility_mode`** (**`create`** with **`rule-id`**) so grants catch up faster than the daily job.
+- Wallet collection counts are **cached for the duration of a sync run**, so Dolphin/Shark/Whale-style rules on the same ticker do not each re-page the MultiversX API for the same address.
+- VA inventory queries **page past Supabase’s 1000-row default**, so large guild inventories are not silently truncated.
+- Run **`run-now`** after updating a rule (**`create`** with **`rule-id`** — e.g. changing **`eligibility_mode`**, collections, or thresholds) so grants catch up faster than the daily job.

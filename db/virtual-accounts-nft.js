@@ -77,28 +77,54 @@ function getWithdrawBlockReason(nft, stakedKeys, activeListings, activeAuctions)
 
 const NFT_BALANCE_LEAN_COLUMNS = 'guild_id,user_id,collection,nonce,amount,identifier,nft_name,nft_image_url,staked,created_at,updated_at';
 
+/** PostgREST/Supabase returns at most 1000 rows unless ranged. */
+const SUPABASE_PAGE_SIZE = 1000;
+
+/**
+ * Load every matching row. `makeQuery` must return a fresh builder each call; `.range()` is applied here.
+ * @param {() => object} makeQuery
+ * @returns {Promise<any[]>}
+ */
+async function fetchAllSupabaseRows(makeQuery) {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await makeQuery().range(from, from + SUPABASE_PAGE_SIZE - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    rows.push(...data);
+    if (data.length < SUPABASE_PAGE_SIZE) break;
+    from += SUPABASE_PAGE_SIZE;
+  }
+  return rows;
+}
+
 async function getUserNFTBalances(guildId, userId, collection = null, includeStaked = false, options = {}) {
   try {
     const includeMetadata = options.includeMetadata === true;
-    let query = supabase
-      .from('virtual_account_nft_balances')
-      .select(includeMetadata ? '*' : NFT_BALANCE_LEAN_COLUMNS)
-      .eq('guild_id', guildId)
-      .eq('user_id', userId);
-    
-    // By default, exclude staked NFTs (only show available NFTs)
-    if (!includeStaked) {
-      query = query.eq('staked', false);
-    }
-    
-    if (collection) {
-      query = query.eq('collection', collection);
-    }
-    
-    const { data, error } = await query.order('collection', { ascending: true }).order('nft_name', { ascending: true });
-    
-    if (error) throw error;
-    return data || [];
+    const makeQuery = () => {
+      let query = supabase
+        .from('virtual_account_nft_balances')
+        .select(includeMetadata ? '*' : NFT_BALANCE_LEAN_COLUMNS)
+        .eq('guild_id', guildId)
+        .eq('user_id', userId);
+
+      // By default, exclude staked NFTs (only show available NFTs)
+      if (!includeStaked) {
+        query = query.eq('staked', false);
+      }
+
+      if (collection) {
+        query = query.eq('collection', collection);
+      }
+
+      return query
+        .order('collection', { ascending: true })
+        .order('nft_name', { ascending: true })
+        .order('nonce', { ascending: true });
+    };
+
+    return await fetchAllSupabaseRows(makeQuery);
   } catch (error) {
     console.error('[DB] Error getting user NFT balances:', error);
     throw error;
@@ -210,30 +236,41 @@ async function batchCountEligibleVirtualInventoryForRoleRule(guildId, userIds, c
   const listings = [];
   for (let i = 0; i < userIdList.length; i += CHUNK) {
     const chunk = userIdList.slice(i, i + CHUNK);
-    const { data: balChunk, error: balErr } = await supabase
-      .from('virtual_account_nft_balances')
-      .select('user_id,collection,nonce,amount')
-      .eq('guild_id', guildId)
-      .in('user_id', chunk);
-    if (balErr) throw balErr;
-    if (balChunk) balances.push(...balChunk);
+    const balChunk = await fetchAllSupabaseRows(() =>
+      supabase
+        .from('virtual_account_nft_balances')
+        .select('user_id,collection,nonce,amount')
+        .eq('guild_id', guildId)
+        .in('user_id', chunk)
+        .order('user_id', { ascending: true })
+        .order('collection', { ascending: true })
+        .order('nonce', { ascending: true })
+    );
+    balances.push(...balChunk);
 
-    const { data: listChunk, error: listErr } = await supabase
-      .from('nft_listings')
-      .select('seller_id,collection,nonce,amount,status')
-      .eq('guild_id', guildId)
-      .eq('status', 'ACTIVE')
-      .in('seller_id', chunk);
-    if (listErr) throw listErr;
-    if (listChunk) listings.push(...listChunk);
+    const listChunk = await fetchAllSupabaseRows(() =>
+      supabase
+        .from('nft_listings')
+        .select('seller_id,collection,nonce,amount,status')
+        .eq('guild_id', guildId)
+        .eq('status', 'ACTIVE')
+        .in('seller_id', chunk)
+        .order('seller_id', { ascending: true })
+        .order('collection', { ascending: true })
+        .order('nonce', { ascending: true })
+    );
+    listings.push(...listChunk);
   }
 
-  const { data: auctions, error: aucErr } = await supabase
-    .from('auctions')
-    .select('creator_id,seller_id,collection,nft_nonce,amount,status')
-    .eq('guild_id', guildId)
-    .eq('status', 'ACTIVE');
-  if (aucErr) throw aucErr;
+  const auctions = await fetchAllSupabaseRows(() =>
+    supabase
+      .from('auctions')
+      .select('creator_id,seller_id,collection,nft_nonce,amount,status')
+      .eq('guild_id', guildId)
+      .eq('status', 'ACTIVE')
+      .order('collection', { ascending: true })
+      .order('nft_nonce', { ascending: true })
+  );
 
   const listingsByUser = new Map();
   for (const row of listings) {
@@ -280,11 +317,13 @@ async function batchCountEligibleVirtualInventoryForRoleRule(guildId, userIds, c
 
 async function getDistinctUserIdsWithNftBalances(guildId) {
   try {
-    const { data, error } = await supabase
-      .from('virtual_account_nft_balances')
-      .select('user_id')
-      .eq('guild_id', guildId);
-    if (error) throw error;
+    const data = await fetchAllSupabaseRows(() =>
+      supabase
+        .from('virtual_account_nft_balances')
+        .select('user_id')
+        .eq('guild_id', guildId)
+        .order('user_id', { ascending: true })
+    );
     const ids = [...new Set((data || []).map(r => r.user_id).filter(Boolean))];
     return ids;
   } catch (error) {

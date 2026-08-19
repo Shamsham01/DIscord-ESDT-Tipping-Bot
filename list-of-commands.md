@@ -24,13 +24,13 @@ See **[On-Chain Subscription Plan](on-chain-subscription.md)** for pricing, requ
 
 ## 🪪 NFT role verification (Admins)
 
-- **/nft-role-verification create** — Create rule (role + notification channel + collections; optional eligibility, default **wallet_or_va**) **or** update eligibility only with optional **rule-id** + eligibility. Confirmation embed posts on new rules only.
+- **/nft-role-verification create** — Create rule (role + notification channel + collections; optional eligibility, default **wallet_or_va**) **or** update an existing rule by passing **rule-id** plus any field(s) to change (role, notification channel, collections, match-mode, min-count, eligibility). Confirmation embed posts on new rules only.
 - **/nft-role-verification list** — List rules (UUIDs) and toggle enabled/disabled via select menu (up to 25 rules).
 - **/nft-role-verification delete** — Delete a rule by UUID (`rule-id`); **autocomplete** lists rules as `RoleName · first8…last8`.
 - **/nft-role-verification toggle** — Enable or disable a rule by UUID; same **autocomplete** as delete.
 - **/nft-role-verification run-now** — Run eligibility sync immediately for this server (all enabled rules, or optional **rule-id** for one rule; MvX + VA diagnostics when applicable).
 
-Each rule configures how **linked-wallet** MvX holdings and **Virtual Account** NFT inventory combine (default **`wallet_or_va`** on **`create`**). See **[NFT Role Verification](nft-role-verification.md)**. A **daily** job applies grants/removals as well.
+Each rule configures how **linked-wallet** MvX holdings and **Virtual Account** NFT inventory combine (default **`wallet_or_va`** on **`create`** sums both sources per collection). See **[NFT Role Verification](nft-role-verification.md)**. A **daily** job applies grants/removals as well.
 
 ---
 

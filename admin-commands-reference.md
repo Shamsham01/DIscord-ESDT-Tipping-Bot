@@ -505,16 +505,16 @@ Rules tie a **role** to MultiversX **NFT collections** with configurable **eligi
 
 **New rule**: `/nft-role-verification create role notification-channel collections [match-mode] [min-count] [eligibility]`
 
-**Patch eligibility only**: `/nft-role-verification create rule-id:<uuid> [eligibility]` (omit role, channel, collections)
+**Update a rule**: `/nft-role-verification create rule-id:<uuid> [role] [notification-channel] [collections] [match-mode] [min-count] [eligibility]` (supply only the fields you want to change)
 
 **Parameters**:
-- `rule-id` (Optional): UUID — autocomplete. If **set**, updates **only** `eligibility_mode` on that rule (`eligibility` defaults to **`wallet_or_va`** unless you pick otherwise).
+- `rule-id` (Optional): UUID — autocomplete. If **set**, updates that rule using whichever fields you also provide (e.g. `notification-channel`, `role`, `collections`, `match-mode`, `min-count`, `eligibility`). Omitted fields are left unchanged; the reply lists what changed.
 - `role` — Required **when creating** — Discord role to grant when eligible
 - `notification-channel` — Required **when creating** — channel for setup confirmation and sync notices
 - `collections` — Required **when creating** — comma-separated collection tickers
 - `match-mode` (Optional): `any` (default) or `all`
 - `min-count` (Optional): Minimum count per collection (default `1`)
-- `eligibility` (Optional): Slash default **`wallet_or_va`**; alternatives `wallet_and_va`, `wallet_only`, `va_only`
+- `eligibility` (Optional): Slash default **`wallet_or_va`** on create (wallet + VA **counts are summed** per collection). On update it changes only when you explicitly pick a value. Alternatives `wallet_and_va`, `wallet_only`, `va_only`
 
 After inserting a **new** rule, the bot posts a confirmation embed in the notification channel.
 

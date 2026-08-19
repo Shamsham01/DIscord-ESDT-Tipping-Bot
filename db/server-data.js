@@ -21,17 +21,25 @@ async function getUserWallet(guildId, userId) {
 
 async function getUserWallets(guildId) {
   try {
-    const { data, error } = await supabase
-      .from('user_wallets')
-      .select('user_id, wallet_address')
-      .eq('guild_id', guildId);
-    
-    if (error) throw error;
-    
     const wallets = {};
-    (data || []).forEach(row => {
-      wallets[row.user_id] = row.wallet_address;
-    });
+    const pageSize = 1000;
+    let from = 0;
+    for (;;) {
+      const { data, error } = await supabase
+        .from('user_wallets')
+        .select('user_id, wallet_address')
+        .eq('guild_id', guildId)
+        .order('user_id', { ascending: true })
+        .range(from, from + pageSize - 1);
+
+      if (error) throw error;
+      if (!data || data.length === 0) break;
+      data.forEach(row => {
+        wallets[row.user_id] = row.wallet_address;
+      });
+      if (data.length < pageSize) break;
+      from += pageSize;
+    }
     return wallets;
   } catch (error) {
     console.error('[DB] Error getting user wallets:', error);
