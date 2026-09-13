@@ -76,7 +76,7 @@ if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
 const { Client, IntentsBitField, EmbedBuilder, PermissionsBitField, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags, ChannelType, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const BigNumber = require('bignumber.js');
-const { fetchMultiversXNftDisplayState, normalizeNftMediaUrlForDiscord } = require('./utils/multiversx-nft-display');
+const { fetchMultiversXNftDisplayState, normalizeNftMediaUrlForDiscord, resolveNftEmbedImage, resolveNftImageFromApiPayload } = require('./utils/multiversx-nft-display');
 
 // Import virtual accounts and blockchain listener
 const virtualAccounts = require('./virtual-accounts.js');
@@ -2761,7 +2761,7 @@ async function tryRestoreNftToVirtualAccount(guildId, userId, collection, nftRec
       nonce,
       {
         nft_name: nftRecord.nft_name,
-        nft_image_url: nftRecord.nft_image_url,
+        nft_image_url: normalizeNftMediaUrlForDiscord(nftRecord.nft_image_url) || nftRecord.nft_image_url,
         metadata: nftRecord.metadata
       },
       amount,
@@ -4488,15 +4488,8 @@ client.on('interactionCreate', async (interaction) => {
           ? `[${transferResult.txHash}](${explorerUrl})`
           : 'Not available';
 
-        // Extract NFT image URL from API response
-        let nftImageUrl = null;
-        if (nftDetails.url) {
-          nftImageUrl = nftDetails.url;
-        } else if (nftDetails.media && nftDetails.media.length > 0 && nftDetails.media[0].url) {
-          nftImageUrl = nftDetails.media[0].url;
-        } else if (nftDetails.media && nftDetails.media.length > 0 && nftDetails.media[0].thumbnailUrl) {
-          nftImageUrl = nftDetails.media[0].thumbnailUrl;
-        }
+        // Extract NFT image URL from API response (IPFS fallback when indexer metadata times out)
+        const nftImageUrl = await resolveNftImageFromApiPayload(nftDetails);
 
         const successEmbed = new EmbedBuilder()
           .setTitle('NFT Transfer Successful')
@@ -10457,7 +10450,7 @@ client.on('interactionCreate', async (interaction) => {
         tokenType: listingTokenType,
         nftName: nft.nft_name,
         // Persist API-resolved URL (same as embed), not only raw balance field — updates rely on this
-        nftImageUrl: nftImageUrl || nft.nft_image_url || null,
+        nftImageUrl: nftImageUrl || normalizeNftMediaUrlForDiscord(nft.nft_image_url) || null,
         title: title,
         description: description,
         priceTokenIdentifier: tokenIdentifier,
@@ -10736,7 +10729,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Transaction Hash', value: txHashFieldValue, inline: false }
           ])
           .setColor(0x00FF00)
-          .setThumbnail(nft.nft_image_url || 'https://i.ibb.co/FkZdFMPz/NFT-Wallet-Logo.png')
+          .setThumbnail((await resolveNftEmbedImage(nft, collection)) || 'https://i.ibb.co/FkZdFMPz/NFT-Wallet-Logo.png')
           .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
           .setTimestamp();
         
@@ -12346,6 +12339,8 @@ client.on('interactionCreate', async (interaction) => {
         const communityFundProjectName = getCommunityFundProjectName();
         const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
         
+        const nftImageUrl = await resolveNftEmbedImage(nftBalance, collection) || projectLogoUrl;
+
         const embed = new EmbedBuilder()
           .setTitle(`🖼️ ${tokenType} Tip Sent!`)
           .setDescription(`Successfully tipped **${nftDisplayName}${amountText}** (${collection}#${nonce}) to ${targetUser ? `<@${targetUserId}>` : userTag}`)
@@ -12356,7 +12351,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: '📝 Memo', value: memo, inline: false }
           ])
           .setColor('#00FF00')
-          .setThumbnail(nftBalance.nft_image_url || projectLogoUrl)
+          .setThumbnail(nftImageUrl)
           .setTimestamp()
           .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
         
@@ -12375,7 +12370,7 @@ client.on('interactionCreate', async (interaction) => {
                 { name: '📝 Memo', value: memo, inline: false }
               ])
               .setColor('#00FF00')
-              .setThumbnail(nftBalance.nft_image_url || projectLogoUrl)
+              .setThumbnail(nftImageUrl)
               .setTimestamp()
               .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
             
@@ -22259,7 +22254,7 @@ client.on('interactionCreate', async (interaction) => {
             identifier: nft.identifier,
             nonce: nft.nonce,
             nftName: nft.nft_name,
-            nftImageUrl: nft.nft_image_url,
+            nftImageUrl: normalizeNftMediaUrlForDiscord(nft.nft_image_url) || nft.nft_image_url,
             lockUntil: null // No lock period
           });
           
@@ -22832,7 +22827,7 @@ client.on('interactionCreate', async (interaction) => {
         
         // Set thumbnail if available
         if (thumbnailUrl) {
-          successEmbed.setThumbnail(thumbnailUrl);
+          successEmbed.setThumbnail(normalizeNftMediaUrlForDiscord(thumbnailUrl) || thumbnailUrl);
         } else {
           successEmbed.setThumbnail('https://i.ibb.co/FkZdFMPz/NFT-Wallet-Logo.png');
         }
@@ -25857,7 +25852,7 @@ async function createStakingPoolEmbed(guildId, pool) {
     }
     
     if (thumbnailUrl) {
-      embed.setThumbnail(thumbnailUrl);
+      embed.setThumbnail(normalizeNftMediaUrlForDiscord(thumbnailUrl) || thumbnailUrl);
     }
     
     // Current Supply Balance
@@ -28339,7 +28334,7 @@ async function forwardAuctionToSubscribers(sourceGuildId, auctionId) {
       .setFooter({ text: 'Aggregated Activity • Click to view original', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
     
     if (auction.nftImageUrl) {
-      forwardEmbed.setThumbnail(auction.nftImageUrl);
+      forwardEmbed.setThumbnail(normalizeNftMediaUrlForDiscord(auction.nftImageUrl) || auction.nftImageUrl);
     }
     
     // Forward to each subscription (excluding source guild)
@@ -30105,74 +30100,9 @@ async function getAuctions(guildId) {
 }
 
 // Check if auction is expired
-// Helper function to extract NFT image URL with robust fallback strategy
+// Helper function to extract NFT image URL with IPFS fallback when the indexer has no metadata
 async function extractNFTImageUrl(nftDetails, storedImageUrl = null) {
-  // Helper function to convert IPFS URL to HTTP gateway URL
-  const convertIPFSToGateway = (ipfsUrl) => {
-    if (!ipfsUrl) return ipfsUrl;
-    if (ipfsUrl.startsWith('ipfs://')) {
-      const ipfsHash = ipfsUrl.replace('ipfs://', '');
-      return `https://ipfs.io/ipfs/${ipfsHash}`;
-    }
-    return ipfsUrl;
-  };
-  
-  let nftImageUrl = storedImageUrl;
-  
-  // Convert stored image URL if it's IPFS
-  if (nftImageUrl && nftImageUrl.startsWith('ipfs://')) {
-    nftImageUrl = convertIPFSToGateway(nftImageUrl);
-  }
-  
-  // If we have nftDetails from API, use the robust fallback strategy
-  if (nftDetails) {
-    // Decode URIs array to get IPFS URLs (standard MultiversX format)
-    let ipfsImageUrl = null;
-    if (nftDetails.uris && Array.isArray(nftDetails.uris) && nftDetails.uris.length > 0) {
-      for (const uri of nftDetails.uris) {
-        try {
-          const decodedUri = Buffer.from(uri, 'base64').toString('utf-8');
-          if (decodedUri.includes('.png') || decodedUri.includes('.jpg') || decodedUri.includes('.jpeg') || decodedUri.includes('.gif') || decodedUri.includes('.webp')) {
-            ipfsImageUrl = decodedUri;
-            break;
-          }
-        } catch (uriError) {
-          // Ignore decode errors
-        }
-      }
-    }
-    
-    // Update image URL if available from API - check multiple sources
-    if (nftDetails.url && !nftDetails.url.includes('default.png')) {
-      nftImageUrl = convertIPFSToGateway(nftDetails.url);
-    } else if (ipfsImageUrl) {
-      nftImageUrl = convertIPFSToGateway(ipfsImageUrl);
-    } else if (nftDetails.media && nftDetails.media.length > 0) {
-      const mediaUrl = nftDetails.media[0].url || nftDetails.media[0].thumbnailUrl;
-      if (mediaUrl && !mediaUrl.includes('default.png')) {
-        nftImageUrl = convertIPFSToGateway(mediaUrl);
-      }
-    }
-    
-    // Also check for image in metadata
-    if (!nftImageUrl && nftDetails.metadata) {
-      try {
-        if (typeof nftDetails.metadata === 'string') {
-          const decoded = Buffer.from(nftDetails.metadata, 'base64').toString('utf-8');
-          const parsed = JSON.parse(decoded);
-          if (parsed.image) {
-            nftImageUrl = convertIPFSToGateway(parsed.image);
-          }
-        } else if (typeof nftDetails.metadata === 'object' && nftDetails.metadata.image) {
-          nftImageUrl = convertIPFSToGateway(nftDetails.metadata.image);
-        }
-      } catch (metaError) {
-        // Ignore metadata parsing errors for image
-      }
-    }
-  }
-  
-  return nftImageUrl;
+  return resolveNftImageFromApiPayload(nftDetails, storedImageUrl);
 }
 
 function isAuctionExpired(auction) {
@@ -30556,23 +30486,21 @@ async function updateAuctionEmbed(guildId, auctionId) {
       .setTimestamp(new Date(auction.endTime))
       .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' });
 
-    // Fetch NFT details from API for better image URL resolution
     let nftImageUrl = auction.nftImageUrl;
     if (auction.nftIdentifier) {
       try {
-        const nftApiUrl = `https://api.multiversx.com/nfts/${auction.nftIdentifier}`;
-        const nftResponse = await fetch(nftApiUrl);
-        if (nftResponse.ok) {
-          const nftDetails = await nftResponse.json();
-          nftImageUrl = await extractNFTImageUrl(nftDetails, auction.nftImageUrl);
-        }
+        const display = await fetchMultiversXNftDisplayState(
+          { identifier: auction.nftIdentifier, nft_image_url: auction.nftImageUrl, metadata: {} },
+          auction.collection
+        );
+        nftImageUrl = display.imageUrl || auction.nftImageUrl;
       } catch (error) {
         console.error(`[AUCTIONS] Error fetching NFT details for auction update: ${error.message}`);
-        // Use stored image URL as fallback
         nftImageUrl = auction.nftImageUrl;
       }
     }
     
+    nftImageUrl = normalizeNftMediaUrlForDiscord(nftImageUrl);
     if (nftImageUrl) {
       auctionEmbed.setImage(nftImageUrl);
     } else {
@@ -30963,7 +30891,7 @@ async function processAuctionClosure(guildId, auctionId) {
       }
 
       if (auction.nftImageUrl) {
-        successEmbed.setThumbnail(auction.nftImageUrl);
+        successEmbed.setThumbnail(normalizeNftMediaUrlForDiscord(auction.nftImageUrl) || auction.nftImageUrl);
       }
 
       await message.reply({ embeds: [successEmbed] });
@@ -31005,7 +30933,7 @@ async function processAuctionClosure(guildId, auctionId) {
           }
 
           if (auction.nftImageUrl) {
-            dmEmbed.setImage(auction.nftImageUrl);
+            dmEmbed.setImage(normalizeNftMediaUrlForDiscord(auction.nftImageUrl) || auction.nftImageUrl);
           }
 
           await winnerUser.send({ embeds: [dmEmbed] });

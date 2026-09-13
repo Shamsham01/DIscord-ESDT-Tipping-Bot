@@ -1,5 +1,7 @@
 const fetch = require('node-fetch');
 const BigNumber = require('bignumber.js');
+const { resolveNftJsonMetadata, pickNftImageUrl } = require('./utils/ipfs-json');
+const { normalizeNftMediaUrlForDiscord } = require('./utils/multiversx-nft-display');
 
 // Import virtual accounts functions
 let virtualAccounts;
@@ -736,7 +738,7 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
     
     console.log(`[BLOCKCHAIN] Found user ${userId} for wallet ${senderWallet} in guild ${guildId}`);
     
-    // Fetch NFT metadata from MultiversX API with rate limiting
+    // Fetch NFT metadata from MultiversX API, then IPFS JSON when the indexer timed out
     let nftMetadata = {
       nft_name: null,
       nft_image_url: null,
@@ -750,20 +752,16 @@ async function processNFTDeposit(guildId, senderWallet, receiverWallet, collecti
       if (nftResponse.ok) {
         const nftData = await nftResponse.json();
         nftMetadata.nft_name = nftData.name || null;
-        
-        // Extract image URL
-        if (nftData.url) {
-          nftMetadata.nft_image_url = nftData.url;
-        } else if (nftData.media && nftData.media.length > 0) {
-          nftMetadata.nft_image_url = nftData.media[0].url || nftData.media[0].thumbnailUrl || null;
-        }
-        
-        // Store additional metadata
+
+        const resolved = await resolveNftJsonMetadata(nftData);
+        const imageUrl = pickNftImageUrl(nftData, resolved.image);
+        nftMetadata.nft_image_url = normalizeNftMediaUrlForDiscord(imageUrl);
+
         nftMetadata.metadata = {
           collection: nftData.collection || collection,
           creator: nftData.creator || null,
           royalties: nftData.royalties || null,
-          attributes: nftData.attributes || []
+          attributes: resolved.attributes || []
         };
       }
     } catch (fetchError) {

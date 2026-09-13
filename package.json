@@ -20,11 +20,15 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
+    "@ipld/car": "^5.4.7",
     "@multiversx/sdk-core": "^15.3.0",
     "@supabase/supabase-js": "^2.39.0",
     "bignumber.js": "^9.3.1",
+    "blockstore-core": "^7.0.1",
     "discord.js": "^14.14.1",
     "dotenv": "^16.3.1",
+    "ipfs-unixfs-exporter": "^16.2.2",
+    "multiformats": "^14.0.5",
     "node-fetch": "^2.7.0",
     "pg": "^8.16.3",
     "qrcode": "^1.5.4"

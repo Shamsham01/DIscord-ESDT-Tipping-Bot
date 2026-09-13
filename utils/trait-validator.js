@@ -1,4 +1,5 @@
 const nftMetadataCache = require('../db/nft-metadata-cache');
+const { buildNftIdentifier } = require('./ipfs-json');
 
 /**
  * Validate NFT traits against pool filters
@@ -19,7 +20,6 @@ async function validateNFTTraits(guildId, userId, collection, nonce, traitFilter
     // Get NFT metadata (from cache or API)
     const attributes = await nftMetadataCache.getNFTMetadata(collection, nonce);
     
-    // If metadata is missing or empty, reject
     if (!attributes || !Array.isArray(attributes) || attributes.length === 0) {
       return {
         valid: false,
@@ -94,7 +94,7 @@ async function validateMultipleNFTs(guildId, userId, nfts, traitFilters) {
     // Use identifier from nft if available, otherwise construct it
     const nftsWithIdentifiers = nfts.map(nft => ({
       ...nft,
-      identifier: nft.identifier || `${nft.collection}-${nft.nonce.toString().padStart(4, '0')}`
+      identifier: buildNftIdentifier(nft.collection, nft.nonce, nft.identifier)
     }));
     
     const metadataMap = await nftMetadataCache.getNFTMetadataBatch(nftsWithIdentifiers);
@@ -105,8 +105,7 @@ async function validateMultipleNFTs(guildId, userId, nfts, traitFilters) {
     for (const nft of nftsWithIdentifiers) {
       const attributes = metadataMap[nft.identifier];
       
-      // If metadata fetch failed
-      if (!attributes) {
+      if (!attributes || !Array.isArray(attributes) || attributes.length === 0) {
         invalidNFTs.push({
           nft: nft,
           reason: `Failed to fetch NFT metadata for ${nft.identifier}`
