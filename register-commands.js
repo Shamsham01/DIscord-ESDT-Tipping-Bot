@@ -1693,7 +1693,7 @@ const commands = [
     },
     {
         name: 'nft-role-verification',
-        description: 'Admin: grant roles based on NFT rules (MvX wallet and/or VA; daily sync)',
+        description: 'Admin: grant roles based on NFT rules (wallet and/or VA; 24h spread sync)',
         options: [
             {
                 type: ApplicationCommandOptionType.Subcommand,

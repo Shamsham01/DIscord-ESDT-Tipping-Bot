@@ -30,7 +30,7 @@ See **[On-Chain Subscription Plan](on-chain-subscription.md)** for pricing, requ
 - **/nft-role-verification toggle** — Enable or disable a rule by UUID; same **autocomplete** as delete.
 - **/nft-role-verification run-now** — Run eligibility sync immediately for this server (all enabled rules, or optional **rule-id** for one rule; MvX + VA diagnostics when applicable).
 
-Each rule configures how **linked-wallet** MvX holdings and **Virtual Account** NFT inventory combine (default **`wallet_or_va`** on **`create`** sums both sources per collection). See **[NFT Role Verification](nft-role-verification.md)**. A **daily** job applies grants/removals as well.
+Each rule configures how **linked-wallet** holdings and **Virtual Account** NFT inventory combine (default **`wallet_or_va`** on **`create`** sums both sources per collection). See **[NFT Role Verification](nft-role-verification.md)**. Automated mode spreads checks evenly over **24 hours**; **`run-now`** still applies immediately.
 
 ---
 

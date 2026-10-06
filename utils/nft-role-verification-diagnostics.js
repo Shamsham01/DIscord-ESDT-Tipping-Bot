@@ -100,24 +100,24 @@ function formatNftRuleMemberDiag(opts) {
 
   let walletSection;
   if (emode === 'va_only') {
-    walletSection = '**Wallet** (MvX API): _(not evaluated — VA-only eligibility rule)._';
+    walletSection = '**Wallet** (OOX): _(not evaluated — VA-only eligibility rule)._';
   } else if (emode === 'wallet_or_va' && vaPass && !walletFetched) {
     walletSection =
-      '**Wallet** (MvX API): _(not consulted — VA leg already qualifies; **wallet-or-Virtual-Account** mode)._';
+      '**Wallet** (OOX): _(not consulted — VA leg already qualifies; **wallet-or-Virtual-Account** mode)._';
   } else if (!hasLinked && walletLinkageRequired) {
     walletSection = [
-      `**Wallet** (MvX API): ⚠️ \`erd1\` wallet not linked via \`/set-wallet\` — treated as zero — leg ❌`,
+      `**Wallet** (OOX): ⚠️ \`erd1\` wallet not linked via \`/set-wallet\` — treated as zero — leg ❌`,
       `└ Collections: ${formatCollectionMarks(tickers, {}, min)}`
     ].join('\n');
   } else if (!hasLinked && !walletLinkageRequired) {
     walletSection =
-      '**Wallet** (MvX API): _(skipped — VA satisfied under wallet-or-VA mode; MvX counts not needed)._';
+      '**Wallet** (OOX): _(skipped — VA satisfied under wallet-or-VA mode; wallet counts not needed)._';
   } else if (hasLinked && !walletLegVerified) {
     walletSection =
-      `**Wallet** (MvX API): ⚠️ could not verify (rate limit/error) — **no role change applied for this member in this pass**`;
+      `**Wallet** (OOX): ⚠️ could not verify (rate limit/error) — **no role change applied for this member in this pass**`;
   } else {
     walletSection = [
-      `**Wallet** (MvX API): leg ${walletPass ? '✅' : '❌'} · ${formatCollectionMarks(tickers, countsW, min)}`,
+      `**Wallet** (OOX): leg ${walletPass ? '✅' : '❌'} · ${formatCollectionMarks(tickers, countsW, min)}`,
       `└ Linked: \`${String(walletAddress)}\``
     ].join('\n');
   }

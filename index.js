@@ -27760,7 +27760,7 @@ async function handleHelpCommand(interaction, page = 1) {
           '🪪 NFT role verification': [
             '`/nft-role-verification create` 🔴 Admin — new rule (**role**, **notification-channel**, **collections**); default **eligibility** `wallet_or_va` (wallet + VA counts **added together**). Set **rule-id** + **eligibility** to patch an existing rule (omit other fields).',
             '`/nft-role-verification list` 🔴 • `delete` 🔴 • `toggle` 🔴 • `run-now` 🔴 — list UUIDs/toggle/disable rules or sync now (optional **rule-id** for one rule).',
-            'Bot needs **Manage Roles** OAuth/permission; bot role **above** roles it assigns. Daily sync applies grants/removals.'
+            'Bot needs **Manage Roles** OAuth/permission; bot role **above** roles it assigns. Automated sync spreads members evenly over 24 hours.'
           ],
           '🔧 Utilities & Debug': [
             '`/update-token-metadata` 🔴 Admin - Update token info',
@@ -28721,9 +28721,9 @@ client.on('ready', async () => {
   console.log('Lottery draw check scheduled (every minute)');
   console.log('Lottery embed update scheduled (every 10 minutes)');
   
-  // NFT role verification: wallet + VA dual check (daily; first run ~1m after ready)
+  // NFT role verification: wallet + VA dual check (spread evenly over 24h; first tick ~1m after ready)
   scheduleNftRoleVerificationSync(client);
-  console.log('NFT role verification sync scheduled (every 24 hours, hourly due check)');
+  console.log('NFT role verification sync scheduled (24h even spread, 10-minute ticks)');
 
   setInterval(async () => {
     try {

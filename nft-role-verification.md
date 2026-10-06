@@ -5,7 +5,7 @@ description: >-
 
 # NFT role verification
 
-Admins define **rules** that tie a **role** to MultiversX **NFT collections**. The bot runs on a **daily** schedule (and **`/nft-role-verification run-now`**) over **candidate members**.
+Admins define **rules** that tie a **role** to MultiversX **NFT collections**. Automated mode **spreads candidate members evenly across 24 hours** (a slice every **10 minutes**, both guilds sharing the same drip so they no longer all fire at once). **`/nft-role-verification run-now`** still checks the current server immediately.
 
 ## Eligibility modes (per rule)
 
@@ -14,7 +14,7 @@ Each rule has an **`eligibility_mode`** (`wallet_and_va`, `wallet_or_va`, `walle
 | Mode | Meaning |
 | --- | --- |
 | **`wallet_and_va`** | MvX-linked wallet **and** Virtual Account must satisfy the collection rule. |
-| **`wallet_or_va`** *(default on **slash create**, recommended)* | **Wallet and VA counts are added together** per collection (e.g. 218 on-chain + 35 staked in VA = 253). If VA **alone** already meets the minimum, the bot **skips MvX paging** for that member (fewer API calls). |
+| **`wallet_or_va`** *(default on **slash create**, recommended)* | **Wallet and VA counts are added together** per collection (e.g. 218 on-chain + 35 staked in VA = 253). If VA **alone** already meets the minimum, the bot **skips the wallet indexer** for that member (fewer API calls). |
 | **`wallet_only`** | Only the linked wallet (MvX) counts; VA is ignored. |
 | **`va_only`** | Only VA (Supabase) counts; MvX is not queried. |
 
@@ -24,7 +24,9 @@ Legacy rows keep DB default **`wallet_and_va`** unless you update them via **`cr
 
 ## Wallet vs Virtual Account legs
 
-1. **Wallet (MvX)** — Uses `/set-wallet` for the Discord user. Counts NFTs/SFTs via [MultiversX API](https://api.multiversx.com) `/accounts/{address}/nfts?collections=...`. Requests are paced with backoff on 429/5xx. **If MvX cannot be verified** for a decision that depends on the wallet leg, that member may be left **unchanged**. Collection matching is **ASCII case-insensitive**.
+1. **Wallet (OOX)** — Uses `/set-wallet` for the Discord user. Counts NFTs via [OOX](https://api.oox.art) `GET /accounts/{address}/collections/{ticker}` (one call per collection; includes marketplace custody attributed back to the owner). SFT/MetaESDT quantities still page NFT rows so nonce balances sum correctly. If OOX fails, the same collection-count endpoint on [MultiversX API](https://api.multiversx.com) is used. Requests are paced with backoff on 429/5xx. **If the wallet indexer cannot be verified** for a decision that depends on the wallet leg, that member may be left **unchanged**. Collection matching is **ASCII case-insensitive**.
+
+   Full collection **holder snapshots** (`/collections/{ticker}/holders`) are **not** used for role checks: that OOX endpoint always embeds every `nftIds` list, which is far heavier than per-user counts for Discord-sized candidate sets. There is no public OOX CLI/SDK npm package; the bot calls the REST API directly.
 2. **Virtual Account** — Uses Supabase NFT VA balances (**staked** counts; excludes balance fully locked in **active listing/auction** when applicable logic runs).
 
 Notifications and diag embeds show wallet vs VA counts (and a **Combined** total for **`wallet_or_va`**) with ✅/❌ per collection ticker.
@@ -45,7 +47,7 @@ When you **create** a rule, the bot posts a **confirmation embed** in the **noti
 
 On each **sync run**, the bot sends **batched embeds** to that same channel listing **grants** and **removals** (when there are changes).
 
-**Daily (scheduled) runs** also post a **completion summary embed** per rule (members checked, grants, removals, errors) even when nothing changed. Manual **`run-now`** replies to the admin ephemerally instead.
+**Automated (scheduled) cycles** also post a **completion summary embed** per rule when that rule’s 24-hour pass finishes (members checked, grants, removals, errors) even when nothing changed. Grant/removal embeds still post as members are checked during the day. Manual **`run-now`** replies to the admin ephemerally instead.
 
 ## Commands (Administrator only)
 
@@ -108,6 +110,7 @@ Runs the verification sync **immediately** for the **current server** (useful af
 - For **on-wallet-only** holders without VA inventory mirrored in Supabase, use **`wallet_or_va`** or **`wallet_only`**. **`wallet_or_va`** also covers split holdings (part on-chain, part in VA).
 - **`wallet_and_va`** is strict; if VA is wrong or stale, deserving members will not be granted roles.
 - MvX-linked **wallet counts** still require **`/set-wallet`** for that Discord user unless the rule is **`va_only`**.
-- Wallet collection counts are **cached for the duration of a sync run**, so Dolphin/Shark/Whale-style rules on the same ticker do not each re-page the MultiversX API for the same address.
+- Wallet collection counts are **cached for the duration of a tick / run-now**, so Dolphin/Shark/Whale-style rules on the same ticker do not each re-query OOX for the same address.
+- Automated mode processes about `ceil(candidates / 144)` members every 10 minutes (144 ticks per 24h), so two guilds no longer dump every wallet at the same instant. After a restart the drip still respects that budget (no stampede).
 - VA inventory queries **page past Supabase’s 1000-row default**, so large guild inventories are not silently truncated.
-- Run **`run-now`** after updating a rule (**`create`** with **`rule-id`** — e.g. changing **`eligibility_mode`**, collections, or thresholds) so grants catch up faster than the daily job.
+- Run **`run-now`** after updating a rule (**`create`** with **`rule-id`** — e.g. changing **`eligibility_mode`**, collections, or thresholds) so grants catch up immediately instead of waiting for that member’s next 24h slot.

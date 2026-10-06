@@ -333,7 +333,7 @@ async function handleNftRoleVerificationCommand(interaction, client) {
     const diagSections = [];
 
     if (revokeDiag.length > 0) {
-      const lines = [`**Removal diagnostics** (_Wallet_ = MultiversX API · _VA_ = Supabase)`];
+      const lines = [`**Removal diagnostics** (_Wallet_ = OOX collection count · _VA_ = Supabase)`];
       if (summary.revoked > revokeDiag.length) {
         lines.push(`_Showing ${revokeDiag.length} of ${summary.revoked} removals — see the notification channel for the rest._`);
       }
