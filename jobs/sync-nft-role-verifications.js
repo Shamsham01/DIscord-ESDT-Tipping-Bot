@@ -12,6 +12,12 @@ const {
   computeEligibility,
   skipMemberOnWalletAmbiguity
 } = require('../utils/nft-role-eligibility-mode');
+const {
+  ruleNeedsCheck,
+  pickDueUserSlice: pickDueUserSlicePure,
+  computeScheduledUserBudget: computeScheduledUserBudgetPure,
+  noteRuleResult
+} = require('../utils/nft-role-sync-schedule');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -346,37 +352,93 @@ function canBotManageRole(guild, role) {
   return true;
 }
 
-function workKey(guildId, userId) {
-  return `${guildId}:${userId}`;
-}
-
-/**
- * Even slice so N candidates finish one pass in `windowMs` when ticked every `tickMs`.
- * @param {number} totalCandidates
- * @param {number} [windowMs]
- * @param {number} [tickMs]
- */
-function computeScheduledUserBudget(totalCandidates, windowMs = NFT_ROLE_SYNC_WINDOW_MS, tickMs = NFT_ROLE_SYNC_TICK_MS) {
-  const ticks = Math.max(1, Math.floor(windowMs / tickMs));
-  return Math.max(1, Math.ceil(Math.max(0, Number(totalCandidates) || 0) / ticks));
-}
-
 let syncInFlight = false;
 
-/** Full coverage window for automated mode (each candidate is due once per window). */
+/** Full coverage window for automated mode (each candidate is due once per window, per rule). */
 const NFT_ROLE_SYNC_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** How often the scheduler picks the next even slice. */
 const NFT_ROLE_SYNC_TICK_MS = 10 * 60 * 1000;
 const NFT_ROLE_SYNC_STARTUP_DELAY_MS = 60 * 1000;
-
-/** @type {Map<string, number>} `${guildId}:${userId}` -> last successful scheduled/run-now check */
-const lastCheckedAt = new Map();
+/** Wallet/API misses stay pending for this rule and yield the tick to members not yet checked. */
+const NFT_ROLE_SYNC_RETRY_MS = 30 * 60 * 1000;
+/** Refresh the guild member cache so role holders outside the message cache are still revoked. */
+const MEMBER_ROSTER_TTL_MS = 30 * 60 * 1000;
 
 /**
- * @typedef {{ pending: Set<string>, granted: number, revoked: number, errors: number, membersChecked: number, startedAt: number, completedAt: number, summarySent: boolean }} RuleCycle
+ * Per rule, not per member. Empyreans succeeding must not mark Dolphin/Shark/Crab done.
+ * @type {Map<string, number>} `${guildId}:${ruleId}:${userId}` -> last successful evaluation
+ */
+const ruleCheckedAt = new Map();
+/** @type {Map<string, number>} same key -> earliest retry time after an unresolved check */
+const nextRetryAt = new Map();
+/** @type {Map<string, number>} guildId -> last full member fetch */
+const memberRosterFetchedAt = new Map();
+
+/**
+ * @typedef {{ pending: Set<string>, candidateCount: number, granted: number, revoked: number, errors: number, membersChecked: number, startedAt: number, completedAt: number, summarySent: boolean }} RuleCycle
  */
 /** @type {Map<string, RuleCycle>} */
 const scheduledCycleByRule = new Map();
+
+function computeScheduledUserBudget(totalCandidates, windowMs = NFT_ROLE_SYNC_WINDOW_MS, tickMs = NFT_ROLE_SYNC_TICK_MS) {
+  return computeScheduledUserBudgetPure(totalCandidates, windowMs, tickMs);
+}
+
+function ruleWorkKey(guildId, ruleId, userId) {
+  return `${guildId}:${ruleId}:${userId}`;
+}
+
+function readCheckedAt(guildId, ruleId, userId) {
+  return ruleCheckedAt.get(ruleWorkKey(guildId, ruleId, userId)) || 0;
+}
+
+function readRetryAt(guildId, ruleId, userId) {
+  return nextRetryAt.get(ruleWorkKey(guildId, ruleId, userId)) || 0;
+}
+
+function markRuleResolved(guildId, ruleId, userId, now) {
+  const key = ruleWorkKey(guildId, ruleId, userId);
+  ruleCheckedAt.set(key, now);
+  nextRetryAt.delete(key);
+}
+
+function markRuleRetry(guildId, ruleId, userId, now) {
+  nextRetryAt.set(ruleWorkKey(guildId, ruleId, userId), now + NFT_ROLE_SYNC_RETRY_MS);
+}
+
+function ruleStatusList(guildId, ruleIds, userId) {
+  return ruleIds.map(ruleId => ({
+    ruleId,
+    checkedAt: readCheckedAt(guildId, ruleId, userId),
+    retryAt: readRetryAt(guildId, ruleId, userId)
+  }));
+}
+
+function postponeRuleForUsers(guildId, ruleId, userIds, now) {
+  for (const userId of userIds) {
+    markRuleRetry(guildId, ruleId, userId, now);
+  }
+}
+
+function isUnknownMemberError(err) {
+  const code = Number(err && err.code);
+  return code === 10007 || code === 10013;
+}
+
+async function ensureMemberRoster(guild) {
+  const fetchedAt = memberRosterFetchedAt.get(guild.id) || 0;
+  if (Date.now() - fetchedAt < MEMBER_ROSTER_TTL_MS && guild.members.cache.size > 0) {
+    return;
+  }
+  try {
+    await guild.members.fetch();
+    memberRosterFetchedAt.set(guild.id, Date.now());
+  } catch (err) {
+    console.warn(
+      `[NFT-ROLE-SYNC] Member list unavailable for ${guild.id} (${err.message}); current role holders come from the cache`
+    );
+  }
+}
 
 function emptySummary(filterRuleId) {
   return {
@@ -399,8 +461,10 @@ function emptySummary(filterRuleId) {
 }
 
 function startRuleCycle(ruleId, candidateIds) {
+  const ids = [...candidateIds];
   scheduledCycleByRule.set(ruleId, {
-    pending: new Set(candidateIds),
+    pending: new Set(ids),
+    candidateCount: ids.length,
     granted: 0,
     revoked: 0,
     errors: 0,
@@ -411,16 +475,30 @@ function startRuleCycle(ruleId, candidateIds) {
   });
 }
 
-function creditDuePending(cycle, guildId, now) {
+/**
+ * One pass over every current candidate for this rule.
+ * Someone evaluated earlier in the pass stays out of `pending`.
+ * Another rule's timestamp never removes them.
+ */
+function ensureOpenCycle(ruleId, candidateIds, guildId, now) {
+  const ids = [...candidateIds];
+  const hasDue = ids.some(id =>
+    ruleNeedsCheck(readCheckedAt(guildId, ruleId, id), readRetryAt(guildId, ruleId, id), now, NFT_ROLE_SYNC_WINDOW_MS)
+  );
+  let cycle = scheduledCycleByRule.get(ruleId);
   if (!cycle || cycle.summarySent) {
-    return;
+    if (!hasDue) return null;
+    startRuleCycle(ruleId, ids);
+    return scheduledCycleByRule.get(ruleId);
   }
-  for (const uid of [...cycle.pending]) {
-    const t = lastCheckedAt.get(workKey(guildId, uid)) || 0;
-    if (t > 0 && now - t < NFT_ROLE_SYNC_WINDOW_MS) {
-      cycle.pending.delete(uid);
-    }
+  for (const id of ids) {
+    if (cycle.pending.has(id)) continue;
+    const checkedAt = readCheckedAt(guildId, ruleId, id);
+    if (checkedAt >= cycle.startedAt) continue;
+    cycle.pending.add(id);
+    cycle.candidateCount += 1;
   }
+  return cycle;
 }
 
 /**
@@ -456,6 +534,8 @@ async function buildGuildPlans(client, opts = {}) {
       continue;
     }
 
+    await ensureMemberRoster(guild);
+
     const walletsMap = await dbServerData.getUserWallets(gid);
     const walletUserIds = Object.keys(walletsMap || {});
     const vaUserIds = await dbVirtualAccountsNft.getDistinctUserIdsWithNftBalances(gid);
@@ -483,35 +563,12 @@ async function buildGuildPlans(client, opts = {}) {
   return plans;
 }
 
-function pickDueUserSlice(plans, budget, now) {
-  /** @type {{ guildId: string, userId: string }[]} */
-  const due = [];
-  for (const plan of plans) {
-    for (const userId of plan.candidateIds) {
-      const t = lastCheckedAt.get(workKey(plan.guildId, userId)) || 0;
-      if (t === 0 || now - t >= NFT_ROLE_SYNC_WINDOW_MS) {
-        due.push({ guildId: plan.guildId, userId, last: t });
-      }
-    }
+function pruneSchedule(activeKeys) {
+  for (const key of [...ruleCheckedAt.keys()]) {
+    if (!activeKeys.has(key)) ruleCheckedAt.delete(key);
   }
-  due.sort((a, b) => a.last - b.last || String(a.userId).localeCompare(String(b.userId)));
-  const seen = new Set();
-  const slice = [];
-  for (const item of due) {
-    const k = workKey(item.guildId, item.userId);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    slice.push(item);
-    if (slice.length >= budget) break;
-  }
-  return { dueCount: due.length, slice };
-}
-
-function pruneLastChecked(activeKeys) {
-  for (const key of [...lastCheckedAt.keys()]) {
-    if (!activeKeys.has(key)) {
-      lastCheckedAt.delete(key);
-    }
+  for (const key of [...nextRetryAt.keys()]) {
+    if (!activeKeys.has(key)) nextRetryAt.delete(key);
   }
 }
 
@@ -531,7 +588,13 @@ async function sendRuleCycleSummary(notifyChannel, rule, cycle, tickers) {
     .addFields(
       { name: 'Role', value: `<@&${rule.discordRoleId}>`, inline: true },
       { name: 'Rule ID', value: `\`${rule.id}\``, inline: true },
-      { name: 'Members checked', value: String(cycle.membersChecked), inline: true },
+      {
+        name: 'Members checked',
+        value: cycle.candidateCount
+          ? `${cycle.membersChecked} / ${cycle.candidateCount}`
+          : String(cycle.membersChecked),
+        inline: true
+      },
       { name: 'Granted', value: String(cycle.granted), inline: true },
       { name: 'Removed', value: String(cycle.revoked), inline: true },
       { name: 'Errors', value: String(cycle.errors), inline: true },
@@ -553,6 +616,9 @@ async function sendRuleCycleSummary(notifyChannel, rule, cycle, tickers) {
     await notifyChannel.send({ embeds: [summaryEmbed] });
     cycle.summarySent = true;
     cycle.completedAt = Date.now();
+    console.log(
+      `[NFT-ROLE-SYNC] Cycle complete rule=${rule.id} checked=${cycle.membersChecked}/${cycle.candidateCount || cycle.membersChecked}`
+    );
   } catch (e) {
     console.error(`[NFT-ROLE-SYNC] Failed to send scheduled summary:`, e.message);
   }
@@ -579,6 +645,12 @@ async function syncUsersInGuild(args) {
   if (userIdList.length === 0) {
     return;
   }
+  const allCandidateIds =
+    args.candidateIds instanceof Set
+      ? [...args.candidateIds]
+      : Array.isArray(args.candidateIds)
+        ? [...args.candidateIds]
+        : userIdList;
 
   summary.guilds += 1;
   const now = Date.now();
@@ -594,11 +666,13 @@ async function syncUsersInGuild(args) {
     if (!role) {
       console.warn(`[NFT-ROLE-SYNC] Role ${rule.discordRoleId} not in guild ${guildId}`);
       summary.errors += 1;
+      if (scheduled) postponeRuleForUsers(guildId, rule.id, allCandidateIds, now);
       continue;
     }
     if (!canBotManageRole(guild, role)) {
       console.warn(`[NFT-ROLE-SYNC] Bot cannot manage role ${rule.discordRoleId} in ${guildId}`);
       summary.errors += 1;
+      if (scheduled) postponeRuleForUsers(guildId, rule.id, allCandidateIds, now);
       continue;
     }
 
@@ -621,39 +695,45 @@ async function syncUsersInGuild(args) {
       } catch (batchErr) {
         console.error(`[NFT-ROLE-SYNC] Batch VA count failed for guild ${guildId}:`, batchErr.message);
         summary.errors += 1;
+        if (scheduled) postponeRuleForUsers(guildId, rule.id, userIdList, now);
         continue;
       }
     }
 
     if (scheduled) {
-      const candidateAll = args.candidateIds instanceof Set ? args.candidateIds : new Set(userIdList);
-      let cycle = scheduledCycleByRule.get(rule.id);
-      if (!cycle || cycle.summarySent) {
-        startRuleCycle(rule.id, candidateAll);
-        cycle = scheduledCycleByRule.get(rule.id);
-      } else {
-        for (const id of candidateAll) {
-          if (!cycle.pending.has(id) && (lastCheckedAt.get(workKey(guildId, id)) || 0) === 0) {
-            cycle.pending.add(id);
-          }
-        }
-      }
-      creditDuePending(cycle, guildId, now);
+      ensureOpenCycle(rule.id, allCandidateIds, guildId, now);
     }
 
     for (const userId of userIdList) {
       try {
-        const member = await guild.members.fetch({ user: userId, force: false }).catch(() => null);
+        if (
+          scheduled &&
+          !ruleNeedsCheck(
+            readCheckedAt(guildId, rule.id, userId),
+            readRetryAt(guildId, rule.id, userId),
+            now,
+            NFT_ROLE_SYNC_WINDOW_MS
+          )
+        ) {
+          continue;
+        }
+
+        let member = null;
+        try {
+          member = await guild.members.fetch({ user: userId, force: false });
+        } catch (err) {
+          if (!isUnknownMemberError(err)) throw err;
+        }
         if (!member || member.user.bot) {
-          lastCheckedAt.set(workKey(guildId, userId), Date.now());
-          const cycleSkip = scheduledCycleByRule.get(rule.id);
-          if (cycleSkip) cycleSkip.pending.delete(userId);
+          markRuleResolved(guildId, rule.id, userId, Date.now());
+          noteRuleResult(scheduledCycleByRule.get(rule.id), userId, 'absent');
           continue;
         }
         if (member.guild?.id !== guildId) {
           console.warn(
             `[NFT-ROLE-SYNC] skipping user=${userId}: resolved guild=${member.guild?.id ?? '?'}, expected=${guildId}`
           );
+          markRuleRetry(guildId, rule.id, userId, Date.now());
           continue;
         }
 
@@ -709,6 +789,7 @@ async function syncUsersInGuild(args) {
         }
 
         if (skipRoleChange) {
+          markRuleRetry(guildId, rule.id, userId, Date.now());
           continue;
         }
 
@@ -789,11 +870,10 @@ async function syncUsersInGuild(args) {
           summary.revoked += 1;
         }
 
-        lastCheckedAt.set(workKey(guildId, userId), Date.now());
+        markRuleResolved(guildId, rule.id, userId, Date.now());
         const cycle = scheduledCycleByRule.get(rule.id);
+        noteRuleResult(cycle, userId, 'evaluated');
         if (cycle && !cycle.summarySent) {
-          cycle.pending.delete(userId);
-          cycle.membersChecked += 1;
           if (eligible && !hasRole) cycle.granted += 1;
           else if (!eligible && hasRole) cycle.revoked += 1;
         }
@@ -801,6 +881,7 @@ async function syncUsersInGuild(args) {
         console.error(`[NFT-ROLE-SYNC] User ${userId} rule ${rule.id}:`, e.message);
         summary.errors += 1;
         ruleErrors += 1;
+        markRuleRetry(guildId, rule.id, userId, Date.now());
         const cycleErr = scheduledCycleByRule.get(rule.id);
         if (cycleErr && !cycleErr.summarySent) {
           cycleErr.errors += 1;
@@ -850,26 +931,8 @@ async function completeReadyScheduledCycles(plans) {
       if (plan.candidateIds.size === 0) {
         continue;
       }
-      let cycle = scheduledCycleByRule.get(rule.id);
-      const dueExists = [...plan.candidateIds].some(uid => {
-        const t = lastCheckedAt.get(workKey(plan.guildId, uid)) || 0;
-        return t === 0 || now - t >= NFT_ROLE_SYNC_WINDOW_MS;
-      });
-      if (!cycle) {
-        if (!dueExists) {
-          continue;
-        }
-        startRuleCycle(rule.id, plan.candidateIds);
-        cycle = scheduledCycleByRule.get(rule.id);
-      } else if (cycle.summarySent && dueExists) {
-        startRuleCycle(rule.id, plan.candidateIds);
-        cycle = scheduledCycleByRule.get(rule.id);
-      }
-      if (!cycle || cycle.summarySent) {
-        continue;
-      }
-      creditDuePending(cycle, plan.guildId, now);
-      if (cycle.pending.size > 0) {
+      const cycle = ensureOpenCycle(rule.id, plan.candidateIds, plan.guildId, now);
+      if (!cycle || cycle.summarySent || cycle.pending.size > 0) {
         continue;
       }
       const notifyChannel = await plan.guild.channels.fetch(rule.notificationChannelId).catch(() => null);
@@ -878,6 +941,9 @@ async function completeReadyScheduledCycles(plans) {
       } else {
         cycle.summarySent = true;
         cycle.completedAt = now;
+        console.warn(
+          `[NFT-ROLE-SYNC] Cycle closed without a notification channel rule=${rule.id} checked=${cycle.membersChecked}/${cycle.candidateCount}`
+        );
       }
     }
   }
@@ -906,13 +972,23 @@ async function runNftRoleSync(client, opts = {}) {
 
     const activeKeys = new Set();
     let totalCandidates = 0;
+    /** @type {{ guildId: string, userId: string, rules: { ruleId: string, checkedAt: number, retryAt: number }[] }[]} */
+    const dueCandidates = [];
     for (const plan of plans) {
       totalCandidates += plan.candidateIds.size;
+      const ruleIds = plan.guildRules.map(rule => rule.id);
       for (const uid of plan.candidateIds) {
-        activeKeys.add(workKey(plan.guildId, uid));
+        for (const ruleId of ruleIds) {
+          activeKeys.add(ruleWorkKey(plan.guildId, ruleId, uid));
+        }
+        dueCandidates.push({
+          guildId: plan.guildId,
+          userId: uid,
+          rules: ruleStatusList(plan.guildId, ruleIds, uid)
+        });
       }
     }
-    pruneLastChecked(activeKeys);
+    pruneSchedule(activeKeys);
 
     const now = Date.now();
     /** @type {Map<string, string[]>} */
@@ -921,7 +997,7 @@ async function runNftRoleSync(client, opts = {}) {
     if (scheduled) {
       const budget = maxUsers != null ? Math.max(1, maxUsers) : computeScheduledUserBudget(totalCandidates);
       summary.budget = budget;
-      const { dueCount, slice } = pickDueUserSlice(plans, budget, now);
+      const { dueCount, slice } = pickDueUserSlicePure(dueCandidates, budget, now, NFT_ROLE_SYNC_WINDOW_MS);
       summary.dueUsers = dueCount;
       summary.processedUsers = slice.length;
       for (const item of slice) {
@@ -957,6 +1033,17 @@ async function runNftRoleSync(client, opts = {}) {
 
     if (scheduled) {
       await completeReadyScheduledCycles(plans);
+      const open = [];
+      for (const [ruleId, cycle] of scheduledCycleByRule) {
+        if (!cycle.summarySent && cycle.pending.size > 0) {
+          open.push(
+            `${String(ruleId).slice(0, 8)}:${cycle.membersChecked}/${cycle.candidateCount} pending=${cycle.pending.size}`
+          );
+        }
+      }
+      if (open.length) {
+        console.log(`[NFT-ROLE-SYNC] Open cycles ${open.join(' | ')}`);
+      }
     }
   } finally {
     syncInFlight = false;

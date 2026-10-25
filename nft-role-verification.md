@@ -39,7 +39,9 @@ For each rule, the bot builds a list of Discord users from:
 - Everyone with **NFT VA balance** rows in the server,
 - Members who **already have** the managed role (so the role can be removed if they no longer qualify).
 
-Users who left the server are skipped.
+Every enabled rule evaluates that full list. A check is stored **per rule**. If the wallet indexer cannot be verified, that member stays pending for **that rule** and is retried later; another role already succeeding does not count as a check. The cycle summary is posted only after every remaining member has actually been evaluated, and **Members checked** is shown as `checked / candidates`.
+
+Users who left the server are skipped. The bot refreshes the guild member list so someone who still has the role but no longer has a wallet row is included and can be removed.
 
 ## Notifications
 

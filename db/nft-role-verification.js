@@ -64,12 +64,23 @@ async function listRulesForGuild(guildId, { enabledOnly = false } = {}) {
 }
 
 async function listEnabledRulesGlobally() {
-  const { data, error } = await supabase
-    .from('guild_nft_role_rules')
-    .select('*')
-    .eq('enabled', true);
-  if (error) throw error;
-  return (data || []).map(mapRow);
+  const pageSize = 1000;
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from('guild_nft_role_rules')
+      .select('*')
+      .eq('enabled', true)
+      .order('id', { ascending: true })
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    rows.push(...data);
+    if (data.length < pageSize) break;
+    from += pageSize;
+  }
+  return rows.map(mapRow);
 }
 
 async function setRuleEnabled(guildId, ruleId, enabled) {
