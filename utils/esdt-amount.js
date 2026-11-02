@@ -80,8 +80,54 @@ function subtractDecimalStrings(left, right) {
   return new BigNumber(left).minus(right).toFixed();
 }
 
+/**
+ * Exact human decimal for a base-unit integer. Used when a fee was calculated in raw units.
+ */
+function humanFromRaw(raw, decimals) {
+  assertDecimals(decimals);
+  const rawText = String(raw == null ? '' : raw).trim();
+  if (!/^(?:0|[1-9]\d*)$/.test(rawText) || rawText === '0') {
+    const error = new Error(`Invalid raw ESDT amount: "${raw}"`);
+    error.code = 'ESDT_AMOUNT_INVALID';
+    throw error;
+  }
+  if (decimals === 0) return canonicalizeEsdtAmount(rawText, 0);
+  const padded = rawText.padStart(decimals + 1, '0');
+  const whole = padded.slice(0, padded.length - decimals);
+  const fraction = padded.slice(-decimals).replace(/0+$/, '');
+  const human = fraction.length ? `${whole}.${fraction}` : whole;
+  return canonicalizeEsdtAmount(human, decimals);
+}
+
+/**
+ * Accept a decimal string, or a Discord number option only when Number#toString is exact.
+ * Scientific notation is rejected so a rounded binary float is not sent to MakeX.
+ */
+function decimalStringFromInput(value) {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) {
+      const error = new Error('Amount must be a positive decimal');
+      error.code = 'ESDT_AMOUNT_INVALID';
+      throw error;
+    }
+    const text = value.toString();
+    if (/[eE]/.test(text)) {
+      const error = new Error('Amount cannot be represented as an exact decimal string');
+      error.code = 'ESDT_AMOUNT_INVALID';
+      throw error;
+    }
+    return text;
+  }
+  const error = new Error('Amount must be a decimal string');
+  error.code = 'ESDT_AMOUNT_INVALID';
+  throw error;
+}
+
 module.exports = {
   canonicalizeEsdtAmount,
+  humanFromRaw,
+  decimalStringFromInput,
   decimalStringsEqual,
   addDecimalStrings,
   subtractDecimalStrings

@@ -5,6 +5,7 @@ const {
   addDecimalStrings,
   subtractDecimalStrings
 } = require('./esdt-amount');
+const { coerceTransferClassification } = require('./esdt-transfer-outcome');
 
 const OPEN_STATUSES = new Set(['RESERVED', 'PENDING', 'NEEDS_RECONCILIATION']);
 
@@ -484,7 +485,7 @@ async function executeEsdtWithdrawal({ repo, send, input, workerId }) {
 
     let classified;
     try {
-      classified = await send(record);
+      classified = coerceTransferClassification(await send(record));
     } catch (error) {
       if (error && error.beforeBroadcast === true && error.broadcastAttempted !== true) {
         const failed = await repo.failAndRestore(record.withdrawalId, {

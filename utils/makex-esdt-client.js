@@ -107,6 +107,13 @@ async function executeMakeXEsdtTransfer({
     options: { ...options, apiToken }
   });
 
+  if (!options.idempotencyKey) {
+    throw preBroadcastError(
+      'Refusing to call MakeX without a persisted idempotency key.',
+      'IDEMPOTENCY_KEY_REQUIRED'
+    );
+  }
+
   const fullEndpoint = endpointBase.endsWith('/')
     ? `${endpointBase}execute/esdtTransfer`
     : `${endpointBase}/execute/esdtTransfer`;
@@ -115,7 +122,7 @@ async function executeMakeXEsdtTransfer({
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   const classifyOptions = {
     expected: options.expected || null,
-    requireTransferIdentity: options.requireTransferIdentity === true,
+    requireTransferIdentity: options.requireTransferIdentity !== false,
     expectFeeExempt: options.expectFeeExempt === true
   };
   let requestStarted = false;

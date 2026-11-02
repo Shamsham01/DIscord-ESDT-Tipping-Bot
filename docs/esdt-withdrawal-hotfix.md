@@ -133,7 +133,7 @@ Do not replay payments. Do not credit balances from this PR.
 
 ## Follow-ups
 
-Mass refund, house withdraw, subscription payment, and pool-creation fee now fail closed on a non-success MakeX result. They still do not reserve through `esdt_withdrawals`. A mass refund that sees an ambiguous result does not deduct, and a later rerun can submit a second payment if the first one landed. Those paths also still omit the idempotency key. They should move onto this state machine after the withdrawal hotfix is stable.
+Those other payment paths now have their own durable identities in `esdt_disbursements`. See `docs/esdt-payment-safety-audit.md` for the rollout flags, advisory-lock serialization, unclassified-response rule, and route matrix. `/withdraw-esdt` still sends `x-makex-idempotency-key` from `wd_<Discord interaction id>`. Do not remove that header. An unclassified MakeX response after the withdrawal request is `NEEDS_RECONCILIATION` and does not restore the reserved balance.
 
 ## Tests
 
