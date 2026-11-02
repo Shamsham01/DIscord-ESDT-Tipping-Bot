@@ -657,15 +657,48 @@ function buildEsdtTransferOptions(record) {
   };
 }
 
-// Transfers PR #7 verifies TX_REJECTED with no hash as a pre-broadcast rejection.
-// HTTP status ranges are not that evidence. 408, 429, a missing response,
-// and every 5xx stay unresolved even when this code is present.
+// Transfers PR #7 documents TX_REJECTED with no hash as a pre-broadcast rejection.
+// Its sample HTTP status is 503, which stays unresolved here with every other
+// 5xx. HTTP 200-299 are successful statuses and are not that rejection.
+// The legacy NFT, SFT, and bulk callers document HTTP 400 as the pre-broadcast
+// validation failure. Only that status, with this code and no broadcast
+// evidence, restores.
 const PRE_BROADCAST_VALIDATION_CODES = new Set(['TX_REJECTED']);
+const LEGACY_PRE_BROADCAST_REJECTION_STATUS = 400;
 
 function legacyBody(parsedResponse) {
   return parsedResponse && typeof parsedResponse === 'object' && !Array.isArray(parsedResponse)
     ? parsedResponse
     : {};
+}
+
+function legacyHashPresent(value) {
+  if (value == null) return false;
+  const cleaned = String(value).trim();
+  return cleaned !== '' && cleaned.toLowerCase() !== 'null';
+}
+
+function legacyCollectHashes(value, found) {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const entry of value) legacyCollectHashes(entry, found);
+    return;
+  }
+  for (const key of ['txHash', 'transactionHash', 'hash', 'blockingTxHash']) {
+    if (legacyHashPresent(value[key])) found.push(String(value[key]).trim());
+  }
+  legacyCollectHashes(value.result, found);
+  legacyCollectHashes(value.data, found);
+  legacyCollectHashes(value.transaction, found);
+  legacyCollectHashes(value.transactions, found);
+}
+
+function legacyBroadcastEvidence({ txHash = null, blockingTxHash = null, parsedResponse = null } = {}) {
+  const found = [];
+  if (legacyHashPresent(txHash)) found.push(String(txHash).trim());
+  if (legacyHashPresent(blockingTxHash)) found.push(String(blockingTxHash).trim());
+  legacyCollectHashes(legacyBody(parsedResponse), found);
+  return found.length > 0;
 }
 
 function legacyAttemptFlags({
@@ -683,24 +716,26 @@ function legacyAttemptFlags({
   const body = legacyBody(parsedResponse);
   const data = legacyBody(body.data);
   const nested = legacyBody(body.error);
+  const result = legacyBody(body.result);
   const status = Number(httpStatus) || 0;
-  const resolvedCode = String(code || body.code || nested.code || data.code || '').trim().toUpperCase();
-  const resolvedBlocking = blockingTxHash || body.blockingTxHash || data.blockingTxHash || null;
-  const hasHash = Boolean(txHash || resolvedBlocking);
+  const resolvedCode = String(code || body.code || nested.code || data.code || result.code || '').trim().toUpperCase();
   const resolvedComplete = complete === true || body.complete === true;
-  const resolvedRetryable = retryable === true || body.retryable === true || data.retryable === true;
+  const resolvedRetryable = retryable === true || body.retryable === true || data.retryable === true || result.retryable === true;
+  const successfulStatus = status >= 200 && status < 300;
   const ambiguous = timedOut === true
     || networkError === true
+    || resolvedRetryable
     || status === 0
     || status === 408
     || status === 429
     || status >= 500;
   const precheckRejection = requestStarted === true
     && !ambiguous
-    && !hasHash
+    && !successfulStatus
+    && status === LEGACY_PRE_BROADCAST_REJECTION_STATUS
     && !resolvedComplete
-    && !resolvedRetryable
-    && PRE_BROADCAST_VALIDATION_CODES.has(resolvedCode);
+    && PRE_BROADCAST_VALIDATION_CODES.has(resolvedCode)
+    && !legacyBroadcastEvidence({ txHash, blockingTxHash, parsedResponse: body });
   return {
     broadcastAttempted: requestStarted === true && !precheckRejection,
     authoritativeNonPayment: precheckRejection,

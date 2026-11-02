@@ -876,6 +876,50 @@ test('legacy NFT responses use the TX_REJECTED allowlist and never a 4xx range',
     { httpStatus: 401 },
     { httpStatus: 404 },
     { httpStatus: 400, txHash: OWN_HASH, code: 'TX_REJECTED' },
+    { httpStatus: 400, blockingTxHash: OWN_HASH, code: 'TX_REJECTED' },
+    { httpStatus: 200, code: 'TX_REJECTED', parsedResponse: { code: 'TX_REJECTED', complete: false, retryable: false } },
+    { httpStatus: 204, code: 'TX_REJECTED' },
+    {
+      httpStatus: 400,
+      code: 'TX_REJECTED',
+      parsedResponse: { code: 'TX_REJECTED', txHash: OWN_HASH }
+    },
+    {
+      httpStatus: 400,
+      code: 'TX_REJECTED',
+      parsedResponse: { code: 'TX_REJECTED', transactionHash: OWN_HASH }
+    },
+    {
+      httpStatus: 400,
+      code: 'TX_REJECTED',
+      parsedResponse: { code: 'TX_REJECTED', complete: false, retryable: false, result: { txHash: OWN_HASH } }
+    },
+    {
+      httpStatus: 400,
+      code: 'TX_REJECTED',
+      parsedResponse: { code: 'TX_REJECTED', data: { txHash: OWN_HASH } }
+    },
+    {
+      httpStatus: 400,
+      code: 'TX_REJECTED',
+      parsedResponse: { transaction: { txHash: OWN_HASH } }
+    },
+    {
+      httpStatus: 400,
+      code: 'TX_REJECTED',
+      parsedResponse: { result: { blockingTxHash: OWN_HASH } }
+    },
+    {
+      httpStatus: 400,
+      code: 'TX_REJECTED',
+      parsedResponse: { data: { blockingTxHash: OWN_HASH, transactionHash: OWN_HASH } }
+    },
+    {
+      httpStatus: 400,
+      code: 'TX_REJECTED',
+      parsedResponse: { transactions: [{ txHash: OWN_HASH }] }
+    },
+    { httpStatus: 400, code: 'TX_REJECTED', retryable: true },
     { timedOut: true },
     { networkError: true },
     { httpStatus: 0 }
@@ -891,7 +935,16 @@ test('legacy NFT responses use the TX_REJECTED allowlist and never a 4xx range',
     requestStarted: true,
     httpStatus: 400,
     code: 'TX_REJECTED',
-    parsedResponse: { complete: false, retryable: false, data: { txHash: null, blockingTxHash: null } }
+    parsedResponse: {
+      code: 'TX_REJECTED',
+      status: 'error',
+      complete: false,
+      retryable: false,
+      txHash: null,
+      result: { txHash: null, transactionHash: null, hash: null, blockingTxHash: null },
+      data: { txHash: null, transactionHash: null, blockingTxHash: null },
+      transaction: { txHash: null }
+    }
   });
   assert.equal(verified.authoritativeNonPayment, true);
   assert.equal(verified.broadcastAttempted, false);
