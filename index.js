@@ -118,6 +118,7 @@ const { executeMakeXEsdtTransfer } = require('./utils/makex-esdt-client');
 const {
   classifyEsdtTransferResponse,
   mapClassifiedTransferResult,
+  unclassifiedTransferResult,
   extractEsdtTransferApiFields: extractEsdtTransferApiFieldsFromModule
 } = require('./utils/esdt-transfer-outcome');
 const {
@@ -130,6 +131,8 @@ const { handleWithdrawEsdt } = require('./handlers/withdraw-esdt');
 const esdtDisbursements = require('./db/esdt-disbursements');
 const {
   esdtDisbursementRecoveryEnabled,
+  esdtDisbursementsEnabled,
+  esdtNftDisbursementsEnabled,
   interactionDisbursementId,
   massRefundDisbursementId,
   poolFeeDisbursementId,
@@ -154,6 +157,12 @@ if (!esdtWithdrawals.isConfigured()) {
 }
 if (!esdtDisbursementRecoveryEnabled()) {
   console.warn('[DISBURSE] Automated ESDT disbursement recovery is paused. Set ESDT_DISBURSEMENT_RECOVERY_ENABLED=true only after the migration is applied and open rows have been reviewed.');
+}
+if (!esdtDisbursementsEnabled()) {
+  console.warn('[DISBURSE] New ESDT disbursements are paused. Set ESDT_DISBURSEMENTS_ENABLED=true only after the migration is applied and the MakeX esdtTransfer contract is verified. There is no fallback to an unreserved transfer.');
+}
+if (!esdtNftDisbursementsEnabled()) {
+  console.warn('[DISBURSE] NFT, SFT, and bulk disbursements are paused. Set ESDT_NFT_DISBURSEMENTS_ENABLED=true only after those MakeX endpoints return the same complete-success contract as esdtTransfer.');
 }
 
 // Validate dbFootball module is loaded correctly
@@ -2530,9 +2539,7 @@ async function sendReservedEsdtDisbursement(record) {
       options
     );
     if (result && result.classified) return result.classified;
-    const error = new Error((result && result.errorMessage) || 'MakeX did not return a classified ESDT result');
-    error.beforeBroadcast = true;
-    throw error;
+    return unclassifiedTransferResult(result);
   }
   const result = await transferESDTFromCommunityFund(
     record.recipientWallet,
@@ -2543,9 +2550,7 @@ async function sendReservedEsdtDisbursement(record) {
     options
   );
   if (result && result.classified) return result.classified;
-  const error = new Error((result && result.errorMessage) || 'MakeX did not return a classified ESDT result');
-  error.beforeBroadcast = true;
-  throw error;
+  return unclassifiedTransferResult(result);
 }
 
 function disbursementPendingText(outcome) {
@@ -2562,6 +2567,9 @@ function disbursementPendingText(outcome) {
   }
   if (outcome && outcome.kind === 'conflict') {
     return 'This payment does not match the stored operation. Nothing new was sent.';
+  }
+  if (outcome && outcome.kind === 'paused') {
+    return 'This payment route is paused until the disbursement migration and MakeX contract are verified. Nothing was sent and the old transfer path was not used.';
   }
   return `Payment${id ? ` ${id}` : ''} is pending verification and was not confirmed. The balance stays reserved. Do not retry until an admin reconciles it. ${detail}`.trim();
 }

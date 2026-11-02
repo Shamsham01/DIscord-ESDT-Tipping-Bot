@@ -199,10 +199,13 @@ function whitelistProblem(fields) {
 
 /**
  * Classify a MakeX /execute/esdtTransfer response.
- * Confirmation requires the Transfers PR #7 success body: HTTP 200,
- * status success, success true, complete true, and result.txHash.
- * Withdrawals also require sender, recipient, token, and raw amount to match.
- * `chainStatus` is ignored. A blocking hash is never this payment.
+ * Confirmation requires the Transfers PR #7 success body. Transfers PR #8 must
+ * keep that body and the `x-makex-idempotency-key` header. The required body is
+ * HTTP 200, status success, success true, complete true, and result.txHash.
+ * When identity is required, sender, receiver, token, and exact raw amount
+ * must match. `chainStatus` is ignored. A blocking hash is never this payment.
+ * nftTransfer, sftTransfer, and multiNFTTransfer are not classified here until
+ * those endpoints return this same contract.
  */
 function classifyEsdtTransferResponse({
   httpStatus = 0,
@@ -411,6 +414,53 @@ function classifyEsdtTransferResponse({
   });
 }
 
+const CLASSIFIED_OUTCOMES = new Set(['confirmed', 'pending', 'needs_reconciliation', 'failed']);
+
+/**
+ * A response that arrived after the request was attempted, but that this
+ * client cannot classify. It is never proof that nothing was broadcast.
+ */
+function unclassifiedTransferResult(result) {
+  const source = result && typeof result === 'object' ? result : {};
+  const hash = source.txHash || source.untrustedTxHash || null;
+  const classified = baseResult({
+    outcome: 'needs_reconciliation',
+    authoritativeNonPayment: false,
+    errorCode: 'UNCLASSIFIED_RESPONSE',
+    errorMessage: 'MakeX returned a response that could not be classified. Reserved funds were not restored.',
+    httpStatus: Number(source.httpStatus) || 0,
+    ownedTxHash: null,
+    blockingTxHash: source.blockingTxHash || null,
+    untrustedTxHash: hash || null,
+    fields: source.operationId ? { operationId: source.operationId } : {}
+  });
+  classified.broadcastAttempted = true;
+  return classified;
+}
+
+/**
+ * Missing or non-authoritative failure results stay unresolved.
+ * `beforeBroadcast` is not inferred from a missing classifier.
+ */
+function coerceTransferClassification(classified) {
+  if (!classified || typeof classified !== 'object' || !CLASSIFIED_OUTCOMES.has(classified.outcome)) {
+    return unclassifiedTransferResult(classified);
+  }
+  if (classified.outcome === 'failed' && classified.authoritativeNonPayment !== true) {
+    return {
+      ...classified,
+      outcome: 'needs_reconciliation',
+      authoritativeNonPayment: false,
+      ownedTxHash: null,
+      untrustedTxHash: classified.ownedTxHash || classified.untrustedTxHash || null,
+      errorCode: classified.errorCode || 'UNCLASSIFIED_RESPONSE',
+      errorMessage: classified.errorMessage
+        || 'MakeX did not prove that no payment was broadcast. Reserved funds were not restored.'
+    };
+  }
+  return classified;
+}
+
 function mapClassifiedTransferResult(classified, parsedResponse, httpStatus) {
   const pending = classified.outcome === 'pending' || classified.outcome === 'needs_reconciliation';
   return {
@@ -438,5 +488,7 @@ module.exports = {
   extractEsdtTransferApiFields,
   exactTransferIdentity,
   classifyEsdtTransferResponse,
+  unclassifiedTransferResult,
+  coerceTransferClassification,
   mapClassifiedTransferResult
 };

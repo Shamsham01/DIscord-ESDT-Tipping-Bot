@@ -2,7 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { classifyEsdtTransferResponse } = require('./esdt-transfer-outcome');
+const {
+  classifyEsdtTransferResponse,
+  coerceTransferClassification
+} = require('./esdt-transfer-outcome');
 const { buildEsdtTransferRequest, executeMakeXEsdtTransfer } = require('./makex-esdt-client');
 const {
   MemoryEsdtDisbursementRepository,
@@ -13,6 +16,9 @@ const {
   interactionDisbursementId,
   unconfirmedLegacyTransfer
 } = require('./esdt-disbursement-flow');
+
+process.env.ESDT_DISBURSEMENTS_ENABLED = 'true';
+process.env.ESDT_NFT_DISBURSEMENTS_ENABLED = 'true';
 
 const INCIDENT_HASH = '228a5272b2e7cae10820012d974719e4badc8598cb1003bccbe293a3e19259b7';
 const OWN_HASH = 'abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abcd';
@@ -515,6 +521,329 @@ test('a non-replayable NFT attempt is not sent twice and is not confirmed from a
   assert.equal(second.kind, 'needs_reconciliation');
   assert.equal(second.sent, false);
   assert.equal(sends, 1);
+});
+
+function clientRequest(idempotencyKey) {
+  return {
+    endpointBase: 'https://makex.example',
+    apiToken: 'token',
+    pem: '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----',
+    recipient: RECIPIENT,
+    tokenIdentifier: TOKEN,
+    amount: '1',
+    options: {
+      exactDecimal: true,
+      decimals: 8,
+      amountRaw: '100000000',
+      idempotencyKey,
+      withdrawalId: idempotencyKey,
+      requireTransferIdentity: true,
+      expectFeeExempt: true,
+      expected: {
+        sender: SENDER,
+        recipient: RECIPIENT,
+        tokenIdentifier: TOKEN,
+        amountHuman: '1',
+        amountRaw: '100000000',
+        decimals: 8,
+        idempotencyKey
+      }
+    }
+  };
+}
+
+test('an unclassified HTTP 200 does not restore a reserved refund', async () => {
+  const repo = repoWith('9');
+  const outcome = await executeEsdtDisbursement({
+    repo,
+    input: refundInput('100000000000000220', '1'),
+    send: async () => ({ httpStatus: 200, txHash: OWN_HASH })
+  });
+  assert.equal(outcome.kind, 'needs_reconciliation');
+  assert.equal(outcome.record.errorCode, 'UNCLASSIFIED_RESPONSE');
+  assert.equal(outcome.record.primaryTxHash, null);
+  assert.equal(outcome.record.untrustedTxHash, OWN_HASH);
+  assert.equal(outcome.record.restoredAt, null);
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '8');
+  assert.equal(repo.exportState().ledger.some((entry) => entry.id.startsWith('esdt-disburse-restore:')), false);
+});
+
+test('an unexpected response and a failed outcome without proof stay reserved', async () => {
+  const unexpectedRepo = repoWith('9');
+  const unexpected = await executeEsdtDisbursement({
+    repo: unexpectedRepo,
+    input: refundInput('100000000000000221', '1'),
+    send: async () => ({ surprise: true, httpStatus: 200 })
+  });
+  assert.equal(unexpected.kind, 'needs_reconciliation');
+  assert.equal(unexpectedRepo.balanceOf('g', 'u', TOKEN), '8');
+
+  const failureRepo = repoWith('9');
+  const bareFailure = await executeEsdtDisbursement({
+    repo: failureRepo,
+    input: refundInput('100000000000000222', '1'),
+    send: async () => ({ outcome: 'failed', errorCode: 'HTTP_500', errorMessage: 'no proof' })
+  });
+  assert.equal(bareFailure.kind, 'needs_reconciliation');
+  assert.equal(failureRepo.balanceOf('g', 'u', TOKEN), '8');
+  assert.equal(failureRepo.exportState().ledger.filter((entry) => entry.type === 'deposit').length, 0);
+  const coerced = coerceTransferClassification({ outcome: 'failed', ownedTxHash: OWN_HASH });
+  assert.equal(coerced.outcome, 'needs_reconciliation');
+  assert.equal(coerced.authoritativeNonPayment, false);
+  assert.equal(coerced.ownedTxHash, null);
+});
+
+test('timeout and HTTP 503 leave the reservation in place', async () => {
+  const timeoutRepo = repoWith('9');
+  const timedOut = await executeEsdtDisbursement({
+    repo: timeoutRepo,
+    input: refundInput('100000000000000223', '1'),
+    send: async (record) => classifyFor(record, { timedOut: true, httpStatus: 0 })
+  });
+  assert.equal(timedOut.kind, 'pending');
+  assert.equal(timedOut.record.errorCode, 'TIMEOUT');
+  assert.equal(timeoutRepo.balanceOf('g', 'u', TOKEN), '8');
+  assert.equal(timeoutRepo.exportState().ledger.some((entry) => entry.type === 'deposit'), false);
+
+  const unavailableRepo = repoWith('9');
+  const unavailable = await executeEsdtDisbursement({
+    repo: unavailableRepo,
+    input: refundInput('100000000000000224', '1'),
+    send: async () => classifyEsdtTransferResponse({
+      httpStatus: 503,
+      parsedResponse: {
+        code: 'TX_PENDING',
+        message: 'upstream unavailable',
+        data: { blockingTxHash: INCIDENT_HASH }
+      },
+      requireTransferIdentity: true,
+      expectFeeExempt: true
+    })
+  });
+  assert.equal(unavailable.kind, 'needs_reconciliation');
+  assert.equal(unavailable.record.blockingTxHash, INCIDENT_HASH);
+  assert.equal(unavailable.record.primaryTxHash, null);
+  assert.equal(unavailableRepo.balanceOf('g', 'u', TOKEN), '8');
+});
+
+test('a client failure is not confirmation, and a later exact success settles once', async () => {
+  const repo = repoWith('9');
+  let attempt = 0;
+  const outcome = async () => executeEsdtDisbursement({
+    repo,
+    input: refundInput('100000000000000225', '2'),
+    send: async (record) => {
+      attempt += 1;
+      if (attempt === 1) return { httpStatus: 0, errorMessage: 'socket hang up' };
+      if (attempt === 2) {
+        return classifyFor(record, {
+          httpStatus: 200,
+          body: {
+            status: 'success',
+            success: true,
+            result: {
+              txHash: OWN_HASH,
+              status: 'success',
+              sender: record.senderWallet,
+              receiver: record.recipientWallet,
+              tokenIdentifier: record.tokenIdentifier,
+              amount: record.amountRaw
+            }
+          }
+        });
+      }
+      return classifyFor(record, successSpec(record));
+    }
+  });
+  const first = await outcome();
+  const second = await outcome();
+  const third = await outcome();
+  assert.equal(first.kind, 'needs_reconciliation');
+  assert.equal(second.kind, 'pending');
+  assert.equal(second.record.status, 'PENDING');
+  assert.equal(second.record.errorCode, 'HTTP_200');
+  assert.equal(third.kind, 'confirmed');
+  assert.equal(third.record.primaryTxHash, OWN_HASH);
+  assert.equal(attempt, 3);
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '7');
+  assert.equal(repo.exportState().ledger.filter((entry) => entry.type === 'deduction').length, 1);
+  await assert.rejects(
+    () => repo.failAndRestore(third.record.disbursementId, {
+      authoritativeNonPayment: true,
+      processingOwner: third.record.processingOwner,
+      processingFence: third.record.processingFence,
+      errorCode: 'EXECUTION_FAILED'
+    }),
+    (error) => error.code === 'invalid_transition' || /invalid_transition|lease_lost/.test(error.message)
+  );
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '7');
+});
+
+test('MakeX client responses without the success contract do not claim a payment', async () => {
+  const seen = [];
+  const unclassified = await executeMakeXEsdtTransfer({
+    ...clientRequest('mr_client_unclassified'),
+    fetchImpl: async (url, init) => {
+      seen.push(init.headers['x-makex-idempotency-key']);
+      return { status: 200, text: async () => JSON.stringify({ ok: true, txHash: OWN_HASH }) };
+    }
+  });
+  assert.equal(unclassified.outcome, 'pending');
+  assert.equal(unclassified.success, false);
+  assert.equal(unclassified.authoritativeNonPayment, false);
+  assert.equal(unclassified.txHash, null);
+  assert.deepEqual(seen, ['mr_client_unclassified']);
+
+  const malformed = await executeMakeXEsdtTransfer({
+    ...clientRequest('mr_client_malformed'),
+    fetchImpl: async () => ({ status: 200, text: async () => '<html>gateway</html>' })
+  });
+  assert.equal(malformed.outcome, 'pending');
+  assert.equal(malformed.success, false);
+  assert.equal(malformed.authoritativeNonPayment, false);
+  assert.equal(malformed.txHash, null);
+
+  const timeout = await executeMakeXEsdtTransfer({
+    ...clientRequest('mr_client_timeout'),
+    timeoutMs: 20,
+    fetchImpl: async () => ({ status: 200, text() { return new Promise(() => {}); } })
+  });
+  assert.equal(timeout.outcome, 'pending');
+  assert.equal(timeout.classified.errorCode, 'TIMEOUT');
+  assert.equal(timeout.broadcastAttempted, true);
+  assert.equal(timeout.authoritativeNonPayment, false);
+
+  const unavailable = await executeMakeXEsdtTransfer({
+    ...clientRequest('mr_client_503'),
+    fetchImpl: async () => ({
+      status: 503,
+      text: async () => JSON.stringify({
+        code: 'TX_PENDING',
+        data: { blockingTxHash: INCIDENT_HASH }
+      })
+    })
+  });
+  assert.equal(unavailable.outcome, 'needs_reconciliation');
+  assert.equal(unavailable.authoritativeNonPayment, false);
+  assert.equal(unavailable.blockingTxHash, INCIDENT_HASH);
+  assert.equal(unavailable.success, false);
+});
+
+test('new disbursement routes fail closed until their rollout flag is exactly true', async () => {
+  const repo = repoWith('9');
+  let sends = 0;
+  const send = async () => {
+    sends += 1;
+    return { outcome: 'confirmed', ownedTxHash: OWN_HASH };
+  };
+  const paused = await executeEsdtDisbursement({
+    repo,
+    env: {},
+    input: refundInput('100000000000000226', '1'),
+    send
+  });
+  assert.equal(paused.kind, 'paused');
+  assert.equal(paused.code, 'DISBURSEMENTS_PAUSED');
+  assert.equal(paused.sent, false);
+  assert.equal(sends, 0);
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '9');
+  assert.equal(repo.exportState().disbursements.length, 0);
+
+  const nft = await executeEsdtDisbursement({
+    repo,
+    env: { ESDT_DISBURSEMENTS_ENABLED: 'true' },
+    input: {
+      operationKind: 'nft_transfer',
+      disbursementId: 'nr_100000000000000227_abcdef1234567890abcd',
+      businessActionId: 'nr_100000000000000227_abcdef1234567890abcd',
+      interactionId: '100000000000000227',
+      guildId: 'g',
+      userId: 'u',
+      tokenIdentifier: 'COLLECTION-abc123-01',
+      tokenTicker: 'COLLECTION',
+      amountHuman: '1',
+      decimals: 0,
+      recipientWallet: RECIPIENT,
+      senderWallet: SENDER
+    },
+    send
+  });
+  assert.equal(nft.kind, 'paused');
+  assert.equal(nft.code, 'NFT_DISBURSEMENTS_PAUSED');
+  assert.equal(sends, 0);
+});
+
+test('recovery does not post while the rollout flag is off, and a confirmed effect can be retried', async () => {
+  const repo = repoWith('9');
+  const input = refundInput('100000000000000228', '1');
+  await executeEsdtDisbursement({
+    repo,
+    input,
+    send: async (record) => classifyFor(record, { timedOut: true })
+  });
+  let posts = 0;
+  const paused = await resumeUnresolvedEsdtDisbursements({
+    repo,
+    recoveryEnabled: true,
+    env: {},
+    send: async () => {
+      posts += 1;
+      return { outcome: 'confirmed', ownedTxHash: OWN_HASH, authoritativeNonPayment: false };
+    }
+  });
+  assert.equal(paused.posted, 0);
+  assert.equal(posts, 0);
+  assert.equal(paused.results[0].kind, 'rollout_paused');
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '8');
+
+  const house = await executeEsdtDisbursement({
+    repo,
+    input: {
+      operationKind: 'house_withdraw',
+      disbursementId: interactionDisbursementId('hw', '100000000000000229'),
+      interactionId: '100000000000000229',
+      guildId: 'g',
+      userId: 'u',
+      tokenIdentifier: TOKEN,
+      tokenTicker: 'DROP',
+      amountHuman: '1',
+      decimals: 8,
+      recipientWallet: OTHER,
+      senderWallet: SENDER,
+      effectPayload: { source: 'betting' }
+    },
+    send: async (record) => classifyFor(record, successSpec(record))
+  });
+  assert.equal(house.kind, 'confirmed');
+  assert.equal(house.record.effectAppliedAt, null);
+  const blocked = await executeEsdtDisbursement({
+    repo,
+    input: {
+      operationKind: 'house_withdraw',
+      disbursementId: interactionDisbursementId('hw', '100000000000000230'),
+      interactionId: '100000000000000230',
+      guildId: 'g',
+      userId: 'u',
+      tokenIdentifier: TOKEN,
+      tokenTicker: 'DROP',
+      amountHuman: '1',
+      decimals: 8,
+      recipientWallet: OTHER,
+      senderWallet: SENDER,
+      effectPayload: { source: 'betting' }
+    },
+    send: async () => {
+      throw new Error('must not send while the first house effect is unapplied');
+    }
+  });
+  assert.equal(blocked.kind, 'blocked');
+  const due = await repo.listEffectsDue();
+  assert.equal(due.length, 1);
+  const applied = await repo.noteEffect(house.record.disbursementId);
+  const appliedAgain = await repo.noteEffect(house.record.disbursementId);
+  assert.equal(applied.claimed, true);
+  assert.equal(appliedAgain.claimed, false);
+  assert.equal(repo.houseSpending('g', TOKEN, 'betting'), '100000000');
 });
 
 test('MakeX is not called when the idempotency key was not persisted', async () => {

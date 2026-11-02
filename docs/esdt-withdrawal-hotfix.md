@@ -133,7 +133,7 @@ Do not replay payments. Do not credit balances from this PR.
 
 ## Follow-ups
 
-Those other payment paths now have their own durable identities in `esdt_disbursements`. See `docs/esdt-payment-safety-audit.md`. `/withdraw-esdt` still sends `x-makex-idempotency-key` from `wd_<Discord interaction id>`. Do not remove that header.
+Those other payment paths now have their own durable identities in `esdt_disbursements`. See `docs/esdt-payment-safety-audit.md` for the rollout flags, advisory-lock serialization, unclassified-response rule, and route matrix. `/withdraw-esdt` still sends `x-makex-idempotency-key` from `wd_<Discord interaction id>`. Do not remove that header. An unclassified MakeX response after the withdrawal request is `NEEDS_RECONCILIATION` and does not restore the reserved balance.
 
 ## Tests
 

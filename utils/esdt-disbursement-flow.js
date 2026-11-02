@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { canonicalizeEsdtAmount, addDecimalStrings, subtractDecimalStrings } = require('./esdt-amount');
+const { coerceTransferClassification } = require('./esdt-transfer-outcome');
 
 const OPEN_STATUSES = new Set(['RESERVED', 'PENDING', 'NEEDS_RECONCILIATION']);
 
@@ -59,6 +60,30 @@ const OPERATION_DEFAULTS = {
 
 function esdtDisbursementRecoveryEnabled(env = process.env) {
   return env.ESDT_DISBURSEMENT_RECOVERY_ENABLED === 'true';
+}
+
+function esdtDisbursementsEnabled(env = process.env) {
+  return env.ESDT_DISBURSEMENTS_ENABLED === 'true';
+}
+
+function esdtNftDisbursementsEnabled(env = process.env) {
+  return env.ESDT_NFT_DISBURSEMENTS_ENABLED === 'true';
+}
+
+function disbursementRolloutOpen(operationKind, env = process.env) {
+  if (operationKind === 'nft_transfer') return esdtNftDisbursementsEnabled(env);
+  return esdtDisbursementsEnabled(env);
+}
+
+function pausedDisbursementResult(operationKind) {
+  const nft = operationKind === 'nft_transfer';
+  return {
+    kind: 'paused',
+    reserved: false,
+    sent: false,
+    record: null,
+    code: nft ? 'NFT_DISBURSEMENTS_PAUSED' : 'DISBURSEMENTS_PAUSED'
+  };
 }
 
 function clone(value) {
@@ -251,6 +276,8 @@ class MemoryEsdtDisbursementRepository {
     return (row.balances && row.balances[field] && row.balances[field][tokenIdentifier]) || '0';
   }
 
+  // In-process stand-in for the reserve_esdt_disbursement advisory locks.
+  // Two overlapping reserves observe the same block-scope outcome as Postgres.
   _lock(fn) {
     const run = this._queue.then(() => fn());
     this._queue = run.then(() => undefined, () => undefined);
@@ -699,8 +726,11 @@ function normalizeInput(input) {
   };
 }
 
-async function executeEsdtDisbursement({ repo, send, input, workerId }) {
+async function executeEsdtDisbursement({ repo, send, input, workerId, env = process.env }) {
   const normalized = normalizeInput(input);
+  if (!disbursementRolloutOpen(normalized.operationKind, env)) {
+    return pausedDisbursementResult(normalized.operationKind);
+  }
   let reserved;
   try {
     reserved = await repo.reserve(normalized);
@@ -763,7 +793,7 @@ async function executeEsdtDisbursement({ repo, send, input, workerId }) {
 
     let classified;
     try {
-      classified = await send(record);
+      classified = coerceTransferClassification(await send(record));
     } catch (error) {
       if (error && error.beforeBroadcast === true && error.broadcastAttempted !== true) {
         const failed = await repo.failAndRestore(record.disbursementId, {
@@ -845,7 +875,7 @@ async function executeEsdtDisbursement({ repo, send, input, workerId }) {
   }
 }
 
-async function resumeEsdtDisbursement({ repo, send, disbursementId, workerId, recoveryEnabled = false }) {
+async function resumeEsdtDisbursement({ repo, send, disbursementId, workerId, recoveryEnabled = false, env = process.env }) {
   const existing = await repo.getById(disbursementId);
   if (!existing) return { kind: 'missing', record: null, posted: false };
   if (existing.status === 'CONFIRMED' || existing.status === 'FAILED') {
@@ -858,6 +888,9 @@ async function resumeEsdtDisbursement({ repo, send, disbursementId, workerId, re
   if (recoveryEnabled !== true) {
     return { kind: 'recovery_paused', record: existing, posted: false };
   }
+  if (!disbursementRolloutOpen(existing.operationKind, env)) {
+    return { kind: 'rollout_paused', record: existing, posted: false };
+  }
   if (existing.replayable === false) {
     return { kind: 'not_replayable', record: existing, posted: false };
   }
@@ -865,6 +898,7 @@ async function resumeEsdtDisbursement({ repo, send, disbursementId, workerId, re
     repo,
     send,
     workerId,
+    env,
     input: {
       operationKind: existing.operationKind,
       disbursementId: existing.disbursementId,
@@ -892,7 +926,7 @@ async function resumeEsdtDisbursement({ repo, send, disbursementId, workerId, re
   return { ...outcome, posted: outcome.sent === true };
 }
 
-async function resumeUnresolvedEsdtDisbursements({ repo, send, workerId, limit = 20, recoveryEnabled = false }) {
+async function resumeUnresolvedEsdtDisbursements({ repo, send, workerId, limit = 20, recoveryEnabled = false, env = process.env }) {
   const rows = await repo.listUnresolved({ limit });
   if (recoveryEnabled !== true) {
     return {
@@ -911,7 +945,8 @@ async function resumeUnresolvedEsdtDisbursements({ repo, send, workerId, limit =
         send,
         disbursementId: row.disbursementId,
         workerId,
-        recoveryEnabled: true
+        recoveryEnabled: true,
+        env
       });
       if (outcome.posted) posted += 1;
       results.push({ disbursementId: row.disbursementId, kind: outcome.kind });
@@ -925,6 +960,9 @@ async function resumeUnresolvedEsdtDisbursements({ repo, send, workerId, limit =
 module.exports = {
   OPERATION_DEFAULTS,
   esdtDisbursementRecoveryEnabled,
+  esdtDisbursementsEnabled,
+  esdtNftDisbursementsEnabled,
+  disbursementRolloutOpen,
   interactionDisbursementId,
   massRefundDisbursementId,
   poolFeeDisbursementId,

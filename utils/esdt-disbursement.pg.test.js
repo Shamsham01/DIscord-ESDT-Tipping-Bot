@@ -287,3 +287,259 @@ test('postgres credits a cross-guild counterparty once and applies house spendin
     assert.equal(spending.rows[0].spent, '100000000');
   });
 });
+
+const RESERVE_SQL = `SELECT reserve_esdt_disbursement($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,$22) AS result`;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForLockWaiter(client) {
+  const started = Date.now();
+  while (Date.now() - started < 5000) {
+    const seen = await client.query(`
+      SELECT count(*)::int AS n
+      FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND pid <> pg_backend_pid()
+        AND wait_event_type = 'Lock'
+    `);
+    if (seen.rows[0].n > 0) return;
+    await delay(20);
+  }
+  throw new Error('the overlapping reservation did not wait on the disbursement lock');
+}
+
+async function overlapReserve(client, argsA, argsB) {
+  const dbName = (await client.query('SELECT current_database() AS name')).rows[0].name;
+  const other = new Client(pgConfig(dbName));
+  await other.connect();
+  try {
+    await client.query('BEGIN');
+    const first = await client.query(RESERVE_SQL, argsA);
+    const pending = other.query('BEGIN').then(() => other.query(RESERVE_SQL, argsB));
+    try {
+      await waitForLockWaiter(client);
+      await client.query('COMMIT');
+    } catch (error) {
+      try { await client.query('ROLLBACK'); } catch { /* transaction already closed */ }
+      pending.catch(() => {});
+      throw error;
+    }
+    try {
+      const second = await pending;
+      await other.query('COMMIT');
+      return { first: first.rows[0].result, second: second.rows[0].result, secondError: null };
+    } catch (error) {
+      await other.query('ROLLBACK');
+      return { first: first.rows[0].result, second: null, secondError: error };
+    }
+  } finally {
+    await other.end();
+  }
+}
+
+test('overlapping reservations for one block scope create a single payment', async () => {
+  await withDatabase(async (client) => {
+    await seed(client, '10', 'u1');
+    await seed(client, '10', 'u2');
+
+    const house = await overlapReserve(
+      client,
+      reserveArgs('hw_100000000000000401', '1', '100000000', {
+        kind: 'house_withdraw',
+        interaction: '100000000000000401',
+        reserves: false,
+        effectRequired: true,
+        payload: { source: 'betting' },
+        block: 'guild-kind'
+      }),
+      reserveArgs('hw_100000000000000402', '1', '100000000', {
+        kind: 'house_withdraw',
+        interaction: '100000000000000402',
+        reserves: false,
+        effectRequired: true,
+        payload: { source: 'betting' },
+        block: 'guild-kind'
+      })
+    );
+    assert.equal(house.first.created, true);
+    assert.match(house.secondError.message, /unresolved_disbursement/);
+
+    const subscription = await overlapReserve(
+      client,
+      reserveArgs('sub_100000000000000411', '4', '400000000', {
+        kind: 'subscription',
+        interaction: '100000000000000411',
+        user: 'u1',
+        effectRequired: true,
+        payload: { planMonths: 1 },
+        block: 'guild-kind'
+      }),
+      reserveArgs('sub_100000000000000412', '4', '400000000', {
+        kind: 'subscription',
+        interaction: '100000000000000412',
+        user: 'u2',
+        effectRequired: true,
+        payload: { planMonths: 1 },
+        block: 'guild-kind'
+      })
+    );
+    assert.equal(subscription.first.created, true);
+    assert.match(subscription.secondError.message, /unresolved_disbursement/);
+    const subBalances = await client.query(
+      `SELECT user_id, balances->>'DROP-1fc8cc' AS balance FROM virtual_accounts WHERE user_id IN ('u1', 'u2') ORDER BY user_id`
+    );
+    assert.deepEqual(subBalances.rows.map((row) => row.balance), ['6', '10']);
+
+    const refund = await overlapReserve(
+      client,
+      reserveArgs('mr_100000000000000421_u1_DROP-1fc8cc', '2', '200000000', {
+        interaction: '100000000000000421',
+        user: 'u1',
+        block: 'other-interaction'
+      }),
+      reserveArgs('mr_100000000000000422_u2_DROP-1fc8cc', '2', '200000000', {
+        interaction: '100000000000000422',
+        user: 'u2',
+        block: 'other-interaction'
+      })
+    );
+    assert.equal(refund.first.created, true);
+    assert.match(refund.secondError.message, /unresolved_disbursement/);
+
+    const admin = await overlapReserve(
+      client,
+      reserveArgs('send_100000000000000431', '1', '100000000', {
+        kind: 'admin_send',
+        interaction: '100000000000000431',
+        reserves: false,
+        feeExempt: false,
+        block: 'recipient'
+      }),
+      reserveArgs('send_100000000000000432', '1', '100000000', {
+        kind: 'admin_send',
+        interaction: '100000000000000432',
+        reserves: false,
+        feeExempt: false,
+        block: 'recipient'
+      })
+    );
+    assert.equal(admin.first.created, true);
+    assert.match(admin.secondError.message, /unresolved_disbursement/);
+
+    const nft = await overlapReserve(
+      client,
+      reserveArgs('nr_100000000000000441_asset000000000001', '1', '100000000', {
+        kind: 'nft_transfer',
+        interaction: '100000000000000441',
+        user: 'nft-holder',
+        reserves: false,
+        replayable: false,
+        feeExempt: false,
+        block: 'asset'
+      }),
+      reserveArgs('nr_100000000000000442_asset000000000002', '1', '100000000', {
+        kind: 'nft_transfer',
+        interaction: '100000000000000442',
+        user: 'nft-holder',
+        reserves: false,
+        replayable: false,
+        feeExempt: false,
+        block: 'asset'
+      })
+    );
+    assert.equal(nft.first.created, true);
+    assert.match(nft.secondError.message, /unresolved_disbursement/);
+
+    const rows = await client.query(
+      `SELECT operation_kind, count(*)::int AS n FROM esdt_disbursements GROUP BY operation_kind ORDER BY operation_kind`
+    );
+    assert.deepEqual(rows.rows, [
+      { operation_kind: 'admin_send', n: 1 },
+      { operation_kind: 'house_withdraw', n: 1 },
+      { operation_kind: 'mass_refund', n: 1 },
+      { operation_kind: 'nft_transfer', n: 1 },
+      { operation_kind: 'subscription', n: 1 }
+    ]);
+    const debits = await client.query(`SELECT count(*)::int AS n FROM virtual_account_transactions WHERE type = 'deduction'`);
+    assert.equal(debits.rows[0].n, 2);
+  });
+});
+
+test('the same disbursement id reserves once even when two transactions overlap', async () => {
+  await withDatabase(async (client) => {
+    await seed(client, '10');
+    const args = reserveArgs('mr_100000000000000451_u_DROP-1fc8cc', '4', '400000000', {
+      interaction: '100000000000000451'
+    });
+    const raced = await overlapReserve(client, args, args);
+    assert.equal(raced.first.created, true);
+    assert.equal(raced.secondError, null);
+    assert.equal(raced.second.created, false);
+    const balance = await client.query(`SELECT balances->>'DROP-1fc8cc' AS balance FROM virtual_accounts`);
+    assert.equal(balance.rows[0].balance, '6');
+    const debits = await client.query(`SELECT count(*)::int AS n FROM virtual_account_transactions WHERE type = 'deduction'`);
+    assert.equal(debits.rows[0].n, 1);
+  });
+});
+
+test('a confirmed payment cannot be restored and a subscription effect is applied once', async () => {
+  await withDatabase(async (client) => {
+    await seed(client, '8');
+    await client.query(RESERVE_SQL, reserveArgs('mr_100000000000000461_u_DROP-1fc8cc', '3', '300000000', {
+      interaction: '100000000000000461'
+    }));
+    const lease = await client.query(
+      `SELECT claim_esdt_disbursement_lease('mr_100000000000000461_u_DROP-1fc8cc', 'worker-a', 150) AS result`
+    );
+    await client.query(
+      `SELECT confirm_esdt_disbursement($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      ['mr_100000000000000461_u_DROP-1fc8cc', 'worker-a', lease.rows[0].result.fence, HASH, 'op', 200, true, '0', null, '11']
+    );
+    await assert.rejects(
+      () => client.query(
+        `SELECT fail_esdt_disbursement($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        ['mr_100000000000000461_u_DROP-1fc8cc', 'worker-a', lease.rows[0].result.fence, true, 'EXECUTION_FAILED', 'too late', 422, 'op', HASH]
+      ),
+      (error) => /invalid_transition/.test(error.message)
+    );
+    const balance = await client.query(`SELECT balances->>'DROP-1fc8cc' AS balance FROM virtual_accounts`);
+    assert.equal(balance.rows[0].balance, '5');
+    const restores = await client.query(
+      `SELECT count(*)::int AS n FROM virtual_account_transactions WHERE transaction_id LIKE 'esdt-disburse-restore:%'`
+    );
+    assert.equal(restores.rows[0].n, 0);
+
+    await client.query(RESERVE_SQL, reserveArgs('sub_100000000000000462', '1', '100000000', {
+      kind: 'subscription',
+      interaction: '100000000000000462',
+      effectRequired: true,
+      payload: { planMonths: 1, amountUsdc: '1' },
+      block: 'guild-kind'
+    }));
+    const subLease = await client.query(
+      `SELECT claim_esdt_disbursement_lease('sub_100000000000000462', 'worker-a', 150) AS result`
+    );
+    await client.query(
+      `SELECT confirm_esdt_disbursement($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      ['sub_100000000000000462', 'worker-a', subLease.rows[0].result.fence, HASH, 'op-sub', 200, true, '0', null, '12']
+    );
+    const firstEffect = await client.query(`SELECT note_esdt_disbursement_effect('sub_100000000000000462') AS result`);
+    const secondEffect = await client.query(`SELECT note_esdt_disbursement_effect('sub_100000000000000462') AS result`);
+    assert.equal(firstEffect.rows[0].result.claimed, true);
+    assert.equal(secondEffect.rows[0].result.claimed, false);
+    const houses = await client.query(`SELECT count(*)::int AS n FROM house_balance`);
+    assert.equal(houses.rows[0].n, 0);
+    const after = await client.query(`SELECT balances->>'DROP-1fc8cc' AS balance FROM virtual_accounts`);
+    assert.equal(after.rows[0].balance, '4');
+    await assert.rejects(
+      () => client.query(
+        `SELECT fail_esdt_disbursement($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        ['sub_100000000000000462', 'worker-a', subLease.rows[0].result.fence, true, 'EXECUTION_FAILED', 'too late', 422, 'op-sub', HASH]
+      ),
+      (error) => /invalid_transition/.test(error.message)
+    );
+    assert.equal((await client.query(`SELECT balances->>'DROP-1fc8cc' AS balance FROM virtual_accounts`)).rows[0].balance, '4');
+  });
+});

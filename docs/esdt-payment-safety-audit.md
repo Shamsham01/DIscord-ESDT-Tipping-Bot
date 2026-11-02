@@ -28,7 +28,8 @@ Reservation, lease, confirm, fail, and restore go through `reserve_esdt_disburse
 - Two identical refunds from two Discord interactions get two ids. A retry of one interaction reuses the first id and does not debit again.
 - A second mass-refund interaction is refused while another mass refund for that guild is open.
 - Server deletion stops when `unresolvedRefunds > 0`, including when the virtual balance is already zero because it was reserved.
-- A timeout or foreign blocking hash leaves the row pending or `NEEDS_RECONCILIATION`. Virtual funds are not restored.
+- A timeout, HTTP 503, foreign blocking hash, or unclassified response leaves the row pending or `NEEDS_RECONCILIATION`. Virtual funds are not restored. `beforeBroadcast` is used only when no request was attempted, or when MakeX itself reports an authoritative non-payment. A missing `classified` property after the request returns is not that report.
+- `reserve_esdt_disbursement` takes a transaction advisory lock on the disbursement id and, when the block scope is not `none`, on that scope, before it locks a virtual account. Two payments that do not share a virtual account can no longer both pass the open-row check. A `hashtext` collision only makes extra callers wait.
 - HTTP 422 `EXECUTION_FAILED` restores only when the four-field identity matches. The ledger id is `esdt-disburse-restore:<id>` and a second restore is a no-op.
 - A lost or expired lease cannot confirm or restore.
 - House spending is applied once inside `note_esdt_disbursement_effect` from `amount_raw`. The command does not also call `trackHouseSpending`.
@@ -39,31 +40,54 @@ Reservation, lease, confirm, fail, and restore go through `reserve_esdt_disburse
 
 ## NFT, SFT, and bulk
 
-`nftTransfer`, `sftTransfer`, and `multiNFTTransfer` are not in the Transfers PR #7 contract. The bot does not treat a legacy hash as confirmation. It persists one non-replayable row, sends at most once, leaves `NEEDS_RECONCILIATION`, does not remove the virtual NFT, and does not auto-retry. A pre-broadcast 4xx with no hash is an authoritative non-payment. A timeout is not.
+`nftTransfer`, `sftTransfer`, and `multiNFTTransfer` are not in the Transfers PR #7 contract, and this bot does not assume Transfers PR #8 adds that contract. The bot does not treat a legacy hash as confirmation. It persists one non-replayable row, sends at most once, leaves `NEEDS_RECONCILIATION`, does not remove the virtual NFT, and does not auto-retry. A pre-broadcast 4xx with no hash is an authoritative non-payment. A timeout is not. An unresolved NFT row cannot be broadcast again and is not restored from a missing classifier.
 
-This is a cross-repository dependency. Those three MakeX endpoints need the same complete success contract and idempotency behaviour as `esdtTransfer` before the bot can confirm or replay them. Until then, mass refund of an NFT blocks server deletion on purpose.
+This is a cross-repository dependency. Before the bot can confirm or replay those endpoints, MakeX must accept `x-makex-idempotency-key` and return the same HTTP 200 complete-success body used for `esdtTransfer`: `status: success`, `success: true`, `complete: true`, `result.txHash`, `result.status: success`, and echoed sender, receiver, token, and exact raw amount. A hash-only or human-amount body is not enough. Until that contract exists, mass refund of an NFT blocks server deletion on purpose. Do not enable `ESDT_NFT_DISBURSEMENTS_ENABLED` on that assumption.
 
 Auction settlement uses a stable id derived from the guild, auction, and asset. If the NFT call is not an authoritative non-payment, the winning bid is not refunded and the auction is not marked finished. The closer then stops by recording `FAILED` so the one-minute loop does not send the NFT again. That status means “stop and reconcile”, and the Discord message says the bid was not refunded.
 
+## Transfers PR #8
+
+The bot still sends `x-makex-idempotency-key` from the persisted id (`wd_<interaction>` for withdrawals, the disbursement id for every other ESDT payment). PR #8 must keep accepting that header. Confirmation is still HTTP 200 plus `complete: true`, `success: true`, both statuses `success`, `result.txHash`, and an exact match of sender, receiver, token, and raw amount. This change does not adopt a new response shape.
+
 ## Flags
 
-- `ESDT_WITHDRAWALS_PAUSED` still pauses new `/withdraw-esdt` requests unless it is exactly `false`.
+- `ESDT_WITHDRAWALS_PAUSED` still pauses new `/withdraw-esdt` requests unless it is exactly `false`. The persisted withdrawal id is unchanged.
 - `ESDT_WITHDRAWAL_RECOVERY_ENABLED` still POSTs unresolved withdrawals only when it is exactly `true`.
-- `ESDT_DISBURSEMENT_RECOVERY_ENABLED` POSTs replayable unresolved disbursements only when it is exactly `true`. Non-replayable NFT rows are never auto-posted. The local effect sweep (subscription upsert and house spending) is not a MakeX call and is not gated by this flag.
-- New disbursements are not gated by the withdrawal pause. They fail closed when `SUPABASE_SERVICE_ROLE_KEY` is missing or the migration is absent.
+- `ESDT_DISBURSEMENTS_ENABLED` must be exactly `true` before a new ESDT disbursement is reserved or sent. The default is fail closed. There is no fallback to the old unreserved `transferESDT` path.
+- `ESDT_NFT_DISBURSEMENTS_ENABLED` must be exactly `true` before an NFT, SFT, bulk, or auction disbursement is reserved or sent. Turning on ESDT disbursements does not turn this on.
+- `ESDT_DISBURSEMENT_RECOVERY_ENABLED` POSTs replayable unresolved disbursements only when it is exactly `true` and the matching rollout flag is also exactly `true`. Non-replayable NFT rows are never auto-posted. The local effect sweep (subscription upsert and house spending) is not a MakeX call and is not gated by these flags.
+- Missing `SUPABASE_SERVICE_ROLE_KEY` or a missing migration still refuses before any MakeX call.
+
+## Payment route matrix
+
+| Route | State |
+| --- | --- |
+| `/withdraw-esdt` | Verified against the PR #7 complete-success body and the four-field identity check. Intentionally paused unless `ESDT_WITHDRAWALS_PAUSED=false`. Recovery paused unless `ESDT_WITHDRAWAL_RECOVERY_ENABLED=true`. |
+| Mass refund ESDT, `/house-withdraw`, subscription, pool-creation fee, cross-guild ESDT, `/send-esdt` | Same confirmation contract, with durable ids and one reservation. Intentionally paused unless the migration is applied and `ESDT_DISBURSEMENTS_ENABLED=true`. Recovery also requires `ESDT_DISBURSEMENT_RECOVERY_ENABLED=true`. |
+| NFT, SFT, bulk NFT, auction NFT settlement | Still dependent on a MakeX contract these endpoints do not return. Intentionally paused unless `ESDT_NFT_DISBURSEMENTS_ENABLED=true`. Even then the bot sends once, does not confirm, and does not replay. |
 
 ## Deployment
 
-Do not deploy this as a production payment change until an operator does the following, in order:
+Do not deploy this as a production payment change, do not apply the migration to production from this change, and do not enable withdrawals. When an operator later chooses to roll it out, use this order:
 
-1. Apply `supabase/migrations/20261102180000_esdt_disbursement_reservations.sql` with the service role. It creates `esdt_disbursements` and functions only. It does not update balances.
+1. Apply `supabase/migrations/20261102180000_esdt_disbursement_reservations.sql` with the service role. It creates `esdt_disbursements` and functions only, including the advisory locks inside `reserve_esdt_disbursement`. It does not update balances. The function signature is unchanged from the first version of this migration.
 2. Set `SUPABASE_SERVICE_ROLE_KEY` on the bot. Without it, the new payment commands refuse before calling MakeX.
 3. Leave `ESDT_WITHDRAWALS_PAUSED` unset or any value other than `false`.
-4. Leave `ESDT_WITHDRAWAL_RECOVERY_ENABLED` and `ESDT_DISBURSEMENT_RECOVERY_ENABLED` unset.
-5. Do not replay the 1 Nov 2026 incident withdrawals. Use `scripts/esdt-withdrawal-incident-reconciliation.sql` for that incident. Use `scripts/esdt-disbursement-recovery.sql` only as a read-only list of open disbursements after this migration exists.
+4. Leave `ESDT_DISBURSEMENTS_ENABLED`, `ESDT_NFT_DISBURSEMENTS_ENABLED`, `ESDT_WITHDRAWAL_RECOVERY_ENABLED`, and `ESDT_DISBURSEMENT_RECOVERY_ENABLED` unset. New routes stay fail closed.
+5. After the migration and a verified `esdtTransfer` response are both in place, set `ESDT_DISBURSEMENTS_ENABLED=true` for the ESDT routes only. Leave the NFT flag unset until `nftTransfer`, `sftTransfer`, and `multiNFTTransfer` return the contract above.
+6. Do not replay the 1 Nov 2026 incident withdrawals. Use `scripts/esdt-withdrawal-incident-reconciliation.sql` for that incident. Use `scripts/esdt-disbursement-recovery.sql` only as a read-only list of open disbursements after this migration exists.
 
-Historical payments that were already unresolved stay untouched. Safe reconciliation needs the durable row (or, for payments made before this migration, the Discord interaction, the virtual ledger row, and a MakeX operation whose echoed sender, recipient, token, and raw amount match). A transaction hash by itself is not that evidence.
+### Rollback
+
+Unset `ESDT_DISBURSEMENTS_ENABLED` and `ESDT_NFT_DISBURSEMENTS_ENABLED`. New reservations and recovery POSTs stop. Confirmed payments are not reversed. Open rows stay reserved. Do not drop `esdt_disbursements` to roll back, and do not restore a balance because a response had no classifier or because a worker's lease expired.
+
+### Recovery
+
+A human may reconcile a row only with the durable row, the MakeX operation whose idempotency key equals that id, and a PR #7 body whose sender, recipient, token, and raw amount match. A transaction hash by itself is not evidence. Reserved funds stay reserved when the outcome is pending, `NEEDS_RECONCILIATION`, or unclassified. Restore only after authoritative non-payment, through `fail_esdt_disbursement`, which refuses a `CONFIRMED` row. Destination credits, house spending, and the subscription effect stamp are idempotent. If the chain payment is confirmed and the subscription upsert or house spending did not finish, the effect sweep retries that local bookkeeping and does not send the payment again. An expired lease cannot confirm or restore; the next worker must claim a new lease first.
+
+Historical payments that were already unresolved stay untouched. Safe reconciliation needs the durable row (or, for payments made before this migration, the Discord interaction, the virtual ledger row, and a MakeX operation whose echoed sender, recipient, token, and raw amount match).
 
 ## Tests
 
-`npm test` includes the existing withdrawal and contract tests plus `utils/esdt-disbursement.test.js` and `utils/esdt-disbursement.pg.test.js`. The Postgres tests create and drop a disposable database. They do not call MakeX or production. The cases cover separate interaction ids, retry of one key, timeout, a foreign hash, the wrong recipient or amount, a paused restart, an expired lease, concurrent reservation, one restoration, a whitelisted Community Fund request, and the subscription, pool-fee, house, admin-send, and non-replayable NFT paths.
+`npm test` includes the existing withdrawal and contract tests plus `utils/esdt-disbursement.test.js` and `utils/esdt-disbursement.pg.test.js`. The Postgres tests create and drop a disposable database and open a second connection for overlapping transactions. They do not call MakeX or production. The cases cover separate interaction ids, retry of one key, an unclassified HTTP 200, an unexpected body, timeout, HTTP 503, a later exact on-chain success after the client fails, a foreign hash, the wrong recipient or amount, a paused rollout, an expired lease, one restoration, a confirmed payment that cannot be restored, a whitelisted Community Fund request, and the subscription, pool-fee, house, admin-send, and non-replayable NFT paths. The Postgres overlap covers house withdrawals, subscriptions, mass refunds, admin sends, NFT asset operations, and two transactions racing the same id.

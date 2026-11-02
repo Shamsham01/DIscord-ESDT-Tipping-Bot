@@ -745,3 +745,33 @@ test('automated recovery stays paused unless explicitly enabled', async () => {
   assert.equal(sends, 1);
   assert.equal(repo.balanceOf('g', 'u', TOKEN), '7');
 });
+
+test('an unclassified withdrawal response stays reserved and a later exact success confirms once', async () => {
+  const repo = repoWith('9');
+  let attempt = 0;
+  const send = async (record) => {
+    attempt += 1;
+    if (attempt === 1) return { httpStatus: 200, txHash: OWN_HASH, authoritativeNonPayment: true };
+    return classifyFor(record, successSpec(record));
+  };
+  const unresolved = await executeEsdtWithdrawal({
+    repo,
+    input: withdrawalInput('100000000000000021', '2'),
+    send
+  });
+  assert.equal(unresolved.kind, 'needs_reconciliation');
+  assert.equal(unresolved.record.errorCode, 'UNCLASSIFIED_RESPONSE');
+  assert.equal(unresolved.record.primaryTxHash, null);
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '7');
+  const confirmed = await executeEsdtWithdrawal({
+    repo,
+    input: withdrawalInput('100000000000000021', '2'),
+    send
+  });
+  assert.equal(confirmed.kind, 'confirmed');
+  assert.equal(confirmed.record.primaryTxHash, OWN_HASH);
+  assert.equal(confirmed.record.withdrawalId, 'wd_100000000000000021');
+  assert.equal(attempt, 2);
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '7');
+  assert.equal(repo.exportState().ledger.filter((entry) => String(entry.id).startsWith('esdt-restore:')).length, 0);
+});

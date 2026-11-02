@@ -41,5 +41,8 @@ ORDER BY updated_at;
 -- 4. The virtual_account_transactions rows esdt-disburse-reserve:<id>,
 --    esdt-disburse-restore:<id>, and esdt-disburse-credit:<id>.
 -- Restore virtual funds only when that evidence shows the transfer was not paid.
--- Do not POST the row again unless ESDT_DISBURSEMENT_RECOVERY_ENABLED=true
--- and replayable is true. NFT rows are not replayable.
+-- A missing classifier, a timeout, or an HTTP 5xx is not that evidence.
+-- Do not POST the row again unless ESDT_DISBURSEMENT_RECOVERY_ENABLED=true,
+-- the matching rollout flag is exactly true (ESDT_DISBURSEMENTS_ENABLED, or
+-- ESDT_NFT_DISBURSEMENTS_ENABLED for nft_transfer), and replayable is true.
+-- NFT rows are not replayable. Unsetting a rollout flag does not restore funds.

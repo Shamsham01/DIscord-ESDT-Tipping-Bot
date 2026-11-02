@@ -170,6 +170,32 @@ BEGIN
         RAISE EXCEPTION 'amount_raw_mismatch';
     END IF;
 
+    -- Serialize the disbursement id, and the business block scope, before any
+    -- virtual-account row lock. Two requests that do not share a virtual
+    -- account would otherwise both pass the later IF EXISTS checks.
+    -- hashtext collisions only add extra waiting; they do not allow a second pay.
+    PERFORM pg_advisory_xact_lock(hashtext('esdt-disburse-id'), hashtext(p_disbursement_id));
+    IF p_business_action_id IS DISTINCT FROM p_disbursement_id THEN
+        PERFORM pg_advisory_xact_lock(hashtext('esdt-disburse-biz'), hashtext(p_business_action_id));
+    END IF;
+    IF p_block_scope IS DISTINCT FROM 'none' THEN
+        PERFORM pg_advisory_xact_lock(
+            hashtext('esdt-disburse-scope'),
+            hashtext(
+                CASE p_block_scope
+                    WHEN 'guild-kind' THEN p_guild_id || '|' || p_operation_kind
+                    WHEN 'other-interaction' THEN p_guild_id || '|' || p_operation_kind
+                    WHEN 'guild-user-kind' THEN p_guild_id || '|' || p_user_id || '|' || p_operation_kind
+                    WHEN 'recipient' THEN p_guild_id || '|' || p_operation_kind || '|'
+                        || lower(p_sender_wallet) || '|' || lower(p_recipient_wallet) || '|'
+                        || lower(p_token_identifier)
+                    WHEN 'asset' THEN p_guild_id || '|' || p_user_id || '|' || lower(p_token_identifier)
+                    ELSE p_guild_id || '|' || p_block_scope
+                END
+            )
+        );
+    END IF;
+
     IF p_reserves_balance IS TRUE THEN
         SELECT * INTO v_account
         FROM virtual_accounts

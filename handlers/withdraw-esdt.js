@@ -3,6 +3,7 @@
 const { EmbedBuilder, MessageFlags } = require('discord.js');
 const BigNumber = require('bignumber.js');
 const { canonicalizeEsdtAmount } = require('../utils/esdt-amount');
+const { unclassifiedTransferResult } = require('../utils/esdt-transfer-outcome');
 const {
   esdtWithdrawalsArePaused,
   executeEsdtWithdrawal
@@ -225,9 +226,7 @@ async function handleWithdrawEsdt(interaction, deps) {
           }
         );
         if (transferResult && transferResult.classified) return transferResult.classified;
-        const error = new Error(transferResult?.errorMessage || 'MakeX did not return a withdrawal result');
-        error.beforeBroadcast = transferResult?.authoritativeNonPayment === true && !transferResult?.pendingConfirmation;
-        throw error;
+        return unclassifiedTransferResult(transferResult);
       }
     });
 
