@@ -2826,7 +2826,7 @@ async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, gu
         errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status
-      }, { httpStatus: response.status, txHash, requestStarted: true });
+      }, { httpStatus: response.status, txHash, requestStarted: true, parsedResponse });
       
       if (result.success) {
         console.log(`Successfully sent NFT ${fullTokenIdentifier} to: ${recipientWallet} using project: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
@@ -2843,9 +2843,9 @@ async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, gu
       
       if (fetchError.name === 'AbortError') {
         console.error('NFT transfer API request timed out after 60 seconds');
-        throw stampLegacyTransfer(new Error('API request timed out after 60 seconds'), { requestStarted: true });
+        throw stampLegacyTransfer(new Error('API request timed out after 60 seconds'), { requestStarted: true, timedOut: true });
       }
-      throw stampLegacyTransfer(fetchError, { requestStarted });
+      throw stampLegacyTransfer(fetchError, { requestStarted, networkError: requestStarted === true });
     }
   } catch (error) {
     console.error(`Error transferring NFT:`, error.message);
@@ -3014,7 +3014,7 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
         errorMessage: errorMessage || (txStatusString && !isStatusSuccess && hasNoError ? `Transaction status: ${txStatusString}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status
-      }, { httpStatus: response.status, txHash, requestStarted: true });
+      }, { httpStatus: response.status, txHash, requestStarted: true, parsedResponse });
       
       if (result.success) {
         console.log(`[WITHDRAW-SFT] Successfully sent SFT ${tokenTicker}#${tokenNonce} (amount: ${amountStr}) to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
@@ -3031,9 +3031,9 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
       
       if (fetchError.name === 'AbortError') {
         console.error('[WITHDRAW-SFT] SFT transfer API request timed out after 60 seconds');
-        throw stampLegacyTransfer(new Error('API request timed out after 60 seconds'), { requestStarted: true });
+        throw stampLegacyTransfer(new Error('API request timed out after 60 seconds'), { requestStarted: true, timedOut: true });
       }
-      throw stampLegacyTransfer(fetchError, { requestStarted });
+      throw stampLegacyTransfer(fetchError, { requestStarted, networkError: requestStarted === true });
     }
   } catch (error) {
     console.error(`[WITHDRAW-SFT] Error transferring SFT:`, error.message);
@@ -3272,7 +3272,7 @@ async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier
         errorMessage: errorMessage || (txStatusString && !isStatusSuccess ? `Transaction status: ${txStatusString}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status
-      }, { httpStatus: response.status, txHash, requestStarted: true });
+      }, { httpStatus: response.status, txHash, requestStarted: true, parsedResponse });
       
       if (result.success) {
         console.log(`[WITHDRAW-NFT] Successfully sent NFT ${fullTokenIdentifier} to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
@@ -3289,9 +3289,9 @@ async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier
       
       if (fetchError.name === 'AbortError') {
         console.error('[WITHDRAW-NFT] NFT transfer API request timed out after 90 seconds');
-        throw stampLegacyTransfer(new Error('API request timed out after 90 seconds'), { requestStarted: true });
+        throw stampLegacyTransfer(new Error('API request timed out after 90 seconds'), { requestStarted: true, timedOut: true });
       }
-      throw stampLegacyTransfer(fetchError, { requestStarted });
+      throw stampLegacyTransfer(fetchError, { requestStarted, networkError: requestStarted === true });
     }
   } catch (error) {
     console.error(`[WITHDRAW-NFT] Error transferring NFT:`, error.message);

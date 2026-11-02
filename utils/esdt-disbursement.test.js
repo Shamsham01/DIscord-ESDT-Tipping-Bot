@@ -14,6 +14,7 @@ const {
   buildEsdtTransferOptions,
   massRefundDisbursementId,
   interactionDisbursementId,
+  legacyAttemptFlags,
   unconfirmedLegacyTransfer
 } = require('./esdt-disbursement-flow');
 
@@ -844,6 +845,185 @@ test('recovery does not post while the rollout flag is off, and a confirmed effe
   assert.equal(applied.claimed, true);
   assert.equal(appliedAgain.claimed, false);
   assert.equal(repo.houseSpending('g', TOKEN, 'betting'), '100000000');
+});
+
+function nftInput(interactionId) {
+  const disbursementId = `nr_${interactionId}_abcdef1234567890abcd`;
+  return {
+    operationKind: 'nft_transfer',
+    disbursementId,
+    businessActionId: disbursementId,
+    interactionId,
+    guildId: 'g',
+    userId: 'u',
+    tokenIdentifier: 'COLLECTION-abc123-01',
+    tokenTicker: 'COLLECTION',
+    amountHuman: '1',
+    decimals: 0,
+    recipientWallet: RECIPIENT,
+    senderWallet: SENDER,
+    reservesBalance: true
+  };
+}
+
+test('legacy NFT responses use the TX_REJECTED allowlist and never a 4xx range', () => {
+  const ambiguous = [
+    { httpStatus: 408 },
+    { httpStatus: 429 },
+    { httpStatus: 500 },
+    { httpStatus: 503, code: 'TX_REJECTED' },
+    { httpStatus: 400 },
+    { httpStatus: 401 },
+    { httpStatus: 404 },
+    { httpStatus: 400, txHash: OWN_HASH, code: 'TX_REJECTED' },
+    { timedOut: true },
+    { networkError: true },
+    { httpStatus: 0 }
+  ];
+  for (const spec of ambiguous) {
+    const flags = legacyAttemptFlags({ requestStarted: true, ...spec });
+    assert.equal(flags.authoritativeNonPayment, false, JSON.stringify(spec));
+    assert.equal(flags.beforeBroadcast, false, JSON.stringify(spec));
+    assert.equal(flags.broadcastAttempted, true, JSON.stringify(spec));
+  }
+
+  const verified = legacyAttemptFlags({
+    requestStarted: true,
+    httpStatus: 400,
+    code: 'TX_REJECTED',
+    parsedResponse: { complete: false, retryable: false, data: { txHash: null, blockingTxHash: null } }
+  });
+  assert.equal(verified.authoritativeNonPayment, true);
+  assert.equal(verified.broadcastAttempted, false);
+
+  const local = legacyAttemptFlags({ requestStarted: false });
+  assert.equal(local.beforeBroadcast, true);
+  assert.equal(local.authoritativeNonPayment, false);
+  assert.equal(local.broadcastAttempted, false);
+});
+
+test('ambiguous legacy NFT outcomes stay unresolved, keep the reservation, and are not replayed', async () => {
+  const specs = [
+    { name: '408', httpStatus: 408 },
+    { name: '429', httpStatus: 429 },
+    { name: 'missing hash', httpStatus: 200, success: true },
+    {
+      name: 'malformed success',
+      httpStatus: 200,
+      success: true,
+      txHash: OWN_HASH,
+      rawResponse: { success: true, status: 'success', result: { txHash: OWN_HASH } }
+    }
+  ];
+  let interaction = 100000000000000240;
+  for (const spec of specs) {
+    interaction += 1;
+    const repo = repoWith('5', { tokenIdentifier: 'COLLECTION-abc123-01' });
+    const input = nftInput(String(interaction));
+    let sends = 0;
+    const flags = legacyAttemptFlags({
+      requestStarted: true,
+      httpStatus: spec.httpStatus,
+      txHash: spec.txHash || null,
+      parsedResponse: spec.rawResponse || null
+    });
+    const first = await executeEsdtDisbursement({
+      repo,
+      input,
+      send: async () => {
+        sends += 1;
+        return unconfirmedLegacyTransfer({
+          success: spec.success === true,
+          txHash: spec.txHash || null,
+          httpStatus: spec.httpStatus,
+          rawResponse: spec.rawResponse || null,
+          errorMessage: spec.name,
+          ...flags
+        });
+      }
+    });
+    assert.notEqual(first.kind, 'failed', spec.name);
+    assert.notEqual(first.kind, 'confirmed', spec.name);
+    assert.equal(first.record.status === 'PENDING' || first.record.status === 'NEEDS_RECONCILIATION', true, spec.name);
+    assert.equal(repo.balanceOf('g', 'u', 'COLLECTION-abc123-01'), '4', spec.name);
+    assert.equal(repo.exportState().ledger.some((entry) => entry.type === 'deposit'), false, spec.name);
+    const second = await executeEsdtDisbursement({
+      repo,
+      input,
+      send: async () => {
+        sends += 1;
+        return {
+          outcome: 'confirmed',
+          ownedTxHash: OWN_HASH,
+          authoritativeNonPayment: false
+        };
+      }
+    });
+    assert.equal(sends, 1, spec.name);
+    assert.equal(second.sent, false, spec.name);
+    assert.equal(second.kind, 'needs_reconciliation', spec.name);
+    assert.equal(repo.balanceOf('g', 'u', 'COLLECTION-abc123-01'), '4', spec.name);
+  }
+});
+
+test('an interrupted client does not restore, and only a replayable exact success confirms later', async () => {
+  const nftRepo = repoWith('5', { tokenIdentifier: 'COLLECTION-abc123-01' });
+  const nft = nftInput('100000000000000250');
+  let nftSends = 0;
+  const interrupted = await executeEsdtDisbursement({
+    repo: nftRepo,
+    input: nft,
+    send: async () => {
+      nftSends += 1;
+      const error = new Error('socket hang up');
+      Object.assign(error, legacyAttemptFlags({ requestStarted: true, networkError: true }));
+      throw error;
+    }
+  });
+  assert.equal(interrupted.kind, 'pending');
+  assert.equal(nftRepo.balanceOf('g', 'u', 'COLLECTION-abc123-01'), '4');
+  const replay = await executeEsdtDisbursement({
+    repo: nftRepo,
+    input: nft,
+    send: async () => {
+      nftSends += 1;
+      return { outcome: 'confirmed', ownedTxHash: OWN_HASH, authoritativeNonPayment: false };
+    }
+  });
+  assert.equal(nftSends, 1);
+  assert.equal(replay.kind, 'needs_reconciliation');
+  assert.notEqual(replay.record.status, 'FAILED');
+  assert.equal(nftRepo.exportState().ledger.some((entry) => entry.type === 'deposit'), false);
+
+  const repo = repoWith('9');
+  let attempt = 0;
+  const send = async (record) => {
+    attempt += 1;
+    if (attempt === 1) {
+      const error = new Error('The operation was aborted');
+      error.name = 'AbortError';
+      Object.assign(error, legacyAttemptFlags({ requestStarted: true, timedOut: true }));
+      throw error;
+    }
+    return classifyFor(record, successSpec(record));
+  };
+  const pending = await executeEsdtDisbursement({
+    repo,
+    input: refundInput('100000000000000251', '2'),
+    send
+  });
+  assert.equal(pending.kind, 'pending');
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '7');
+  const confirmed = await executeEsdtDisbursement({
+    repo,
+    input: refundInput('100000000000000251', '2'),
+    send
+  });
+  assert.equal(confirmed.kind, 'confirmed');
+  assert.equal(confirmed.record.primaryTxHash, OWN_HASH);
+  assert.equal(attempt, 2);
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '7');
+  assert.equal(repo.exportState().ledger.filter((entry) => entry.type === 'deposit').length, 0);
 });
 
 test('MakeX is not called when the idempotency key was not persisted', async () => {

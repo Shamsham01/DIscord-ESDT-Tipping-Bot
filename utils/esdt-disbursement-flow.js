@@ -657,15 +657,50 @@ function buildEsdtTransferOptions(record) {
   };
 }
 
-function legacyAttemptFlags({ httpStatus = 0, txHash = null, requestStarted = false } = {}) {
+// Transfers PR #7 verifies TX_REJECTED with no hash as a pre-broadcast rejection.
+// HTTP status ranges are not that evidence. 408, 429, a missing response,
+// and every 5xx stay unresolved even when this code is present.
+const PRE_BROADCAST_VALIDATION_CODES = new Set(['TX_REJECTED']);
+
+function legacyBody(parsedResponse) {
+  return parsedResponse && typeof parsedResponse === 'object' && !Array.isArray(parsedResponse)
+    ? parsedResponse
+    : {};
+}
+
+function legacyAttemptFlags({
+  httpStatus = 0,
+  txHash = null,
+  requestStarted = false,
+  code = null,
+  parsedResponse = null,
+  timedOut = false,
+  networkError = false,
+  complete = null,
+  retryable = null,
+  blockingTxHash = null
+} = {}) {
+  const body = legacyBody(parsedResponse);
+  const data = legacyBody(body.data);
+  const nested = legacyBody(body.error);
   const status = Number(httpStatus) || 0;
-  const hasHash = Boolean(txHash);
+  const resolvedCode = String(code || body.code || nested.code || data.code || '').trim().toUpperCase();
+  const resolvedBlocking = blockingTxHash || body.blockingTxHash || data.blockingTxHash || null;
+  const hasHash = Boolean(txHash || resolvedBlocking);
+  const resolvedComplete = complete === true || body.complete === true;
+  const resolvedRetryable = retryable === true || body.retryable === true || data.retryable === true;
+  const ambiguous = timedOut === true
+    || networkError === true
+    || status === 0
+    || status === 408
+    || status === 429
+    || status >= 500;
   const precheckRejection = requestStarted === true
-    && status >= 400
-    && status < 500
-    && status !== 409
-    && status !== 422
-    && !hasHash;
+    && !ambiguous
+    && !hasHash
+    && !resolvedComplete
+    && !resolvedRetryable
+    && PRE_BROADCAST_VALIDATION_CODES.has(resolvedCode);
   return {
     broadcastAttempted: requestStarted === true && !precheckRejection,
     authoritativeNonPayment: precheckRejection,
@@ -680,7 +715,21 @@ function unconfirmedLegacyTransfer(result) {
     error.code = 'PRECHECK_FAILED';
     throw error;
   }
-  if (result && result.authoritativeNonPayment === true && result.broadcastAttempted !== true) {
+  const verifiedPrecheck = result && result.authoritativeNonPayment === true
+    ? legacyAttemptFlags({
+      httpStatus: result.httpStatus,
+      txHash: result.txHash,
+      requestStarted: true,
+      code: result.code,
+      parsedResponse: result.rawResponse,
+      timedOut: result.timedOut === true,
+      networkError: result.networkError === true,
+      complete: result.complete,
+      retryable: result.retryable,
+      blockingTxHash: result.blockingTxHash
+    })
+    : null;
+  if (verifiedPrecheck && verifiedPrecheck.authoritativeNonPayment === true) {
     return {
       outcome: 'failed',
       authoritativeNonPayment: true,

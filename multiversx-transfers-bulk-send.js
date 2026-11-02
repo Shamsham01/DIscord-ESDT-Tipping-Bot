@@ -229,7 +229,7 @@ async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem
         rawResponse: parsedResponse,
         httpStatus: response.status,
         nftCount: tokenIdentifiers.length
-      }, { httpStatus: response.status, txHash, requestStarted: true });
+      }, { httpStatus: response.status, txHash, requestStarted: true, parsedResponse });
       
       if (result.success) {
         console.log(`Successfully sent ${tokenIdentifiers.length} NFTs to: ${recipientWallet}${txHash ? ` (txHash: ${txHash})` : ''}`);
@@ -246,9 +246,9 @@ async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem
       
       if (fetchError.name === 'AbortError') {
         console.error('Multi NFT transfer API request timed out after 120 seconds');
-        throw stamp(new Error('API request timed out after 120 seconds'), { requestStarted: true });
+        throw stamp(new Error('API request timed out after 120 seconds'), { requestStarted: true, timedOut: true });
       }
-      throw stamp(fetchError, { requestStarted });
+      throw stamp(fetchError, { requestStarted, networkError: requestStarted === true });
     }
   } catch (error) {
     console.error(`Error transferring multiple NFTs:`, error.message);
