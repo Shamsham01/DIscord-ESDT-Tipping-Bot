@@ -6,10 +6,12 @@ const BigNumber = require('bignumber.js');
 const { canonicalizeEsdtAmount } = require('./esdt-amount');
 const { classifyEsdtTransferResponse } = require('./esdt-transfer-outcome');
 const { buildEsdtTransferRequest } = require('./makex-esdt-client');
+const { executeMakeXEsdtTransfer } = require('./makex-esdt-client');
 const {
   MemoryEsdtWithdrawalRepository,
   executeEsdtWithdrawal,
   resumeEsdtWithdrawal,
+  resumeUnresolvedEsdtWithdrawals,
   buildWithdrawalView
 } = require('./esdt-withdrawal-flow');
 
@@ -76,23 +78,23 @@ function successSpec(record, txHash = OWN_HASH) {
     httpStatus: 200,
     chainStatus: 'success',
     body: {
-      message: 'ESDT transfer executed successfully.',
-      status: 'success',
-      verified: true,
-      walletAddress: record.senderWallet,
-      idempotencyKey: record.withdrawalId,
       operationId: `op-${record.withdrawalId}`,
+      status: 'success',
+      complete: true,
+      success: true,
+      replayed: false,
+      skippedWhitelist: true,
+      message: 'ESDT transfer executed successfully.',
+      walletAddress: record.senderWallet,
       usageFeeHash: null,
-      feeExempt: true,
-      usageFee: '0',
-      result: { txHash, status: 'success', nonce: 20 },
-      transfer: {
+      result: {
+        txHash,
+        nonce: 20,
+        status: 'success',
         sender: record.senderWallet,
-        recipient: record.recipientWallet,
+        receiver: record.recipientWallet,
         tokenIdentifier: record.tokenIdentifier,
-        amount: record.amountHuman,
-        amountRaw: record.amountRaw,
-        decimals: record.decimals
+        amount: record.amountRaw
       }
     }
   };
@@ -139,22 +141,22 @@ test('wrong transaction hash is not displayed as this withdrawal', async () => {
       httpStatus: 200,
       chainStatus: 'success',
       body: {
-        status: 'success',
-        verified: true,
-        walletAddress: record.senderWallet,
-        idempotencyKey: record.withdrawalId,
         operationId: 'op-wrong',
+        status: 'success',
+        complete: true,
+        success: true,
+        replayed: false,
+        skippedWhitelist: true,
         usageFeeHash: null,
-        feeExempt: true,
-        usageFee: '0',
-        result: { txHash: INCIDENT_HASH, status: 'success', nonce: 1817 },
-        transfer: {
+        walletAddress: record.senderWallet,
+        result: {
+          txHash: INCIDENT_HASH,
+          nonce: 1817,
+          status: 'success',
           sender: record.senderWallet,
-          recipient: OTHER,
+          receiver: OTHER,
           tokenIdentifier: 'USDC-c76f1f',
-          amountRaw: '1',
-          amount: '0.000001',
-          decimals: 6
+          amount: '1'
         }
       }
     })
@@ -377,10 +379,21 @@ test('bot restart during a pending withdrawal resumes the same durable id', asyn
   });
   assert.equal(first.record.status, 'PENDING');
   const restarted = MemoryEsdtWithdrawalRepository.importState(repo.exportState());
+  const paused = await resumeEsdtWithdrawal({
+    repo: restarted,
+    withdrawalId: first.record.withdrawalId,
+    workerId: 'process-b',
+    send
+  });
+  assert.equal(paused.kind, 'recovery_paused');
+  assert.equal(paused.posted, false);
+  assert.equal(attempt, 1);
+
   const resumed = await resumeEsdtWithdrawal({
     repo: restarted,
     withdrawalId: first.record.withdrawalId,
     workerId: 'process-b',
+    recoveryEnabled: true,
     send
   });
   assert.equal(resumed.kind, 'confirmed');
@@ -512,18 +525,23 @@ test('a failed matched transaction restores the reserved balance exactly once', 
     return classifyFor(record, {
       httpStatus: 422,
       body: {
-        status: 'error',
-        code: 'TRANSACTION_FAILED',
-        message: 'MultiversX reported that the transaction did not complete successfully.',
+        operationId: 'op-fail',
+        status: 'failed',
+        complete: false,
+        code: 'EXECUTION_FAILED',
+        error: 'execution reverted',
+        message: 'execution reverted',
         retryable: false,
-        data: { txHash: OWN_HASH },
-        transfer: {
+        skippedWhitelist: true,
+        usageFeeHash: null,
+        result: {
+          txHash: OWN_HASH,
+          nonce: 21,
+          status: 'fail',
           sender: record.senderWallet,
-          recipient: record.recipientWallet,
+          receiver: record.recipientWallet,
           tokenIdentifier: record.tokenIdentifier,
-          amount: record.amountHuman,
-          amountRaw: record.amountRaw,
-          decimals: record.decimals
+          amount: record.amountRaw
         }
       }
     });
@@ -611,4 +629,119 @@ test('whitelisted Community Fund withdrawal requests zero usage fee and does not
   });
   assert.equal(charged.outcome, 'needs_reconciliation');
   assert.equal(charged.errorCode, 'UNEXPECTED_USAGE_FEE');
+});
+
+test('a stalled response body is a timeout and does not become a pre-broadcast failure', async () => {
+  const result = await executeMakeXEsdtTransfer({
+    endpointBase: 'https://makex.example',
+    apiToken: 'token',
+    pem: '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----',
+    recipient: RECIPIENT,
+    tokenIdentifier: TOKEN,
+    amount: '1',
+    timeoutMs: 30,
+    options: {
+      exactDecimal: true,
+      decimals: 8,
+      amountRaw: '100000000',
+      idempotencyKey: 'wd_100000000000000018',
+      withdrawalId: 'wd_100000000000000018',
+      expectFeeExempt: true
+    },
+    fetchImpl: async () => ({
+      status: 200,
+      text() {
+        return new Promise(() => {});
+      }
+    })
+  });
+  assert.equal(result.outcome, 'pending');
+  assert.equal(result.success, false);
+  assert.equal(result.broadcastAttempted, true);
+  assert.equal(result.classified.errorCode, 'TIMEOUT');
+  assert.equal(result.authoritativeNonPayment, false);
+
+  let called = false;
+  await assert.rejects(
+    () => executeMakeXEsdtTransfer({
+      endpointBase: 'https://makex.example',
+      apiToken: 'token',
+      pem: 'pem',
+      recipient: RECIPIENT,
+      tokenIdentifier: 'not-a-token',
+      amount: '1',
+      options: { exactDecimal: true, decimals: 0, amountRaw: '1' },
+      fetchImpl: async () => {
+        called = true;
+        return { status: 500, text: async () => '{}' };
+      }
+    }),
+    (error) => error.beforeBroadcast === true && error.broadcastAttempted !== true
+  );
+  assert.equal(called, false);
+});
+
+test('a stale lease cannot confirm or restore a withdrawal', async () => {
+  const repo = repoWith('10');
+  const first = await executeEsdtWithdrawal({
+    repo,
+    input: withdrawalInput('100000000000000019', '4'),
+    send: async () => classifyEsdtTransferResponse({ timedOut: true, requireTransferIdentity: true, expectFeeExempt: true })
+  });
+  assert.equal(first.record.status, 'PENDING');
+  const claimed = await repo.claimLease(first.record.withdrawalId, 'worker-a', 150);
+  const state = repo.exportState();
+  state.withdrawals[0].processingLeaseUntil = new Date(Date.now() - 1000).toISOString();
+  const raced = MemoryEsdtWithdrawalRepository.importState(state);
+  const next = await raced.claimLease(first.record.withdrawalId, 'worker-b', 150);
+  assert.equal(next.acquired, true);
+  assert.notEqual(next.fence, claimed.fence);
+  await assert.rejects(
+    () => raced.confirm(first.record.withdrawalId, {
+      ownedTxHash: OWN_HASH,
+      processingOwner: 'worker-a',
+      processingFence: claimed.fence,
+      httpStatus: 200,
+      feeExempt: true
+    }),
+    (error) => error.code === 'lease_lost'
+  );
+  await assert.rejects(
+    () => raced.failAndRestore(first.record.withdrawalId, {
+      authoritativeNonPayment: true,
+      processingOwner: 'worker-a',
+      processingFence: claimed.fence,
+      errorMessage: 'stale restore'
+    }),
+    (error) => error.code === 'lease_lost'
+  );
+  assert.equal((await raced.getById(first.record.withdrawalId)).status, 'PENDING');
+  assert.equal(raced.balanceOf('g', 'u', TOKEN), '6');
+  assert.equal((await raced.releaseLease(first.record.withdrawalId, 'worker-a', claimed.fence)).released, false);
+  assert.equal((await raced.getById(first.record.withdrawalId)).processingOwner, 'worker-b');
+});
+
+test('automated recovery stays paused unless explicitly enabled', async () => {
+  const repo = repoWith('9');
+  let sends = 0;
+  await executeEsdtWithdrawal({
+    repo,
+    input: withdrawalInput('100000000000000020', '2'),
+    send: async () => {
+      sends += 1;
+      return classifyEsdtTransferResponse({ timedOut: true });
+    }
+  });
+  const paused = await resumeUnresolvedEsdtWithdrawals({
+    repo,
+    workerId: 'interval',
+    send: async () => {
+      sends += 1;
+      return classifyEsdtTransferResponse({ timedOut: true });
+    }
+  });
+  assert.equal(paused.recovery, 'paused');
+  assert.equal(paused.posted, 0);
+  assert.equal(sends, 1);
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '7');
 });

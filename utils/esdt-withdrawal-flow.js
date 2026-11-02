@@ -12,6 +12,10 @@ function esdtWithdrawalsArePaused(env = process.env) {
   return env.ESDT_WITHDRAWALS_PAUSED !== 'false';
 }
 
+function esdtWithdrawalRecoveryEnabled(env = process.env) {
+  return env.ESDT_WITHDRAWAL_RECOVERY_ENABLED === 'true';
+}
+
 function createWithdrawalId(interactionId) {
   const id = String(interactionId || '').trim();
   if (!/^\d{10,32}$/.test(id)) {
@@ -169,6 +173,7 @@ class MemoryEsdtWithdrawalRepository {
         usageFeeHash: null,
         nonce: null,
         processingOwner: null,
+        processingFence: null,
         processingLeaseUntil: null,
         createdAt: now,
         updatedAt: now,
@@ -206,21 +211,32 @@ class MemoryEsdtWithdrawalRepository {
         return { acquired: false, record: clone(row) };
       }
       row.processingOwner = owner;
+      row.processingFence = `${now.toString(16)}-${Math.random().toString(16).slice(2)}`;
       row.processingLeaseUntil = new Date(now + seconds * 1000).toISOString();
       row.updatedAt = new Date().toISOString();
-      return { acquired: true, record: clone(row) };
+      return { acquired: true, fence: row.processingFence, record: clone(row) };
     });
   }
 
-  async releaseLease(withdrawalId, owner) {
+  async releaseLease(withdrawalId, owner, fence) {
     return this._lock(() => {
       const row = this.withdrawals.get(withdrawalId);
-      if (!row || row.processingOwner !== owner) return { released: false };
+      if (!row || row.processingOwner !== owner || row.processingFence !== fence) return { released: false };
       row.processingOwner = null;
+      row.processingFence = null;
       row.processingLeaseUntil = null;
       row.updatedAt = new Date().toISOString();
       return { released: true };
     });
+  }
+
+  _requireLease(row, patch) {
+    const until = row.processingLeaseUntil ? Date.parse(row.processingLeaseUntil) : 0;
+    if (!patch || patch.processingOwner !== row.processingOwner || !patch.processingFence || patch.processingFence !== row.processingFence || until <= Date.now()) {
+      const error = new Error('lease_lost');
+      error.code = 'lease_lost';
+      throw error;
+    }
   }
 
   async confirm(withdrawalId, patch) {
@@ -232,6 +248,7 @@ class MemoryEsdtWithdrawalRepository {
         throw new Error('withdrawal_already_confirmed');
       }
       if (!OPEN_STATUSES.has(row.status)) throw new Error('invalid_transition');
+      this._requireLease(row, patch);
       row.status = 'CONFIRMED';
       row.primaryTxHash = patch.ownedTxHash;
       row.makexOperationId = patch.operationId || row.makexOperationId;
@@ -245,6 +262,7 @@ class MemoryEsdtWithdrawalRepository {
       row.confirmedAt = new Date().toISOString();
       row.updatedAt = row.confirmedAt;
       row.processingOwner = null;
+      row.processingFence = null;
       row.processingLeaseUntil = null;
       return { idempotent: false, record: clone(row) };
     });
@@ -256,6 +274,7 @@ class MemoryEsdtWithdrawalRepository {
       if (!row) throw new Error('withdrawal_not_found');
       if (row.status === 'CONFIRMED' || row.status === 'FAILED') return { idempotent: true, record: clone(row) };
       if (!OPEN_STATUSES.has(row.status) && row.status !== 'RESERVED') throw new Error('invalid_transition');
+      this._requireLease(row, patch);
       row.status = patch.status === 'NEEDS_RECONCILIATION' ? 'NEEDS_RECONCILIATION' : 'PENDING';
       if (patch.ownedTxHash) row.primaryTxHash = patch.ownedTxHash;
       if (patch.blockingTxHash) row.blockingTxHash = patch.blockingTxHash;
@@ -281,6 +300,7 @@ class MemoryEsdtWithdrawalRepository {
       if (row.status === 'CONFIRMED' || !OPEN_STATUSES.has(row.status)) {
         throw new Error('invalid_transition');
       }
+      this._requireLease(row, patch);
       const key = accountKey(row.guildId, row.userId);
       const account = this.accounts.get(key);
       const current = account.balances[row.tokenIdentifier] || '0';
@@ -312,6 +332,7 @@ class MemoryEsdtWithdrawalRepository {
       if (patch.operationId) row.makexOperationId = patch.operationId;
       if (patch.ownedTxHash) row.primaryTxHash = patch.ownedTxHash;
       row.processingOwner = null;
+      row.processingFence = null;
       row.processingLeaseUntil = null;
       return { idempotent: false, record: clone(row) };
     });
@@ -445,9 +466,10 @@ async function executeEsdtWithdrawal({ repo, send, input, workerId }) {
 
   const owner = workerId || `worker-${process.pid}`;
   const lease = await repo.claimLease(record.withdrawalId, owner, 150);
-  if (!lease.acquired) {
+  if (!lease.acquired || !lease.fence) {
     return { kind: 'pending', record, view: buildWithdrawalView(record), reserved: true };
   }
+  const leasePatch = { processingOwner: owner, processingFence: lease.fence };
 
   try {
     record = (await repo.getById(record.withdrawalId)) || record;
@@ -464,8 +486,9 @@ async function executeEsdtWithdrawal({ repo, send, input, workerId }) {
     try {
       classified = await send(record);
     } catch (error) {
-      if (error && error.beforeBroadcast) {
+      if (error && error.beforeBroadcast === true && error.broadcastAttempted !== true) {
         const failed = await repo.failAndRestore(record.withdrawalId, {
+          ...leasePatch,
           authoritativeNonPayment: true,
           reason: error.message,
           errorCode: error.code || 'PRECHECK_FAILED',
@@ -474,6 +497,7 @@ async function executeEsdtWithdrawal({ repo, send, input, workerId }) {
         return { kind: 'failed', record: failed.record, view: buildWithdrawalView(failed.record), reserved: true };
       }
       const pending = await repo.markUnresolved(record.withdrawalId, {
+        ...leasePatch,
         status: 'PENDING',
         errorCode: 'SEND_EXCEPTION',
         errorMessage: error.message || String(error)
@@ -482,12 +506,13 @@ async function executeEsdtWithdrawal({ repo, send, input, workerId }) {
     }
 
     if (classified && classified.outcome === 'confirmed') {
-      const confirmed = await repo.confirm(record.withdrawalId, classified);
+      const confirmed = await repo.confirm(record.withdrawalId, { ...classified, ...leasePatch });
       return { kind: 'confirmed', record: confirmed.record, view: buildWithdrawalView(confirmed.record), reserved: true };
     }
 
     if (classified && classified.outcome === 'failed' && classified.authoritativeNonPayment === true) {
       const failed = await repo.failAndRestore(record.withdrawalId, {
+        ...leasePatch,
         authoritativeNonPayment: true,
         reason: classified.errorMessage,
         errorCode: classified.errorCode,
@@ -501,6 +526,7 @@ async function executeEsdtWithdrawal({ repo, send, input, workerId }) {
 
     const status = classified && classified.outcome === 'needs_reconciliation' ? 'NEEDS_RECONCILIATION' : 'PENDING';
     const updated = await repo.markUnresolved(record.withdrawalId, {
+      ...leasePatch,
       status,
       operationId: classified && classified.operationId,
       ownedTxHash: classified && classified.ownedTxHash,
@@ -517,22 +543,37 @@ async function executeEsdtWithdrawal({ repo, send, input, workerId }) {
       view: buildWithdrawalView(updated.record),
       reserved: true
     };
+  } catch (error) {
+    if (error && (error.code === 'lease_lost' || error.message === 'lease_lost')) {
+      const current = (await repo.getById(record.withdrawalId)) || record;
+      return { kind: 'pending', record: current, view: buildWithdrawalView(current), reserved: true, leaseLost: true };
+    }
+    throw error;
   } finally {
-    await repo.releaseLease(withdrawalId, owner);
+    await repo.releaseLease(record.withdrawalId, owner, lease.fence);
   }
 }
 
-async function resumeEsdtWithdrawal({ repo, send, withdrawalId, workerId }) {
+async function resumeEsdtWithdrawal({ repo, send, withdrawalId, workerId, recoveryEnabled = false }) {
   const existing = await repo.getById(withdrawalId);
-  if (!existing) return { kind: 'missing', record: null, view: null };
+  if (!existing) return { kind: 'missing', record: null, view: null, posted: false };
   if (existing.status === 'CONFIRMED' || existing.status === 'FAILED') {
     return {
       kind: existing.status === 'CONFIRMED' ? 'confirmed' : 'failed',
       record: existing,
-      view: buildWithdrawalView(existing)
+      view: buildWithdrawalView(existing),
+      posted: false
     };
   }
-  return executeEsdtWithdrawal({
+  if (recoveryEnabled !== true) {
+    return {
+      kind: 'recovery_paused',
+      record: existing,
+      view: buildWithdrawalView(existing),
+      posted: false
+    };
+  }
+  const outcome = await executeEsdtWithdrawal({
     repo,
     send,
     workerId,
@@ -552,10 +593,19 @@ async function resumeEsdtWithdrawal({ repo, send, withdrawalId, workerId }) {
       allowWhilePaused: true
     }
   });
+  return { ...outcome, posted: true };
 }
 
-async function resumeUnresolvedEsdtWithdrawals({ repo, send, workerId, limit = 20 }) {
+async function resumeUnresolvedEsdtWithdrawals({ repo, send, workerId, limit = 20, recoveryEnabled = false }) {
   const rows = await repo.listUnresolved({ limit });
+  if (recoveryEnabled !== true) {
+    return {
+      checked: rows.length,
+      posted: 0,
+      recovery: 'paused',
+      results: rows.map((row) => ({ withdrawalId: row.withdrawalId, kind: 'recovery_paused' }))
+    };
+  }
   const results = [];
   for (const row of rows) {
     try {
@@ -563,18 +613,20 @@ async function resumeUnresolvedEsdtWithdrawals({ repo, send, workerId, limit = 2
         repo,
         send,
         withdrawalId: row.withdrawalId,
-        workerId
+        workerId,
+        recoveryEnabled: true
       });
       results.push({ withdrawalId: row.withdrawalId, kind: outcome.kind });
     } catch (error) {
       results.push({ withdrawalId: row.withdrawalId, kind: 'error', error: error.message });
     }
   }
-  return { checked: rows.length, results };
+  return { checked: rows.length, posted: results.length, recovery: 'enabled', results };
 }
 
 module.exports = {
   esdtWithdrawalsArePaused,
+  esdtWithdrawalRecoveryEnabled,
   createWithdrawalId,
   MemoryEsdtWithdrawalRepository,
   buildWithdrawalView,

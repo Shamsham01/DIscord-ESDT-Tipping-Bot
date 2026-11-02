@@ -122,6 +122,7 @@ const {
 } = require('./utils/esdt-transfer-outcome');
 const {
   esdtWithdrawalsArePaused,
+  esdtWithdrawalRecoveryEnabled,
   resumeUnresolvedEsdtWithdrawals
 } = require('./utils/esdt-withdrawal-flow');
 const esdtWithdrawals = require('./db/esdt-withdrawals');
@@ -129,6 +130,9 @@ const { handleWithdrawEsdt } = require('./handlers/withdraw-esdt');
 
 if (esdtWithdrawalsArePaused()) {
   console.warn('[WITHDRAW] New /withdraw-esdt requests are paused. Set ESDT_WITHDRAWALS_PAUSED=false only after the MakeX Transfers API hotfix is deployed and the 1 Nov 2026 incident has been reconciled.');
+}
+if (!esdtWithdrawalRecoveryEnabled()) {
+  console.warn('[WITHDRAW] Automated ESDT withdrawal recovery is paused. Pending rows are inspected only. Set ESDT_WITHDRAWAL_RECOVERY_ENABLED=true only after the Transfers contract and migration are verified.');
 }
 if (!esdtWithdrawals.isConfigured()) {
   console.warn('[WITHDRAW] SUPABASE_SERVICE_ROLE_KEY is missing. ESDT withdrawal reservations cannot be stored.');
@@ -2363,6 +2367,7 @@ async function getUserByWallet(walletAddress, guildId) {
 // Transfer ESDT tokens using project wallet
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") - required for API
 async function transferESDT(recipientWallet, tokenIdentifier, amount, projectName, guildId, options = {}) {
+  let requestStarted = false;
   try {
     if (!options.skipSubscriptionCheck) {
       await assertGuildOnChainPlanActive(guildId);
@@ -2430,7 +2435,7 @@ async function transferESDT(recipientWallet, tokenIdentifier, amount, projectNam
       recipient: recipientWallet,
       tokenIdentifier,
       amount,
-      options,
+      options: { ...options, onDispatch() { requestStarted = true; } },
       fetchImpl: fetch,
       logPrefix: '[TRANSFER]'
     });
@@ -2442,7 +2447,7 @@ async function transferESDT(recipientWallet, tokenIdentifier, amount, projectNam
     }
     return result;
   } catch (error) {
-    if (!error.broadcastAttempted) error.beforeBroadcast = true;
+    noteEsdtTransferError(error, requestStarted);
     console.error(`Error transferring ESDT:`, error.message);
     throw error;
   }
@@ -2451,6 +2456,7 @@ async function transferESDT(recipientWallet, tokenIdentifier, amount, projectNam
 // Transfer ESDT from Community Fund (without supported tokens restriction)
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") - required for API
 async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, amount, projectName, guildId, options = {}) {
+  let requestStarted = false;
   try {
     if (!options.skipSubscriptionCheck) {
       await assertGuildOnChainPlanActive(guildId);
@@ -2516,7 +2522,7 @@ async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, a
       recipient: recipientWallet,
       tokenIdentifier,
       amount,
-      options,
+      options: { ...options, onDispatch() { requestStarted = true; } },
       fetchImpl: fetch,
       logPrefix: '[WITHDRAW]'
     });
@@ -2528,10 +2534,21 @@ async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, a
     }
     return result;
   } catch (error) {
-    if (!error.broadcastAttempted) error.beforeBroadcast = true;
+    noteEsdtTransferError(error, requestStarted);
     console.error(`[WITHDRAW] Error transferring ESDT:`, error.message);
     throw error;
   }
+}
+
+function noteEsdtTransferError(error, requestStarted) {
+  if (!error || typeof error !== 'object') return error;
+  if (requestStarted || error.broadcastAttempted === true) {
+    error.beforeBroadcast = false;
+    error.broadcastAttempted = true;
+    return error;
+  }
+  error.beforeBroadcast = true;
+  return error;
 }
 
 async function restoreVirtualAccountBalance(guildId, userId, tokenIdentifier, amount, balanceAfterDeduction, reason) {
@@ -28097,9 +28114,15 @@ async function resumePendingEsdtWithdrawals(workerId) {
     console.warn('[WITHDRAW] Skipping withdrawal resume because SUPABASE_SERVICE_ROLE_KEY is not configured.');
     return;
   }
+  if (!esdtWithdrawalRecoveryEnabled()) {
+    const rows = await esdtWithdrawals.listUnresolved({ limit: 20 });
+    console.warn(`[WITHDRAW] Automated recovery is paused. ${rows.length} unresolved withdrawal(s) were not sent to MakeX.`);
+    return { checked: rows.length, posted: 0, recovery: 'paused' };
+  }
   const summary = await resumeUnresolvedEsdtWithdrawals({
     repo: esdtWithdrawals,
     workerId,
+    recoveryEnabled: true,
     send: async (record) => {
       const result = await transferESDTFromCommunityFund(
         record.recipientWallet,
@@ -28145,6 +28168,9 @@ client.on('ready', async () => {
 
   if (esdtWithdrawalsArePaused()) {
     console.warn('[WITHDRAW] New ESDT withdrawals remain paused until ESDT_WITHDRAWALS_PAUSED=false.');
+  }
+  if (!esdtWithdrawalRecoveryEnabled()) {
+    console.warn('[WITHDRAW] Automated recovery remains paused until ESDT_WITHDRAWAL_RECOVERY_ENABLED=true.');
   }
   try {
     await resumePendingEsdtWithdrawals(`boot-${process.pid}`);

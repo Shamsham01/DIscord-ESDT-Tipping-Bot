@@ -1,0 +1,155 @@
+{
+  "source": "Shamsham01/JS-API-Make-MultiversX-ESDT-Transfers pull/7",
+  "sha": "d7243201cae637ffd5df59c93441071a7330c556",
+  "builder": "tx/paymentContract.mjs buildPaymentSuccessBody, buildPaymentStatusBody, buildExecutionFailureBody, buildPaymentIdRequiredBody",
+  "confirmed": {
+    "httpStatus": 200,
+    "body": {
+      "operationId": "4c2b2a44-4831-477d-9d80-b54e8f061123",
+      "status": "success",
+      "complete": true,
+      "success": true,
+      "replayed": false,
+      "skippedWhitelist": true,
+      "message": "ESDT transfer executed successfully.",
+      "walletAddress": "erd18x0qllr9h9xy4xvdd6pycg8px3jh8dk66x0kq2g3eyq4meyp6must0qqzs",
+      "usageFeeHash": null,
+      "result": {
+        "txHash": "228a5272b2e7cae10820012d974719e4badc8598cb1003bccbe293a3e19259b7",
+        "nonce": 1817,
+        "status": "success",
+        "sender": "erd18x0qllr9h9xy4xvdd6pycg8px3jh8dk66x0kq2g3eyq4meyp6must0qqzs",
+        "receiver": "erd1japdfaw0n6hqsxmswart26j0zrhn0cvf3fvpz5lfg3tlmr5ljrss2awj4n",
+        "tokenIdentifier": "DROP-1fc8cc",
+        "amount": "80000000000"
+      }
+    }
+  },
+  "fencingLost": {
+    "httpStatus": 503,
+    "body": {
+      "operationId": "4c2b2a44-4831-477d-9d80-b54e8f061123",
+      "status": "pending",
+      "complete": false,
+      "code": "FENCING_LOST",
+      "error": "Lost the wallet lease during confirmation.",
+      "message": "Lost the wallet lease during confirmation.",
+      "retryable": true,
+      "skippedWhitelist": true,
+      "usageFeeHash": null,
+      "result": {
+        "txHash": "228a5272b2e7cae10820012d974719e4badc8598cb1003bccbe293a3e19259b7",
+        "nonce": 1817,
+        "status": "pending"
+      },
+      "data": {
+        "retryable": true,
+        "operationId": "4c2b2a44-4831-477d-9d80-b54e8f061123",
+        "txHash": "228a5272b2e7cae10820012d974719e4badc8598cb1003bccbe293a3e19259b7",
+        "nonce": 1817,
+        "state": null,
+        "blockingTxHash": null,
+        "blockingOperationId": null,
+        "blockingNonce": null,
+        "usageFeeHash": null
+      }
+    }
+  },
+  "blocking": {
+    "httpStatus": 503,
+    "body": {
+      "operationId": "11111111-1111-4111-8111-111111111111",
+      "status": "pending",
+      "complete": false,
+      "code": "TX_PENDING",
+      "error": "wallet has an unresolved reservation",
+      "message": "wallet has an unresolved reservation",
+      "retryable": true,
+      "skippedWhitelist": true,
+      "usageFeeHash": null,
+      "data": {
+        "retryable": true,
+        "operationId": "11111111-1111-4111-8111-111111111111",
+        "txHash": null,
+        "nonce": null,
+        "state": null,
+        "blockingTxHash": "228a5272b2e7cae10820012d974719e4badc8598cb1003bccbe293a3e19259b7",
+        "blockingOperationId": "4c2b2a44-4831-477d-9d80-b54e8f061123",
+        "blockingNonce": 1817,
+        "usageFeeHash": null
+      }
+    }
+  },
+  "executionFailed": {
+    "httpStatus": 422,
+    "body": {
+      "operationId": "4c2b2a44-4831-477d-9d80-b54e8f061123",
+      "status": "failed",
+      "complete": false,
+      "code": "EXECUTION_FAILED",
+      "error": "execution reverted",
+      "message": "execution reverted",
+      "retryable": false,
+      "skippedWhitelist": true,
+      "usageFeeHash": null,
+      "result": {
+        "txHash": "abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abcd",
+        "nonce": 1818,
+        "status": "fail",
+        "sender": "erd18x0qllr9h9xy4xvdd6pycg8px3jh8dk66x0kq2g3eyq4meyp6must0qqzs",
+        "receiver": "erd1japdfaw0n6hqsxmswart26j0zrhn0cvf3fvpz5lfg3tlmr5ljrss2awj4n",
+        "tokenIdentifier": "DROP-1fc8cc",
+        "amount": "80000000000"
+      },
+      "data": {
+        "retryable": false,
+        "operationId": "4c2b2a44-4831-477d-9d80-b54e8f061123",
+        "txHash": "abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abcd",
+        "nonce": 1818,
+        "state": "FAILED",
+        "usageFeeHash": null
+      }
+    }
+  },
+  "txRejected": {
+    "httpStatus": 503,
+    "body": {
+      "operationId": "4c2b2a44-4831-477d-9d80-b54e8f061123",
+      "status": "error",
+      "complete": false,
+      "code": "TX_REJECTED",
+      "error": "transaction generation failed: invalid transaction lowerNonceInTx: true",
+      "message": "transaction generation failed: invalid transaction lowerNonceInTx: true",
+      "retryable": false,
+      "skippedWhitelist": true,
+      "usageFeeHash": null,
+      "data": {
+        "retryable": false,
+        "operationId": "4c2b2a44-4831-477d-9d80-b54e8f061123",
+        "txHash": null,
+        "nonce": null,
+        "state": null,
+        "blockingTxHash": null,
+        "blockingOperationId": null,
+        "blockingNonce": null,
+        "usageFeeHash": null
+      }
+    }
+  },
+  "paymentIdRequired": {
+    "httpStatus": 409,
+    "body": {
+      "status": "error",
+      "complete": false,
+      "code": "PAYMENT_ID_REQUIRED",
+      "error": "An identical payment already completed. Send a new idempotency key to make another payment, or reuse the original key to read the confirmed result. This response is not a payment.",
+      "message": "An identical payment already completed. Send a new idempotency key to make another payment, or reuse the original key to read the confirmed result. This response is not a payment.",
+      "retryable": false,
+      "data": {
+        "retryable": false,
+        "previousOperationId": "4c2b2a44-4831-477d-9d80-b54e8f061123",
+        "complete": false
+      }
+    }
+  }
+}

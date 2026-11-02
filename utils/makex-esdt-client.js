@@ -118,20 +118,22 @@ async function executeMakeXEsdtTransfer({
     requireTransferIdentity: options.requireTransferIdentity === true,
     expectFeeExempt: options.expectFeeExempt === true
   };
+  let requestStarted = false;
 
   try {
     console.log(
       `${logPrefix} POST /execute/esdtTransfer idempotency=${options.idempotencyKey || 'none'} token=${request.tokenIdentifier} amount=${options.exactDecimal ? request.amountValue : '[legacy-number]'}`
     );
+    if (typeof options.onDispatch === 'function') options.onDispatch();
+    requestStarted = true;
     const response = await fetchImpl(fullEndpoint, {
       method: 'POST',
       headers: request.headers,
       body: JSON.stringify(request.body),
       signal: controller.signal
     });
+    const responseText = await readResponseBody(response, controller.signal);
     clearTimeout(timeoutId);
-
-    const responseText = await response.text();
     console.log(`${logPrefix} API response status: ${response.status}`);
     let parsedResponse;
     try {
@@ -154,6 +156,7 @@ async function executeMakeXEsdtTransfer({
     return result;
   } catch (fetchError) {
     clearTimeout(timeoutId);
+    if (!requestStarted) throw fetchError;
     const timedOut = fetchError.name === 'AbortError';
     console.error(`${logPrefix} transfer request ${timedOut ? 'timed out' : 'failed'}: ${fetchError.message}`);
     const classified = classifyEsdtTransferResponse({
@@ -161,8 +164,35 @@ async function executeMakeXEsdtTransfer({
       networkError: timedOut ? null : fetchError,
       ...classifyOptions
     });
-    return mapClassifiedTransferResult(classified, null, 0);
+    const result = mapClassifiedTransferResult(classified, null, 0);
+    result.broadcastAttempted = true;
+    return result;
   }
+}
+
+function readResponseBody(response, signal) {
+  const bodyPromise = response.text();
+  if (!signal) return bodyPromise;
+  return new Promise((resolve, reject) => {
+    const fail = () => {
+      const error = new Error('The operation was aborted');
+      error.name = 'AbortError';
+      reject(error);
+    };
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    const onAbort = () => fail();
+    signal.addEventListener('abort', onAbort, { once: true });
+    bodyPromise.then((value) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    }, (error) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+  });
 }
 
 module.exports = {

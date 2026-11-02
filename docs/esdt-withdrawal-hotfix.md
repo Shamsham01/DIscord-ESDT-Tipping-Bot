@@ -6,7 +6,7 @@ Incident window: 1 Nov 2026, 17:13:53 GMT (Europe/London)
 
 This hotfix is the Discord bot half of a coordinated change. MakeX Transfers remains the blockchain transaction service. This repository does not broadcast transactions, manage nonces, or calculate MakeX usage fees. The Transfers repository is not modified here.
 
-New `/withdraw-esdt` requests stay paused until an operator sets `ESDT_WITHDRAWALS_PAUSED=false`. Leave that unset until the Transfers API hotfix echoes the transfer identity described below and a human has reviewed the incident SQL.
+New `/withdraw-esdt` requests stay paused until an operator sets `ESDT_WITHDRAWALS_PAUSED=false`. Automated recovery also stays paused until `ESDT_WITHDRAWAL_RECOVERY_ENABLED=true`. Leave both unset until Transfers PR #7 (`d7243201`) is the deployed API and a human has reviewed the incident SQL. Recovery inspects unresolved rows and does not POST to MakeX while it is paused.
 
 ## Root cause
 
@@ -35,7 +35,38 @@ The amount path used `parseFloat` and sent `amount` as a JSON number, so an 18-d
 
 `esdt_withdrawals` is readable and writable by `service_role` only. Row level security is enabled and there are no anon policies. The functions are `SECURITY INVOKER` with `search_path = public`, and `EXECUTE` is granted only to `service_role`. The bot must have `SUPABASE_SERVICE_ROLE_KEY`. Without it, `/withdraw-esdt` replies and does not deduct.
 
-## MakeX API contract assumptions
+## MakeX API contract
+
+This matches Transfers PR #7 at `d7243201`, `tx/paymentContract.mjs`. The bot does not confirm a withdrawal from a legacy body that lacks `complete: true` or puts identity only on a human `amount`.
+
+Confirmed payment, HTTP 200:
+
+```json
+{
+  "operationId": "uuid",
+  "status": "success",
+  "complete": true,
+  "success": true,
+  "replayed": false,
+  "skippedWhitelist": true,
+  "usageFeeHash": null,
+  "result": {
+    "txHash": "64-hex",
+    "nonce": 1817,
+    "status": "success",
+    "sender": "erd1...",
+    "receiver": "erd1...",
+    "tokenIdentifier": "DROP-1fc8cc",
+    "amount": "80000000000"
+  }
+}
+```
+
+`result.amount` is the raw base-unit integer. There is no top-level `transfer` object. A withdrawal is confirmed only when HTTP is 200, `status` is `success`, `success` is true, `complete` is true, `result.status` is `success`, `result.txHash` is present, and sender, receiver, token, and raw amount match the reserved withdrawal exactly. `skippedWhitelist` must be true for a Community Fund withdrawal. A missing or false `skippedWhitelist`, or a non-null `usageFeeHash`, stays `NEEDS_RECONCILIATION` and does not restore the balance.
+
+Pending, including a lost lease after broadcast, is HTTP 503 with `complete: false`. `result.txHash` on that body is this operation's signed hash and is not confirmation. Another operation's hash is only `data.blockingTxHash`. HTTP 422 `EXECUTION_FAILED` restores the virtual balance only when that same four-field identity matches. `TX_REJECTED` with no payment hash is the pre-broadcast non-payment. HTTP 409 `PAYMENT_ID_REQUIRED` or `IDEMPOTENCY_CONFLICT` does not restore and is not a payment.
+
+Settlement of `confirm_esdt_withdrawal`, `mark_esdt_withdrawal_unresolved`, and `fail_esdt_withdrawal` requires the current `processing_owner`, `processing_fence`, and an unexpired lease. A worker whose lease was replaced cannot confirm or restore. The request still sends `amount` as a decimal string plus `amountRaw`, `tokenDecimals`, and `x-makex-idempotency-key`. The API remains responsible for checking `amountRaw` against token metadata before broadcast.
 
 The Transfers hotfix needs to honour this contract. This bot will not confirm a withdrawal from the legacy HTTP 200 body that only contains `result.txHash`.
 
@@ -49,28 +80,7 @@ Request, `POST /execute/esdtTransfer`:
 - Body `tokenTicker`: the full ESDT identifier, unchanged.
 - Body `expectFeeExempt`: `true` for Community Fund withdrawals. The bot does not calculate the fee. A whitelisted Community Fund pays no usage fee, so `usageFeeHash` stays null and `fee_tx_hash` stays null.
 
-Same key retries the same payment. A different key is a different payment even when token, wallet, and amount match. The same key with different payment parameters is HTTP 409 `IDEMPOTENCY_CONFLICT`. The bot treats 409 as needs reconciliation and does not restore.
-
-Success body the bot will accept:
-
-- HTTP 2xx.
-- `status: "success"`.
-- `result.status: "success"`.
-- `result.txHash`: the hash of this operation.
-- `verified: true`, or `state: "OPERATION_CONFIRMED"`, or the legacy case where `verified` is omitted and top-level `status` is `success`. `verified: false` is not success.
-- `transfer.sender`, `transfer.recipient`, `transfer.tokenIdentifier` (or `tokenTicker`), and `transfer.amountRaw` or `transfer.amount`.
-- Echo `idempotencyKey` when present.
-- For a fee-exempt Community Fund call: no `usageFeeHash`, `feeExempt` is not `false`, and `usageFee` is omitted or `0`. A reported usage fee becomes `NEEDS_RECONCILIATION`, not success.
-
-Error body:
-
-- Keep `{ error, status: "error", code, message, retryable, usageFeeHash, data }`.
-- Put a blocking reservation hash in `blockingTxHash` and `blockingOperationId`. Do not require the bot to treat `data.txHash` on HTTP 503 as this payment. The bot currently classifies a 503 `data.txHash` as untrusted, and a `TX_PENDING` hash as blocking.
-- `FENCING_LOST`, `TX_PENDING`, `TX_INCONCLUSIVE`, `TX_NEEDS_RECONCILIATION`, `OPERATION_IN_PROGRESS`, `BUSINESS_CLAIM_EXPIRED`, `BUSINESS_RESULT_UNSTORED`, `NONCE_BUSY`, and `LEDGER_WRITE_FAILED` stay unresolved. HTTP 503 and 504 stay unresolved.
-- HTTP 422 `TRANSACTION_FAILED` may restore the virtual balance only when the failed hash is this operation’s hash and the transfer identity matches.
-- A pre-broadcast 4xx with no hash, `retryable` not true, and no submitted reservation is an authoritative non-payment.
-
-`chainStatus` is ignored. An on-chain success for a referenced hash is not confirmation.
+Same key retries the same payment. A different key is a different payment even when token, wallet, and amount match. The same key with different payment parameters is HTTP 409 `IDEMPOTENCY_CONFLICT`. The bot treats 409 as needs reconciliation and does not restore. `chainStatus` is ignored. An on-chain success for a referenced hash is not confirmation.
 
 ## Rollout
 
@@ -78,10 +88,10 @@ Do not merge this PR as the production deploy. Order:
 
 1. Deploy the Transfers API change that echoes transfer identity, accepts the string amount and `amountRaw`, and honours `x-makex-idempotency-key`. Confirm a whitelisted Community Fund still returns no usage fee.
 2. Review and apply `supabase/migrations/20261101120000_esdt_withdrawal_reservations.sql` with the service role. The migration creates `esdt_withdrawals` and functions. It does not update balances, clear rows, or insert compensation.
-3. Deploy this bot with `SUPABASE_SERVICE_ROLE_KEY` set. Leave `ESDT_WITHDRAWALS_PAUSED` unset, or set it to any value other than `false`. New withdrawals are refused before a reservation. The reconciler still resumes existing `RESERVED`, `PENDING`, and `NEEDS_RECONCILIATION` rows.
-4. After the API contract is live and the incident queries below have been reviewed, set `ESDT_WITHDRAWALS_PAUSED=false`.
+3. Deploy this bot with `SUPABASE_SERVICE_ROLE_KEY` set. Leave `ESDT_WITHDRAWALS_PAUSED` unset, or set it to any value other than `false`. Leave `ESDT_WITHDRAWAL_RECOVERY_ENABLED` unset. New withdrawals are refused before a reservation. The ready loop only lists unresolved rows. It does not POST them to MakeX.
+4. After the API contract is live and the incident queries below have been reviewed, set `ESDT_WITHDRAWAL_RECOVERY_ENABLED=true` to retry existing reservations, then `ESDT_WITHDRAWALS_PAUSED=false` for new withdrawals.
 
-The reconciler runs on ready and every 120 seconds. A crashed worker’s lease expires after 150 seconds, so the next pass can retry the same id. It does not create a second withdrawal row.
+The inspector runs on ready and every 120 seconds. While recovery is paused it only counts unresolved rows. After `ESDT_WITHDRAWAL_RECOVERY_ENABLED=true`, a crashed worker’s lease expires after 150 seconds and the next pass retries the same id. It does not create a second withdrawal row. A stale fence cannot confirm or restore.
 
 ## Rollback
 
@@ -127,4 +137,4 @@ Mass refund, house withdraw, subscription payment, and pool-creation fee now fai
 
 ## Tests
 
-`npm test` runs `utils/esdt-withdrawal.test.js` and the existing NFT role schedule test. The withdrawal file covers the twelve cases: confirmed payment, wrong hash, HTTP 503 with an unrelated blocking hash, lease lost after broadcast, timeout then later success on the same id, two identical withdrawals with different ids, retry of one id, restart during pending, concurrent withdrawals from one account, 18-decimal arithmetic, one restoration after a matched failure, and a whitelisted Community Fund withdrawal that requests zero usage fee and does not deduct a fee from the virtual balance.
+`npm test` runs the withdrawal cases, `utils/esdt-transfer-contract.test.js` against `test/fixtures/transfers-pr7-esdt-transfer.json` (the JSON from Transfers PR #7), `utils/esdt-withdrawal.pg.test.js` against a disposable Postgres database loaded with this migration and the existing `virtual_accounts` / `virtual_account_transactions` columns, and the NFT role schedule test. The Postgres file is not pointed at production. The withdrawal cases cover confirmed payment, a wrong hash, HTTP 503 with an unrelated blocking hash, a lease lost after broadcast, timeout then later success on the same id, two identical withdrawals with different ids, retry of one id, restart during pending, recovery left paused, concurrent withdrawals, 18-decimal arithmetic, one restoration after a matched failure, a whitelisted Community Fund withdrawal, a stalled response body, and a stale lease that cannot confirm or restore.

@@ -190,6 +190,7 @@ CREATE TABLE IF NOT EXISTS esdt_withdrawals (
     nonce TEXT,
     raw_result JSONB,
     processing_owner TEXT,
+    processing_fence TEXT,
     processing_lease_until TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

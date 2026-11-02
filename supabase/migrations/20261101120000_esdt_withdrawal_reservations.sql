@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS esdt_withdrawals (
     nonce TEXT,
     raw_result JSONB,
     processing_owner TEXT,
+    processing_fence TEXT,
     processing_lease_until TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -240,6 +241,7 @@ DECLARE
 BEGIN
     UPDATE esdt_withdrawals
     SET processing_owner = p_owner,
+        processing_fence = gen_random_uuid()::text,
         processing_lease_until = clock_timestamp() + make_interval(secs => GREATEST(p_seconds, 1)),
         updated_at = clock_timestamp()
     WHERE withdrawal_id = p_withdrawal_id
@@ -256,30 +258,61 @@ BEGIN
         RETURN jsonb_build_object('acquired', false, 'record', CASE WHEN v_row.withdrawal_id IS NULL THEN NULL ELSE to_jsonb(v_row) END);
     END IF;
 
-    RETURN jsonb_build_object('acquired', true, 'record', to_jsonb(v_row));
+    RETURN jsonb_build_object('acquired', true, 'fence', v_row.processing_fence, 'record', to_jsonb(v_row));
 END;
 $$;
 
+DROP FUNCTION IF EXISTS release_esdt_withdrawal_lease(text, text);
+
 CREATE OR REPLACE FUNCTION release_esdt_withdrawal_lease(
     p_withdrawal_id text,
-    p_owner text
+    p_owner text,
+    p_fence text
 ) RETURNS jsonb
 LANGUAGE plpgsql
 SET search_path = public
 AS $$
+DECLARE
+    v_released integer;
 BEGIN
     UPDATE esdt_withdrawals
     SET processing_owner = NULL,
+        processing_fence = NULL,
         processing_lease_until = NULL,
         updated_at = clock_timestamp()
     WHERE withdrawal_id = p_withdrawal_id
-      AND processing_owner = p_owner;
-    RETURN jsonb_build_object('released', FOUND);
+      AND processing_owner = p_owner
+      AND processing_fence = p_fence;
+    GET DIAGNOSTICS v_released = ROW_COUNT;
+    RETURN jsonb_build_object('released', v_released > 0);
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION esdt_withdrawal_require_lease(
+    p_row esdt_withdrawals,
+    p_owner text,
+    p_fence text
+) RETURNS void
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+    IF p_row.processing_owner IS DISTINCT FROM p_owner
+       OR p_row.processing_fence IS DISTINCT FROM p_fence
+       OR p_fence IS NULL
+       OR p_row.processing_lease_until IS NULL
+       OR p_row.processing_lease_until <= clock_timestamp() THEN
+        RAISE EXCEPTION 'lease_lost';
+    END IF;
+END;
+$$;
+
+DROP FUNCTION IF EXISTS confirm_esdt_withdrawal(text, text, text, integer, boolean, text, text, text);
+
 CREATE OR REPLACE FUNCTION confirm_esdt_withdrawal(
     p_withdrawal_id text,
+    p_owner text,
+    p_fence text,
     p_tx_hash text,
     p_operation_id text,
     p_http_status integer,
@@ -314,6 +347,8 @@ BEGIN
         RAISE EXCEPTION 'invalid_transition';
     END IF;
 
+    PERFORM esdt_withdrawal_require_lease(v_row, p_owner, p_fence);
+
     UPDATE esdt_withdrawals
     SET status = 'CONFIRMED',
         primary_tx_hash = p_tx_hash,
@@ -328,16 +363,28 @@ BEGIN
         confirmed_at = clock_timestamp(),
         updated_at = clock_timestamp(),
         processing_owner = NULL,
+        processing_fence = NULL,
         processing_lease_until = NULL
     WHERE withdrawal_id = p_withdrawal_id
+      AND processing_owner = p_owner
+      AND processing_fence = p_fence
+      AND processing_lease_until > clock_timestamp()
     RETURNING * INTO v_row;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'lease_lost';
+    END IF;
 
     RETURN jsonb_build_object('idempotent', false, 'record', to_jsonb(v_row));
 END;
 $$;
 
+DROP FUNCTION IF EXISTS mark_esdt_withdrawal_unresolved(text, text, text, text, text, text, text, integer, text, text);
+
 CREATE OR REPLACE FUNCTION mark_esdt_withdrawal_unresolved(
     p_withdrawal_id text,
+    p_owner text,
+    p_fence text,
     p_status text,
     p_operation_id text,
     p_owned_tx_hash text,
@@ -368,6 +415,8 @@ BEGIN
         RAISE EXCEPTION 'invalid_transition';
     END IF;
 
+    PERFORM esdt_withdrawal_require_lease(v_row, p_owner, p_fence);
+
     UPDATE esdt_withdrawals
     SET status = v_status,
         primary_tx_hash = COALESCE(p_owned_tx_hash, primary_tx_hash),
@@ -380,14 +429,25 @@ BEGIN
         error_message = COALESCE(p_error_message, error_message),
         updated_at = clock_timestamp()
     WHERE withdrawal_id = p_withdrawal_id
+      AND processing_owner = p_owner
+      AND processing_fence = p_fence
+      AND processing_lease_until > clock_timestamp()
     RETURNING * INTO v_row;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'lease_lost';
+    END IF;
 
     RETURN jsonb_build_object('idempotent', false, 'record', to_jsonb(v_row));
 END;
 $$;
 
+DROP FUNCTION IF EXISTS fail_esdt_withdrawal(text, boolean, text, text, integer, text, text);
+
 CREATE OR REPLACE FUNCTION fail_esdt_withdrawal(
     p_withdrawal_id text,
+    p_owner text,
+    p_fence text,
     p_authoritative boolean,
     p_error_code text,
     p_error_message text,
@@ -423,6 +483,8 @@ BEGIN
     IF v_row.status = 'CONFIRMED' OR v_row.status NOT IN ('RESERVED', 'PENDING', 'NEEDS_RECONCILIATION') THEN
         RAISE EXCEPTION 'invalid_transition';
     END IF;
+
+    PERFORM esdt_withdrawal_require_lease(v_row, p_owner, p_fence);
 
     SELECT * INTO v_account
     FROM virtual_accounts
@@ -484,9 +546,17 @@ BEGIN
         makex_operation_id = COALESCE(p_operation_id, makex_operation_id),
         primary_tx_hash = COALESCE(p_owned_tx_hash, primary_tx_hash),
         processing_owner = NULL,
+        processing_fence = NULL,
         processing_lease_until = NULL
     WHERE withdrawal_id = p_withdrawal_id
+      AND processing_owner = p_owner
+      AND processing_fence = p_fence
+      AND processing_lease_until > clock_timestamp()
     RETURNING * INTO v_row;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'lease_lost';
+    END IF;
 
     RETURN jsonb_build_object('idempotent', false, 'record', to_jsonb(v_row));
 END;
@@ -515,18 +585,20 @@ $$;
 
 REVOKE ALL ON FUNCTION reserve_esdt_withdrawal(text, text, text, text, text, text, text, text, integer, text, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION claim_esdt_withdrawal_lease(text, text, integer) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION release_esdt_withdrawal_lease(text, text) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION confirm_esdt_withdrawal(text, text, text, integer, boolean, text, text, text) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION mark_esdt_withdrawal_unresolved(text, text, text, text, text, text, text, integer, text, text) FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION fail_esdt_withdrawal(text, boolean, text, text, integer, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION release_esdt_withdrawal_lease(text, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION esdt_withdrawal_require_lease(esdt_withdrawals, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION confirm_esdt_withdrawal(text, text, text, text, text, integer, boolean, text, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION mark_esdt_withdrawal_unresolved(text, text, text, text, text, text, text, text, text, integer, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION fail_esdt_withdrawal(text, text, text, boolean, text, text, integer, text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION list_unresolved_esdt_withdrawals(integer) FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION reserve_esdt_withdrawal(text, text, text, text, text, text, text, text, integer, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION claim_esdt_withdrawal_lease(text, text, integer) TO service_role;
-GRANT EXECUTE ON FUNCTION release_esdt_withdrawal_lease(text, text) TO service_role;
-GRANT EXECUTE ON FUNCTION confirm_esdt_withdrawal(text, text, text, integer, boolean, text, text, text) TO service_role;
-GRANT EXECUTE ON FUNCTION mark_esdt_withdrawal_unresolved(text, text, text, text, text, text, text, integer, text, text) TO service_role;
-GRANT EXECUTE ON FUNCTION fail_esdt_withdrawal(text, boolean, text, text, integer, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION release_esdt_withdrawal_lease(text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION esdt_withdrawal_require_lease(esdt_withdrawals, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION confirm_esdt_withdrawal(text, text, text, text, text, integer, boolean, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION mark_esdt_withdrawal_unresolved(text, text, text, text, text, text, text, text, text, integer, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION fail_esdt_withdrawal(text, text, text, boolean, text, text, integer, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION list_unresolved_esdt_withdrawals(integer) TO service_role;
 
 GRANT SELECT, UPDATE ON virtual_accounts TO service_role;

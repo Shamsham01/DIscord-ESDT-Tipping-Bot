@@ -43,6 +43,7 @@ function mapRecord(row) {
     usageFeeHash: row.usage_fee_hash,
     nonce: row.nonce,
     processingOwner: row.processing_owner,
+    processingFence: row.processing_fence,
     processingLeaseUntil: row.processing_lease_until,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -76,7 +77,7 @@ async function reserve(input) {
     p_recipient_wallet: input.recipientWallet,
     p_sender_wallet: input.senderWallet,
     p_memo: input.memo || null
-  }));
+  });
   return {
     created: data.created === true,
     insufficient: data.insufficient === true,
@@ -100,21 +101,28 @@ async function claimLease(withdrawalId, owner, seconds) {
     p_withdrawal_id: withdrawalId,
     p_owner: owner,
     p_seconds: seconds
-  }));
-  return { acquired: data.acquired === true, record: mapRecord(data.record) };
+  });
+  return {
+    acquired: data.acquired === true,
+    fence: data.fence || (data.record && data.record.processing_fence) || null,
+    record: mapRecord(data.record)
+  };
 }
 
-async function releaseLease(withdrawalId, owner) {
+async function releaseLease(withdrawalId, owner, fence) {
   await rpc('release_esdt_withdrawal_lease', {
     p_withdrawal_id: withdrawalId,
-    p_owner: owner
-  }));
+    p_owner: owner,
+    p_fence: fence
+  });
   return { released: true };
 }
 
 async function confirm(withdrawalId, patch) {
   const data = await rpc('confirm_esdt_withdrawal', {
     p_withdrawal_id: withdrawalId,
+    p_owner: patch.processingOwner,
+    p_fence: patch.processingFence,
     p_tx_hash: patch.ownedTxHash,
     p_operation_id: patch.operationId || null,
     p_http_status: patch.httpStatus || null,
@@ -122,13 +130,15 @@ async function confirm(withdrawalId, patch) {
     p_usage_fee: patch.usageFee != null ? String(patch.usageFee) : null,
     p_usage_fee_hash: patch.usageFeeHash || null,
     p_nonce: patch.nonce != null ? String(patch.nonce) : null
-  }));
+  });
   return { idempotent: data.idempotent === true, record: mapRecord(data.record) };
 }
 
 async function markUnresolved(withdrawalId, patch) {
   const data = await rpc('mark_esdt_withdrawal_unresolved', {
     p_withdrawal_id: withdrawalId,
+    p_owner: patch.processingOwner,
+    p_fence: patch.processingFence,
     p_status: patch.status,
     p_operation_id: patch.operationId || null,
     p_owned_tx_hash: patch.ownedTxHash || null,
@@ -138,20 +148,22 @@ async function markUnresolved(withdrawalId, patch) {
     p_http_status: patch.httpStatus || null,
     p_error_code: patch.errorCode || null,
     p_error_message: patch.errorMessage || null
-  }));
+  });
   return { idempotent: data.idempotent === true, record: mapRecord(data.record) };
 }
 
 async function failAndRestore(withdrawalId, patch) {
   const data = await rpc('fail_esdt_withdrawal', {
     p_withdrawal_id: withdrawalId,
+    p_owner: patch.processingOwner,
+    p_fence: patch.processingFence,
     p_authoritative: patch.authoritativeNonPayment === true,
     p_error_code: patch.errorCode || null,
     p_error_message: patch.errorMessage || patch.reason || null,
     p_http_status: patch.httpStatus || null,
     p_operation_id: patch.operationId || null,
     p_owned_tx_hash: patch.ownedTxHash || null
-  }));
+  });
   return { idempotent: data.idempotent === true, record: mapRecord(data.record) };
 }
 

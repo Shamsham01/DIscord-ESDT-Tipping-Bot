@@ -1,21 +1,18 @@
 'use strict';
 
-const { canonicalizeEsdtAmount } = require('./esdt-amount');
-
-const OWNED_HASH_CODES = new Set([
+const OWNED_PENDING_CODES = new Set([
+  'FENCING_LOST',
+  'TX_PENDING',
+  'TX_INCONCLUSIVE',
+  'TX_NEEDS_RECONCILIATION',
   'TRANSACTION_STATUS_INCONCLUSIVE',
-  'TRANSACTION_FAILED',
+  'NONCE_BUSY',
+  'OPERATION_IN_PROGRESS',
+  'BATCH_INCOMPLETE',
   'LEDGER_WRITE_FAILED'
 ]);
 
-const BROADCAST_STATES = new Set([
-  'submitted',
-  'pending',
-  'unknown',
-  'needs_reconciliation',
-  'signed',
-  'operation_submitted'
-]);
+const EXECUTION_FAILURE_CODES = new Set(['EXECUTION_FAILED', 'TRANSACTION_FAILED']);
 
 function text(value) {
   if (value == null) return '';
@@ -38,23 +35,51 @@ function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
+/**
+ * Transfers PR #7 (d7243201) puts identity on `result`.
+ * `result.amount` is the raw base-unit integer, not a human decimal.
+ * An explicit `transfer` object is accepted only when that object itself
+ * carries `amountRaw`. A human `amount` is never treated as the raw amount.
+ */
+function normalizeTransfer(body, data, result) {
+  const explicit = Object.keys(asObject(body.transfer)).length
+    ? asObject(body.transfer)
+    : asObject(data.transfer);
+  if (explicit.amountRaw != null && text(explicit.amountRaw) !== '') {
+    return {
+      sender: explicit.sender || null,
+      recipient: explicit.recipient || explicit.receiver || null,
+      receiver: explicit.receiver || explicit.recipient || null,
+      tokenIdentifier: explicit.tokenIdentifier || explicit.tokenTicker || null,
+      amountRaw: text(explicit.amountRaw)
+    };
+  }
+  return {
+    sender: result.sender || null,
+    recipient: result.receiver || result.recipient || null,
+    receiver: result.receiver || result.recipient || null,
+    tokenIdentifier: result.tokenIdentifier || result.tokenTicker || null,
+    amountRaw: result.amountRaw != null
+      ? text(result.amountRaw)
+      : (result.amount != null ? text(result.amount) : null)
+  };
+}
+
 function extractEsdtTransferApiFields(parsedResponse) {
   const body = asObject(parsedResponse);
   const data = asObject(body.data);
   const result = asObject(body.result);
   const nestedError = asObject(body.error);
-  const transfer = Object.keys(asObject(body.transfer)).length
-    ? asObject(body.transfer)
-    : asObject(data.transfer);
+  const transfer = normalizeTransfer(body, data, result);
 
-  let txStatus = result.status || body.status || data.status || null;
-  if (txStatus && typeof txStatus === 'object') {
-    txStatus = txStatus.status || txStatus.value || String(txStatus);
+  let resultStatus = result.status || null;
+  if (resultStatus && typeof resultStatus === 'object') {
+    resultStatus = resultStatus.status || resultStatus.value || String(resultStatus);
   }
 
   const errorMessage = firstString(
     typeof body.error === 'string' ? body.error : nestedError.message,
-    lower(body.status) === 'error' ? body.message : null,
+    body.message,
     result.error,
     data.error
   );
@@ -65,7 +90,7 @@ function extractEsdtTransferApiFields(parsedResponse) {
     topTxHash: firstString(body.txHash, body.transactionHash),
     blockingTxHash: firstString(body.blockingTxHash, data.blockingTxHash, result.blockingTxHash),
     blockingOperationId: firstString(body.blockingOperationId, data.blockingOperationId),
-    txStatus,
+    resultStatus,
     errorMessage,
     code: firstString(body.code, nestedError.code, data.code, result.code),
     operationId: firstString(body.operationId, data.operationId, result.operationId),
@@ -73,14 +98,12 @@ function extractEsdtTransferApiFields(parsedResponse) {
     state: firstString(body.state, data.state, result.state),
     reservationState: firstString(body.reservationState, data.reservationState, data.state, result.reservationState),
     transfer,
-    walletAddress: firstString(body.walletAddress, data.walletAddress, transfer.sender),
     usageFeeHash: firstString(body.usageFeeHash, data.usageFeeHash, result.usageFeeHash),
     usageFee: body.usageFee != null ? body.usageFee : (data.usageFee != null ? data.usageFee : null),
-    feeExempt: body.feeExempt != null ? body.feeExempt : (data.feeExempt != null ? data.feeExempt : null),
+    skippedWhitelist: body.skippedWhitelist === true,
     retryable: body.retryable === true || data.retryable === true,
-    broadcast: body.broadcast != null ? body.broadcast : (data.broadcast != null ? data.broadcast : null),
-    hashScope: firstString(body.hashScope, data.hashScope, result.hashScope),
-    verified: body.verified != null ? body.verified : (data.verified != null ? data.verified : null),
+    complete: body.complete === true,
+    successFlag: body.success === true,
     nonce: result.nonce != null ? result.nonce : (data.nonce != null ? data.nonce : null),
     topStatus: body.status
   };
@@ -98,51 +121,21 @@ function integerEqual(left, right) {
   }
 }
 
-function identityMatches(expected, fields) {
-  if (!expected) return { ok: true, mismatches: [] };
+function exactTransferIdentity(expected, fields) {
   const transfer = fields.transfer || {};
+  const sender = text(transfer.sender);
+  const recipient = text(transfer.recipient || transfer.receiver);
+  const token = text(transfer.tokenIdentifier);
+  const amountRaw = transfer.amountRaw;
   const mismatches = [];
-  const sender = transfer.sender || fields.walletAddress;
-  const recipient = transfer.recipient || transfer.receiver;
-  const token = transfer.tokenIdentifier || transfer.tokenTicker;
-  const idempotencyKey = fields.idempotencyKey;
-
-  if (expected.sender && sender && !addressesEqual(expected.sender, sender)) mismatches.push('sender');
-  if (expected.recipient && recipient && !addressesEqual(expected.recipient, recipient)) mismatches.push('recipient');
-  if (expected.tokenIdentifier && token && lower(expected.tokenIdentifier) !== lower(token)) mismatches.push('token');
-  if (expected.idempotencyKey && idempotencyKey && idempotencyKey !== expected.idempotencyKey) {
-    mismatches.push('idempotencyKey');
-  }
-  if (expected.amountRaw && transfer.amountRaw != null && !integerEqual(expected.amountRaw, transfer.amountRaw)) {
+  if (!expected || !text(expected.sender) || !sender || !addressesEqual(expected.sender, sender)) mismatches.push('sender');
+  if (!expected || !text(expected.recipient) || !recipient || !addressesEqual(expected.recipient, recipient)) mismatches.push('recipient');
+  if (!expected || !text(expected.tokenIdentifier) || !token || lower(expected.tokenIdentifier) !== lower(token)) mismatches.push('token');
+  if (!expected || text(expected.amountRaw) === '' || text(amountRaw) === '' || !integerEqual(expected.amountRaw, amountRaw)) {
     mismatches.push('amountRaw');
   }
-  if (expected.amountHuman != null && transfer.amount != null && transfer.amountRaw == null) {
-    try {
-      const decimals = Number(expected.decimals != null ? expected.decimals : transfer.decimals);
-      const got = canonicalizeEsdtAmount(String(transfer.amount), decimals);
-      const want = canonicalizeEsdtAmount(String(expected.amountHuman), decimals);
-      if (got.raw !== want.raw) mismatches.push('amount');
-    } catch {
-      mismatches.push('amount');
-    }
-  }
-  return { ok: mismatches.length === 0, mismatches };
-}
-
-function transferIdentityPresent(fields, expected) {
-  if (!expected) return false;
-  const transfer = fields.transfer || {};
-  const sender = transfer.sender || fields.walletAddress;
-  const recipient = transfer.recipient || transfer.receiver;
-  const token = transfer.tokenIdentifier || transfer.tokenTicker;
-  const amount = transfer.amountRaw != null || transfer.amount != null;
-  return Boolean(sender && recipient && token && amount);
-}
-
-function broadcastMightHaveHappened(fields) {
-  if (fields.broadcast === true) return true;
-  const state = lower(fields.reservationState || fields.state);
-  return BROADCAST_STATES.has(state);
+  const missing = !sender || !recipient || !token || text(amountRaw) === '';
+  return { ok: mismatches.length === 0, mismatches, missing };
 }
 
 function baseResult(parts) {
@@ -159,19 +152,57 @@ function baseResult(parts) {
     errorMessage: parts.errorMessage || null,
     httpStatus: parts.httpStatus || 0,
     reservationState: fields.reservationState || fields.state || null,
-    feeExempt: parts.feeExempt != null ? parts.feeExempt : fields.feeExempt === true,
+    feeExempt: parts.feeExempt === true,
+    skippedWhitelist: fields.skippedWhitelist === true,
     usageFee: parts.usageFee != null ? String(parts.usageFee) : (fields.usageFee != null ? String(fields.usageFee) : null),
     usageFeeHash: fields.usageFeeHash || null,
     nonce: fields.nonce != null ? String(fields.nonce) : null,
     idempotencyKey: fields.idempotencyKey || null,
-    mismatches: parts.identity ? parts.identity.mismatches : []
+    mismatches: parts.identity ? parts.identity.mismatches : [],
+    complete: fields.complete === true
   };
+}
+
+function classifyHashes(fields) {
+  const blockingTxHash = fields.blockingTxHash || null;
+  let ownedTxHash = null;
+  let untrustedTxHash = null;
+  if (fields.resultTxHash && fields.resultTxHash !== blockingTxHash) {
+    ownedTxHash = fields.resultTxHash;
+  }
+  const looseHash = fields.dataTxHash || fields.topTxHash || null;
+  if (looseHash && looseHash !== ownedTxHash) {
+    if (blockingTxHash && looseHash === blockingTxHash) {
+      // Already recorded as the other operation's hash.
+    } else {
+      untrustedTxHash = looseHash;
+    }
+  }
+  return { ownedTxHash, blockingTxHash, untrustedTxHash };
+}
+
+function contractSuccess(status, fields) {
+  return status === 200
+    && fields.complete === true
+    && fields.successFlag === true
+    && lower(fields.topStatus) === 'success'
+    && lower(fields.resultStatus) === 'success'
+    && Boolean(fields.resultTxHash);
+}
+
+function whitelistProblem(fields) {
+  if (fields.skippedWhitelist !== true) return 'WHITELIST_NOT_CONFIRMED';
+  if (text(fields.usageFeeHash) !== '') return 'UNEXPECTED_USAGE_FEE';
+  if (fields.usageFee != null && text(fields.usageFee) !== '' && text(fields.usageFee) !== '0') return 'UNEXPECTED_USAGE_FEE';
+  return null;
 }
 
 /**
  * Classify a MakeX /execute/esdtTransfer response.
- * `chainStatus` is accepted and ignored. A hash that succeeded on-chain is not
- * proof of this withdrawal, including HTTP 503/504, timeouts, and TX_PENDING.
+ * Confirmation requires the Transfers PR #7 success body: HTTP 200,
+ * status success, success true, complete true, and result.txHash.
+ * Withdrawals also require sender, recipient, token, and raw amount to match.
+ * `chainStatus` is ignored. A blocking hash is never this payment.
  */
 function classifyEsdtTransferResponse({
   httpStatus = 0,
@@ -198,111 +229,73 @@ function classifyEsdtTransferResponse({
   }
 
   const status = Number(httpStatus) || 0;
-  const body = asObject(parsedResponse);
-  const fields = extractEsdtTransferApiFields(body);
-  const identity = identityMatches(expected, fields);
-  const httpOk = status >= 200 && status < 300;
+  const fields = extractEsdtTransferApiFields(parsedResponse);
+  const identity = exactTransferIdentity(expected, fields);
+  const hashes = classifyHashes(fields);
   const codeUpper = text(fields.code).toUpperCase();
   const message = fields.errorMessage || '';
   const leaseLost = /lost the wallet lease/i.test(message) || codeUpper === 'FENCING_LOST';
-  const txPending = codeUpper === 'TX_PENDING' || lower(fields.txStatus) === 'tx_pending' || lower(fields.state) === 'tx_pending';
-  const looseHash = fields.dataTxHash || fields.topTxHash || null;
 
-  let blockingTxHash = fields.blockingTxHash;
-  let ownedTxHash = null;
-  let untrustedTxHash = null;
-
-  if (!httpOk || txPending || leaseLost) {
-    if (txPending && !blockingTxHash) {
-      blockingTxHash = looseHash || fields.resultTxHash;
-    } else if (OWNED_HASH_CODES.has(codeUpper) && !txPending && !leaseLost && !blockingTxHash) {
-      ownedTxHash = fields.resultTxHash || looseHash;
-    } else if (looseHash || fields.resultTxHash) {
-      untrustedTxHash = fields.resultTxHash || looseHash;
-    }
-  } else {
-    ownedTxHash = fields.resultTxHash || (lower(fields.hashScope) === 'operation' ? looseHash : null);
-  }
-
-  if (ownedTxHash && blockingTxHash && ownedTxHash === blockingTxHash) {
-    untrustedTxHash = ownedTxHash;
-    ownedTxHash = null;
-  }
-
-  const topStatus = lower(fields.topStatus);
-  const resultStatus = lower(fields.txStatus);
-  const successStatus = resultStatus === 'success' && topStatus !== 'error' && topStatus !== 'fail' && topStatus !== 'failed';
-  const verifiedFlag = fields.verified;
-  const stateConfirmed = lower(fields.state) === 'operation_confirmed';
-  const verifiedConfirmation = httpOk
-    && successStatus
-    && Boolean(ownedTxHash)
-    && identity.ok
-    && verifiedFlag !== false
-    && (verifiedFlag === true || stateConfirmed || (verifiedFlag == null && topStatus === 'success'));
-
-  const feeProblem = expectFeeExempt && (
-    text(fields.usageFeeHash) !== ''
-    || fields.feeExempt === false
-    || (fields.usageFee != null && text(fields.usageFee) !== '' && text(fields.usageFee) !== '0')
-  );
-
-  if (verifiedConfirmation) {
-    if (requireTransferIdentity && !transferIdentityPresent(fields, expected)) {
-      return baseResult({
-        outcome: 'pending',
-        authoritativeNonPayment: false,
-        errorCode: 'CONFIRMATION_IDENTITY_MISSING',
-        errorMessage: 'MakeX has not echoed the sender, recipient, token, and amount for this withdrawal. The balance stays reserved.',
-        httpStatus: status,
-        fields,
-        ownedTxHash: null,
-        untrustedTxHash: ownedTxHash,
-        blockingTxHash,
-        identity
-      });
-    }
-    if (feeProblem) {
+  if (contractSuccess(status, fields)) {
+    if (hashes.blockingTxHash && hashes.blockingTxHash === fields.resultTxHash) {
       return baseResult({
         outcome: 'needs_reconciliation',
         authoritativeNonPayment: false,
-        errorCode: 'UNEXPECTED_USAGE_FEE',
-        errorMessage: 'MakeX reported a usage fee for a whitelisted Community Fund withdrawal. The balance stays reserved.',
+        errorCode: 'BLOCKING_HASH',
+        errorMessage: 'MakeX returned a blocking transaction hash. It is not this withdrawal.',
         httpStatus: status,
         fields,
-        ownedTxHash,
-        blockingTxHash,
-        identity,
-        feeExempt: false
+        ownedTxHash: null,
+        blockingTxHash: hashes.blockingTxHash,
+        untrustedTxHash: fields.resultTxHash,
+        identity
       });
+    }
+    if (requireTransferIdentity && !identity.ok) {
+      return baseResult({
+        outcome: 'needs_reconciliation',
+        authoritativeNonPayment: false,
+        errorCode: identity.missing ? 'CONFIRMATION_IDENTITY_MISSING' : 'TRANSFER_IDENTITY_MISMATCH',
+        errorMessage: identity.missing
+          ? 'MakeX did not echo the sender, recipient, token, and raw amount for this withdrawal. The balance stays reserved.'
+          : `MakeX confirmation did not match this withdrawal (${identity.mismatches.join(', ')}).`,
+        httpStatus: status,
+        fields,
+        ownedTxHash: null,
+        untrustedTxHash: fields.resultTxHash,
+        blockingTxHash: hashes.blockingTxHash,
+        identity
+      });
+    }
+    if (expectFeeExempt) {
+      const feeCode = whitelistProblem(fields);
+      if (feeCode) {
+        return baseResult({
+          outcome: 'needs_reconciliation',
+          authoritativeNonPayment: false,
+          errorCode: feeCode,
+          errorMessage: feeCode === 'WHITELIST_NOT_CONFIRMED'
+            ? 'MakeX did not confirm skippedWhitelist for this Community Fund withdrawal. The balance stays reserved.'
+            : 'MakeX reported a usage fee for a whitelisted Community Fund withdrawal. The balance stays reserved.',
+          httpStatus: status,
+          fields,
+          ownedTxHash: hashes.ownedTxHash,
+          blockingTxHash: hashes.blockingTxHash,
+          identity,
+          feeExempt: false
+        });
+      }
     }
     return baseResult({
       outcome: 'confirmed',
       authoritativeNonPayment: false,
-      errorCode: null,
-      errorMessage: null,
       httpStatus: status,
       fields,
-      ownedTxHash,
-      blockingTxHash,
+      ownedTxHash: hashes.ownedTxHash,
+      blockingTxHash: hashes.blockingTxHash,
       identity,
-      feeExempt: expectFeeExempt ? true : fields.feeExempt === true,
+      feeExempt: expectFeeExempt ? true : fields.skippedWhitelist === true,
       usageFee: expectFeeExempt ? '0' : (fields.usageFee != null ? String(fields.usageFee) : null)
-    });
-  }
-
-  if (httpOk && !identity.ok) {
-    return baseResult({
-      outcome: 'needs_reconciliation',
-      authoritativeNonPayment: false,
-      errorCode: 'TRANSFER_IDENTITY_MISMATCH',
-      errorMessage: `MakeX confirmation did not match this withdrawal (${identity.mismatches.join(', ')}).`,
-      httpStatus: status,
-      fields,
-      ownedTxHash: null,
-      untrustedTxHash: fields.resultTxHash || looseHash,
-      blockingTxHash,
-      identity
     });
   }
 
@@ -311,42 +304,23 @@ function classifyEsdtTransferResponse({
       outcome: 'needs_reconciliation',
       authoritativeNonPayment: false,
       errorCode: codeUpper || 'IDEMPOTENCY_CONFLICT',
-      errorMessage: message || 'MakeX rejected the idempotency key. The balance stays reserved.',
+      errorMessage: message || 'MakeX rejected this idempotency key. The balance stays reserved. This response is not a payment.',
       httpStatus: status,
       fields,
       ownedTxHash: null,
-      untrustedTxHash: looseHash,
-      blockingTxHash,
+      untrustedTxHash: hashes.untrustedTxHash || hashes.ownedTxHash,
+      blockingTxHash: hashes.blockingTxHash,
       identity
     });
   }
 
-  const ambiguousHttp = status === 503 || status === 504 || status === 0 || (status >= 500 && status <= 599);
-  if (leaseLost || txPending || ambiguousHttp || fields.retryable || broadcastMightHaveHappened(fields)) {
-    const needsReconciliation = leaseLost
-      || txPending
-      || broadcastMightHaveHappened(fields)
-      || codeUpper === 'TX_NEEDS_RECONCILIATION'
-      || codeUpper === 'FENCING_LOST';
-    return baseResult({
-      outcome: needsReconciliation ? 'needs_reconciliation' : 'pending',
-      authoritativeNonPayment: false,
-      errorCode: codeUpper || (status ? `HTTP_${status}` : 'UNRESOLVED'),
-      errorMessage: message || 'MakeX did not confirm this withdrawal.',
-      httpStatus: status,
-      fields,
-      ownedTxHash: needsReconciliation ? null : ownedTxHash,
-      blockingTxHash,
-      untrustedTxHash,
-      identity
-    });
-  }
-
-  if (status === 422 && codeUpper === 'TRANSACTION_FAILED') {
-    const matched = Boolean(ownedTxHash)
-      && identity.ok
-      && (!requireTransferIdentity || transferIdentityPresent(fields, expected));
-    if (matched) {
+  if (status === 422 && EXECUTION_FAILURE_CODES.has(codeUpper)) {
+    const matched = identity.ok
+      && Boolean(hashes.ownedTxHash)
+      && fields.complete !== true
+      && fields.retryable !== true
+      && lower(fields.resultStatus) !== 'success';
+    if (requireTransferIdentity && matched) {
       return baseResult({
         outcome: 'failed',
         authoritativeNonPayment: true,
@@ -354,8 +328,8 @@ function classifyEsdtTransferResponse({
         errorMessage: message || 'MakeX reported that this withdrawal failed on-chain.',
         httpStatus: status,
         fields,
-        ownedTxHash,
-        blockingTxHash,
+        ownedTxHash: hashes.ownedTxHash,
+        blockingTxHash: hashes.blockingTxHash,
         identity
       });
     }
@@ -363,34 +337,62 @@ function classifyEsdtTransferResponse({
       outcome: 'needs_reconciliation',
       authoritativeNonPayment: false,
       errorCode: codeUpper,
-      errorMessage: message || 'MakeX reported a failed transaction that could not be matched to this withdrawal.',
+      errorMessage: message || 'MakeX reported a failed transaction that did not match this withdrawal.',
       httpStatus: status,
       fields,
       ownedTxHash: null,
-      untrustedTxHash: looseHash,
-      blockingTxHash,
+      untrustedTxHash: hashes.ownedTxHash || hashes.untrustedTxHash,
+      blockingTxHash: hashes.blockingTxHash,
       identity
     });
   }
 
-  const preBroadcast = status >= 400
-    && status < 500
-    && status !== 422
-    && !fields.retryable
-    && fields.broadcast !== true
-    && !broadcastMightHaveHappened(fields)
-    && !ownedTxHash
-    && !untrustedTxHash
-    && !blockingTxHash;
+  const rejectedBeforeBroadcast = codeUpper === 'TX_REJECTED'
+    && fields.complete !== true
+    && fields.retryable !== true
+    && !hashes.ownedTxHash
+    && !hashes.untrustedTxHash
+    && !hashes.blockingTxHash
+    && !fields.resultTxHash
+    && !fields.dataTxHash
+    && !fields.topTxHash;
 
-  if (preBroadcast) {
+  if (rejectedBeforeBroadcast) {
     return baseResult({
       outcome: 'failed',
       authoritativeNonPayment: true,
-      errorCode: codeUpper || `HTTP_${status}`,
+      errorCode: 'TX_REJECTED',
       errorMessage: message || 'MakeX rejected the withdrawal before broadcast.',
       httpStatus: status,
       fields,
+      identity
+    });
+  }
+
+  const unresolved = leaseLost
+    || OWNED_PENDING_CODES.has(codeUpper)
+    || fields.retryable
+    || fields.complete === false
+    || status === 503
+    || status === 504
+    || status === 0
+    || status >= 500;
+  if (unresolved) {
+    const needsReconciliation = leaseLost
+      || Boolean(hashes.blockingTxHash)
+      || codeUpper === 'TX_NEEDS_RECONCILIATION'
+      || codeUpper === 'FENCING_LOST'
+      || codeUpper === 'TX_PENDING';
+    return baseResult({
+      outcome: needsReconciliation ? 'needs_reconciliation' : 'pending',
+      authoritativeNonPayment: false,
+      errorCode: codeUpper || (status ? `HTTP_${status}` : 'UNRESOLVED'),
+      errorMessage: message || 'MakeX did not confirm this withdrawal.',
+      httpStatus: status,
+      fields,
+      ownedTxHash: hashes.ownedTxHash,
+      blockingTxHash: hashes.blockingTxHash,
+      untrustedTxHash: hashes.untrustedTxHash,
       identity
     });
   }
@@ -403,8 +405,8 @@ function classifyEsdtTransferResponse({
     httpStatus: status,
     fields,
     ownedTxHash: null,
-    blockingTxHash,
-    untrustedTxHash: untrustedTxHash || looseHash,
+    blockingTxHash: hashes.blockingTxHash,
+    untrustedTxHash: hashes.untrustedTxHash || hashes.ownedTxHash,
     identity
   });
 }
@@ -413,7 +415,7 @@ function mapClassifiedTransferResult(classified, parsedResponse, httpStatus) {
   const pending = classified.outcome === 'pending' || classified.outcome === 'needs_reconciliation';
   return {
     success: classified.outcome === 'confirmed',
-    txHash: classified.outcome === 'confirmed' ? classified.ownedTxHash : classified.ownedTxHash,
+    txHash: classified.outcome === 'confirmed' ? classified.ownedTxHash : null,
     errorMessage: classified.errorMessage,
     rawResponse: parsedResponse,
     httpStatus: httpStatus || classified.httpStatus || 0,
@@ -425,6 +427,7 @@ function mapClassifiedTransferResult(classified, parsedResponse, httpStatus) {
     untrustedTxHash: classified.untrustedTxHash,
     ownedTxHash: classified.ownedTxHash,
     feeExempt: classified.feeExempt,
+    skippedWhitelist: classified.skippedWhitelist,
     usageFee: classified.usageFee,
     usageFeeHash: classified.usageFeeHash,
     classified
@@ -433,6 +436,7 @@ function mapClassifiedTransferResult(classified, parsedResponse, httpStatus) {
 
 module.exports = {
   extractEsdtTransferApiFields,
+  exactTransferIdentity,
   classifyEsdtTransferResponse,
   mapClassifiedTransferResult
 };
