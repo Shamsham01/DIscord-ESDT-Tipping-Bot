@@ -114,6 +114,29 @@ const {
 } = require('./utils/on-chain-subscription-plans');
 const { syncGuildWhitelistIfSubscribed } = require('./utils/sync-guild-makex-whitelist');
 const { runOnChainSubscriptionMaintenance } = require('./jobs/on-chain-subscription-reminders');
+const { executeMakeXEsdtTransfer } = require('./utils/makex-esdt-client');
+const {
+  classifyEsdtTransferResponse,
+  mapClassifiedTransferResult,
+  extractEsdtTransferApiFields: extractEsdtTransferApiFieldsFromModule
+} = require('./utils/esdt-transfer-outcome');
+const {
+  esdtWithdrawalsArePaused,
+  esdtWithdrawalRecoveryEnabled,
+  resumeUnresolvedEsdtWithdrawals
+} = require('./utils/esdt-withdrawal-flow');
+const esdtWithdrawals = require('./db/esdt-withdrawals');
+const { handleWithdrawEsdt } = require('./handlers/withdraw-esdt');
+
+if (esdtWithdrawalsArePaused()) {
+  console.warn('[WITHDRAW] New /withdraw-esdt requests are paused. Set ESDT_WITHDRAWALS_PAUSED=false only after the MakeX Transfers API hotfix is deployed and the 1 Nov 2026 incident has been reconciled.');
+}
+if (!esdtWithdrawalRecoveryEnabled()) {
+  console.warn('[WITHDRAW] Automated ESDT withdrawal recovery is paused. Pending rows are inspected only. Set ESDT_WITHDRAWAL_RECOVERY_ENABLED=true only after the Transfers contract and migration are verified.');
+}
+if (!esdtWithdrawals.isConfigured()) {
+  console.warn('[WITHDRAW] SUPABASE_SERVICE_ROLE_KEY is missing. ESDT withdrawal reservations cannot be stored.');
+}
 
 // Validate dbFootball module is loaded correctly
 if (!dbFootball || typeof dbFootball !== 'object') {
@@ -512,99 +535,26 @@ async function checkTransactionStatus(txHash) {
 }
 
 function extractEsdtTransferApiFields(parsedResponse, response) {
-  let txHash = null;
-  if (parsedResponse.txHash) {
-    txHash = parsedResponse.txHash;
-  } else if (parsedResponse.result && parsedResponse.result.txHash) {
-    txHash = parsedResponse.result.txHash;
-  } else if (parsedResponse.data && parsedResponse.data.txHash) {
-    txHash = parsedResponse.data.txHash;
-  } else if (parsedResponse.transaction && parsedResponse.transaction.txHash) {
-    txHash = parsedResponse.transaction.txHash;
-  }
-
-  let txStatus = null;
-  if (parsedResponse.result && parsedResponse.result.status) {
-    txStatus = parsedResponse.result.status;
-  } else if (parsedResponse.status) {
-    txStatus = parsedResponse.status;
-  }
-  if (txStatus && typeof txStatus === 'object') {
-    txStatus = txStatus.status || txStatus.value || String(txStatus);
-  }
-
-  const errorMessage = parsedResponse.error ||
-    (parsedResponse.result && parsedResponse.result.error) ||
-    (parsedResponse.data && parsedResponse.data.error) ||
-    (!response.ok ? `API error (${response.status})` : null);
-
-  return { txHash, txStatus, errorMessage };
-}
-
-function isEsdtTransferApiImmediateSuccess(response, parsedResponse, txStatus, txHash) {
-  const statusStr = txStatus != null ? String(txStatus) : '';
-  const isStatusSuccess = statusStr === 'success' || statusStr === 'Success' || statusStr === 'SUCCESS';
-  return (response.ok || parsedResponse.success === true) && isStatusSuccess && !!txHash;
+  void response;
+  return extractEsdtTransferApiFieldsFromModule(parsedResponse);
 }
 
 /**
- * Resolve ESDT transfer outcome. When the API returns a txHash without immediate success,
- * poll MultiversX before treating the transfer as failed (prevents false ledger rollbacks).
+ * Resolve an ESDT transfer from the MakeX response for this request.
+ * HTTP 503, 504, timeouts, and TX_PENDING are never success, even when a referenced hash later succeeds on-chain.
  */
-async function finalizeEsdtTransferResult(parsedResponse, response, logPrefix = '[TRANSFER]') {
-  const { txHash, txStatus, errorMessage } = extractEsdtTransferApiFields(parsedResponse, response);
-
-  if (isEsdtTransferApiImmediateSuccess(response, parsedResponse, txStatus, txHash)) {
-    return {
-      success: true,
-      txHash,
-      errorMessage: null,
-      rawResponse: parsedResponse,
-      httpStatus: response.status
-    };
+function finalizeEsdtTransferResult(parsedResponse, response, logPrefix = '[TRANSFER]', options = {}) {
+  const classified = classifyEsdtTransferResponse({
+    httpStatus: response && response.status,
+    parsedResponse,
+    expected: options.expected || null,
+    requireTransferIdentity: options.requireTransferIdentity === true,
+    expectFeeExempt: options.expectFeeExempt === true
+  });
+  if (classified.outcome !== 'confirmed' && (classified.blockingTxHash || classified.untrustedTxHash)) {
+    console.warn(`${logPrefix} Ignoring untrusted transaction hash. outcome=${classified.outcome} code=${classified.errorCode || 'none'}`);
   }
-
-  if (txHash) {
-    console.log(`${logPrefix} API returned txHash ${txHash} (status: ${txStatus ?? 'unknown'}); verifying on-chain...`);
-    const chainStatus = await checkTransactionStatus(txHash);
-    if (chainStatus === 'success') {
-      console.log(`${logPrefix} On-chain success confirmed for tx ${txHash}`);
-      return {
-        success: true,
-        txHash,
-        errorMessage: null,
-        rawResponse: parsedResponse,
-        httpStatus: response.status
-      };
-    }
-    if (chainStatus === 'fail') {
-      console.error(`${logPrefix} On-chain failure confirmed for tx ${txHash}`);
-      return {
-        success: false,
-        txHash,
-        errorMessage: errorMessage || 'Transaction failed on-chain.',
-        rawResponse: parsedResponse,
-        httpStatus: response.status
-      };
-    }
-    console.warn(`${logPrefix} Tx ${txHash} not confirmed within polling window`);
-    return {
-      success: false,
-      txHash,
-      pendingConfirmation: true,
-      errorMessage: `Transaction submitted but not confirmed within ${Math.round(MULTIVERSX_TX_POLL_MAX_WAIT_MS / 1000)}s. Do not retry — check the explorer or contact an admin.`,
-      rawResponse: parsedResponse,
-      httpStatus: response.status
-    };
-  }
-
-  return {
-    success: false,
-    txHash: null,
-    errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
-    rawResponse: parsedResponse,
-    httpStatus: response.status
-  };
+  return mapClassifiedTransferResult(classified, parsedResponse, response && response.status);
 }
 
 // Pending swap quotes (key: guildId:userId:messageId)
@@ -1161,7 +1111,9 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
             wallet: refund.wallet,
             tokenTicker: refund.tokenTicker,
             amount: refund.amount,
-            error: transferResult.errorMessage || 'Transaction failed',
+            error: transferResult.pendingConfirmation
+              ? `Pending verification — do not retry until reconciled. ${transferResult.errorMessage || ''}`.trim()
+              : (transferResult.errorMessage || 'Transaction failed'),
             success: false
           });
           console.error(`[MASS-REFUND] ❌ Failed: Transaction failed for ${refund.username} - ${transferResult.errorMessage || 'Unknown error'}`);
@@ -2415,6 +2367,7 @@ async function getUserByWallet(walletAddress, guildId) {
 // Transfer ESDT tokens using project wallet
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") - required for API
 async function transferESDT(recipientWallet, tokenIdentifier, amount, projectName, guildId, options = {}) {
+  let requestStarted = false;
   try {
     if (!options.skipSubscriptionCheck) {
       await assertGuildOnChainPlanActive(guildId);
@@ -2475,93 +2428,26 @@ async function transferESDT(recipientWallet, tokenIdentifier, amount, projectNam
         .replace(/ ([A-Za-z0-9+/=]+)-----END/, '\n$1-----END'); // Final line before footer
     }
 
-    // Ensure amount is a number (API expects human-readable amount as number)
-    const amountNum = typeof amount === 'number' ? amount : parseFloat(amount);
-    if (isNaN(amountNum)) {
-      throw new Error(`Invalid amount format: "${amount}". Must be a valid number.`);
-    }
-    
-    // Ensure tokenIdentifier is a plain string (remove any JSON stringification or quotes)
-    let cleanTokenIdentifier = typeof tokenIdentifier === 'string' ? tokenIdentifier.trim() : String(tokenIdentifier).trim();
-    cleanTokenIdentifier = cleanTokenIdentifier.replace(/^["']+|["']+$/g, ''); // Remove surrounding quotes
-    cleanTokenIdentifier = cleanTokenIdentifier.replace(/\\"/g, '"'); // Remove JSON escape sequences
-    
-    // Validate cleaned identifier format (reuse the regex from above)
-    if (!identifierRegex.test(cleanTokenIdentifier)) {
-      throw new Error(`Invalid token identifier format after cleaning: "${cleanTokenIdentifier}". Expected format: TICKER-6hexchars`);
-    }
-    
-    const requestBody = {
+    const result = await executeMakeXEsdtTransfer({
+      endpointBase: API_BASE_URL,
+      apiToken: API_TOKEN,
+      pem: pemToSend,
       recipient: recipientWallet,
-      amount: amountNum, // Human-readable amount as number
-      tokenTicker: cleanTokenIdentifier, // API expects field name "tokenTicker" but value should be full identifier
-      walletPem: pemToSend,
-    };
-    
-    // Old working code: API_BASE_URL was base URL, appended /execute/esdtTransfer
-    // This matches the old implementation that was working
-    const fullEndpoint = API_BASE_URL.endsWith('/') 
-      ? `${API_BASE_URL}execute/esdtTransfer` 
-      : `${API_BASE_URL}/execute/esdtTransfer`;
-    
-    // Log the exact JSON payload for debugging
-    const payloadForLogging = {
-      recipient: recipientWallet,
-      amount: amountNum,
-      tokenTicker: cleanTokenIdentifier, // Field name is tokenTicker, but value is full identifier
-      walletPem: '[REDACTED]'
-    };
-    
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
-    
-    try {
-      const response = await fetch(fullEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${API_TOKEN}`,
-        },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      const responseText = await response.text();
-      console.log(`API response status: ${response.status}`);
-      console.log(`API response for transfer: ${responseText}`);
-      
-      let parsedResponse;
-      try {
-        parsedResponse = JSON.parse(responseText);
-      } catch (parseError) {
-        console.error('Error parsing API response:', parseError.message);
-        parsedResponse = { success: response.ok, message: responseText };
-      }
+      tokenIdentifier,
+      amount,
+      options: { ...options, onDispatch() { requestStarted = true; } },
+      fetchImpl: fetch,
+      logPrefix: '[TRANSFER]'
+    });
 
-      const result = await finalizeEsdtTransferResult(parsedResponse, response, '[TRANSFER]');
-
-      if (result.success) {
-        console.log(`Successfully sent ${amount} ${tokenTicker} to: ${recipientWallet} using project: ${projectName}${result.txHash ? ` (txHash: ${result.txHash})` : ''}`);
-      } else {
-        console.error(`API reported failure for ${tokenTicker} transfer: ${result.errorMessage || 'Unknown error'}`);
-        if (result.txHash) {
-          console.log(`Transaction hash was returned (${result.txHash}), outcome: ${result.pendingConfirmation ? 'pending confirmation' : 'failed'}.`);
-        }
-      }
-
-      return result;
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-      
-      if (fetchError.name === 'AbortError') {
-        console.error('Transfer API request timed out after 60 seconds');
-        throw new Error('API request timed out after 60 seconds');
-      }
-      throw fetchError;
+    if (result.success) {
+      console.log(`Successfully sent ${amount} ${tokenIdentifier} to: ${recipientWallet} using project: ${projectName}${result.txHash ? ` (txHash: ${result.txHash})` : ''}`);
+    } else {
+      console.error(`MakeX outcome ${result.outcome || 'unresolved'} for ${tokenIdentifier}: ${result.errorMessage || 'Unknown error'}`);
     }
+    return result;
   } catch (error) {
+    noteEsdtTransferError(error, requestStarted);
     console.error(`Error transferring ESDT:`, error.message);
     throw error;
   }
@@ -2570,6 +2456,7 @@ async function transferESDT(recipientWallet, tokenIdentifier, amount, projectNam
 // Transfer ESDT from Community Fund (without supported tokens restriction)
 // tokenIdentifier: Full token identifier (e.g., "USDC-c76f1f") - required for API
 async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, amount, projectName, guildId, options = {}) {
+  let requestStarted = false;
   try {
     if (!options.skipSubscriptionCheck) {
       await assertGuildOnChainPlanActive(guildId);
@@ -2628,96 +2515,40 @@ async function transferESDTFromCommunityFund(recipientWallet, tokenIdentifier, a
       throw new Error(`PEM processing failed for project "${projectName}". Please reconfigure the Community Fund.`);
     }
 
-    // Ensure amount is a number (API expects human-readable amount as number)
-    const amountNum = typeof amount === 'number' ? amount : parseFloat(amount);
-    if (isNaN(amountNum)) {
-      throw new Error(`Invalid amount format: "${amount}". Must be a valid number.`);
-    }
-    
-    // Ensure tokenIdentifier is a plain string (remove any JSON stringification or quotes)
-    let cleanTokenIdentifier = typeof tokenIdentifier === 'string' ? tokenIdentifier.trim() : String(tokenIdentifier).trim();
-    cleanTokenIdentifier = cleanTokenIdentifier.replace(/^["']+|["']+$/g, ''); // Remove surrounding quotes
-    cleanTokenIdentifier = cleanTokenIdentifier.replace(/\\"/g, '"'); // Remove JSON escape sequences
-    
-    // Validate cleaned identifier format (reuse the regex from above)
-    if (!identifierRegex.test(cleanTokenIdentifier)) {
-      throw new Error(`Invalid token identifier format after cleaning: "${cleanTokenIdentifier}". Expected format: TICKER-6hexchars`);
-    }
-    
-    const requestBody = {
+    const result = await executeMakeXEsdtTransfer({
+      endpointBase: API_BASE_URL,
+      apiToken: API_TOKEN,
+      pem: pemToSend,
       recipient: recipientWallet,
-      amount: amountNum, // Human-readable amount as number
-      tokenTicker: cleanTokenIdentifier, // API expects field name "tokenTicker" but value should be full identifier
-      walletPem: pemToSend,
-    };
-    
-    // Old working code: API_BASE_URL was base URL, appended /execute/esdtTransfer
-    // This matches the old implementation that was working
-    const fullEndpoint = API_BASE_URL.endsWith('/') 
-      ? `${API_BASE_URL}execute/esdtTransfer` 
-      : `${API_BASE_URL}/execute/esdtTransfer`;
-    
-    // Log the exact JSON payload for debugging
-    const payloadForLogging = {
-      recipient: recipientWallet,
-      amount: amountNum,
-      tokenTicker: cleanTokenIdentifier, // Field name is tokenTicker, but value is full identifier
-      walletPem: '[REDACTED]'
-    };
-    
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
-    
-    try {
-      const response = await fetch(fullEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${API_TOKEN}`,
-        },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal
-      });
-      
-      clearTimeout(timeoutId);
-      
-      const responseText = await response.text();
-      console.log(`[WITHDRAW] API response status: ${response.status}`);
-      console.log(`[WITHDRAW] API response for transfer: ${responseText}`);
-      
-      let parsedResponse;
-      try {
-        parsedResponse = JSON.parse(responseText);
-      } catch (parseError) {
-        console.error('[WITHDRAW] Error parsing API response:', parseError.message);
-        parsedResponse = { success: response.ok, message: responseText };
-      }
+      tokenIdentifier,
+      amount,
+      options: { ...options, onDispatch() { requestStarted = true; } },
+      fetchImpl: fetch,
+      logPrefix: '[WITHDRAW]'
+    });
 
-      const result = await finalizeEsdtTransferResult(parsedResponse, response, '[WITHDRAW]');
-
-      if (result.success) {
-        console.log(`[WITHDRAW] Successfully sent ${amount} ${tokenIdentifier} to: ${recipientWallet} using Community Fund: ${projectName}${result.txHash ? ` (txHash: ${result.txHash})` : ''}`);
-      } else {
-        console.error(`[WITHDRAW] API reported failure for ${tokenIdentifier} transfer: ${result.errorMessage || 'Unknown error'}`);
-        if (result.txHash) {
-          console.log(`[WITHDRAW] Transaction hash was returned (${result.txHash}), outcome: ${result.pendingConfirmation ? 'pending confirmation' : 'failed'}.`);
-        }
-      }
-
-      return result;
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-      
-      if (fetchError.name === 'AbortError') {
-        console.error('[WITHDRAW] Transfer API request timed out after 60 seconds');
-        throw new Error('API request timed out after 60 seconds');
-      }
-      throw fetchError;
+    if (result.success) {
+      console.log(`[WITHDRAW] Successfully sent ${amount} ${tokenIdentifier} to: ${recipientWallet} using Community Fund: ${projectName}${result.txHash ? ` (txHash: ${result.txHash})` : ''}`);
+    } else {
+      console.error(`[WITHDRAW] MakeX outcome ${result.outcome || 'unresolved'} for ${tokenIdentifier}: ${result.errorMessage || 'Unknown error'}`);
     }
+    return result;
   } catch (error) {
+    noteEsdtTransferError(error, requestStarted);
     console.error(`[WITHDRAW] Error transferring ESDT:`, error.message);
     throw error;
   }
+}
+
+function noteEsdtTransferError(error, requestStarted) {
+  if (!error || typeof error !== 'object') return error;
+  if (requestStarted || error.broadcastAttempted === true) {
+    error.beforeBroadcast = false;
+    error.broadcastAttempted = true;
+    return error;
+  }
+  error.beforeBroadcast = true;
+  return error;
 }
 
 async function restoreVirtualAccountBalance(guildId, userId, tokenIdentifier, amount, balanceAfterDeduction, reason) {
@@ -8788,6 +8619,11 @@ client.on('interactionCreate', async (interaction) => {
           embeds: [successEmbed],
           flags: [MessageFlags.Ephemeral] 
         });
+      } else if (transferResult.pendingConfirmation) {
+        await interaction.editReply({
+          content: `⏳ **House withdrawal is pending verification.** Do not retry until an admin confirms the MakeX operation.\n\n${transferResult.errorMessage || 'The transfer was not confirmed.'}`,
+          flags: [MessageFlags.Ephemeral]
+        });
       } else {
         await interaction.editReply({ 
           content: `❌ Withdrawal failed: ${transferResult.errorMessage || 'Unknown error'}`, 
@@ -11593,380 +11429,22 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
   } else if (commandName === 'withdraw-esdt') {
-    let deductResult;
-    let balanceRestored = false;
-    let withdrawAmountStr;
-    let tokenIdentifier;
-    let guildId;
-    let userId;
-
-    try {
-      await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-      
-      let tokenTicker = interaction.options.getString('token-ticker');
-      
-      // Sanitize token ticker
-      if (tokenTicker) {
-        tokenTicker = sanitizeTokenIdentifier(tokenTicker);
-      }
-      if (!tokenTicker) {
-        await interaction.editReply({ content: '❌ Token ticker is required.', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      
-      const amountStr = interaction.options.getString('amount');
-      const memo = interaction.options.getString('memo') || 'Withdrawal from virtual account';
-      
-      guildId = interaction.guildId;
-      userId = interaction.user.id;
-      
-      // Force reload virtual accounts data
-      virtualAccounts.forceReloadData();
-      
-      // Update username for this user
-      await virtualAccounts.updateUserUsername(guildId, userId, interaction.user.tag);
-      
-      // Resolve token identifier from ticker/identifier BEFORE checking balance
-      tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
-      
-      // Validate identifier format
-      const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
-      if (!esdtIdentifierRegex.test(tokenIdentifier)) {
-        await interaction.editReply({ 
-          content: `❌ **Invalid token identifier!**\n\nCould not resolve full token identifier for "${tokenTicker}". Please ensure token metadata is registered using /update-token-metadata.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      // Check if user has any balance for the selected token (use identifier, not ticker)
-      let currentBalance = await virtualAccounts.getUserBalance(guildId, userId, tokenIdentifier);
-      
-      // If balance is 0 with identifier, try ticker as fallback (for backward compatibility)
-      if (new BigNumber(currentBalance).isZero() && tokenIdentifier !== tokenTicker) {
-        currentBalance = await virtualAccounts.getUserBalance(guildId, userId, tokenTicker);
-      }
-      
-      if (new BigNumber(currentBalance).isLessThanOrEqualTo(0)) {
-        await interaction.editReply({ 
-          content: `❌ **No balance available!**\n\nYou have **0** ${tokenTicker} in your virtual account.\n\nDeposit funds to a Community Fund wallet to add tokens to your virtual account.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      // Parse amount - handle "MAX" or "ALL" options
-      // CRITICAL: Use BigNumber to preserve precision for large decimal numbers
-      let withdrawAmount;
-      if (amountStr.toUpperCase() === 'MAX' || amountStr.toUpperCase() === 'ALL') {
-        withdrawAmount = currentBalance; // Keep as string to preserve precision
-      } else {
-        // Validate amount using BigNumber to avoid precision loss from parseFloat
-        let amountBN;
-        try {
-          amountBN = new BigNumber(amountStr);
-        } catch (e) {
-          await interaction.editReply({ 
-            content: `❌ **Invalid amount!**\n\nPlease provide a valid number or use "MAX"/"ALL" to withdraw your entire balance.`, 
-            flags: [MessageFlags.Ephemeral] 
-          });
-          return;
-        }
-        
-        if (amountBN.isNaN() || amountBN.isLessThanOrEqualTo(0)) {
-          await interaction.editReply({ 
-            content: `❌ **Invalid amount!**\n\nPlease provide a valid number or use "MAX"/"ALL" to withdraw your entire balance.`, 
-            flags: [MessageFlags.Ephemeral] 
-          });
-          return;
-        }
-        
-        // Keep as string to preserve precision
-        withdrawAmount = amountBN.toString();
-      }
-      
-      // Check if user has sufficient balance
-      if (new BigNumber(withdrawAmount).isGreaterThan(currentBalance)) {
-        await interaction.editReply({ 
-          content: `❌ **Insufficient balance!**\n\nYou have: **${currentBalance}** ${tokenTicker}\nRequested: **${withdrawAmount}** ${tokenTicker}`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      // Get user's wallet address (await the async function)
-      const userWallets = await getUserWallets(guildId);
-      const userWallet = userWallets?.[userId];
-      
-      if (!userWallet) {
-        await interaction.editReply({ 
-          content: `❌ **No wallet registered!**\n\nPlease register your wallet address using \`/set-wallet\` or click the "Register My Wallet" button in \`/list-wallets\` before withdrawing funds.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      if (!userWallet.startsWith('erd1') || userWallet.length !== 62) {
-        await interaction.editReply({ 
-          content: `❌ **Invalid wallet address!**\n\nYour registered wallet address is invalid. Please update it using \`/set-wallet\`.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      // Check if community fund is set
-      const fundProject = await getCommunityFundProject(guildId);
-      if (!fundProject) {
-        await interaction.editReply({ 
-          content: `❌ **No Community Fund configured!**\n\nPlease ask an admin to set up a Community Fund using \`/set-community-fund\`.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      // Check Community Fund balances (1 transfer for withdraw)
-      const balanceCheck = await checkCommunityFundBalances(guildId, 1);
-      if (!balanceCheck.sufficient) {
-        const errorEmbed = await createBalanceErrorEmbed(guildId, balanceCheck, '/withdraw-esdt');
-        await interaction.editReply({ embeds: [errorEmbed], flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      
-      const projects = await getProjects(guildId);
-      const projectName = getCommunityFundProjectName();
-      if (!projects[projectName]) {
-        await interaction.editReply({ 
-          content: `❌ **Community Fund not found!**\n\nThe Community Fund project no longer exists. Please ask an admin to reconfigure it.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-
-      try {
-        await assertGuildOnChainPlanActive(guildId);
-      } catch (subError) {
-        await interaction.editReply({
-          content: `❌ **Withdrawals disabled**\n\n${subError.message}`,
-          flags: [MessageFlags.Ephemeral]
-        });
-        return;
-      }
-      
-      // CRITICAL: Prevent race conditions by locking withdrawals for this user+token combination
-      // This prevents concurrent withdrawals that could result in double-spending
-      const withdrawalLockKey = `${guildId}:${userId}:${tokenIdentifier}`;
-      
-      // Check if there's already an active withdrawal for this user+token
-      if (withdrawalLocks.has(withdrawalLockKey)) {
-        await interaction.editReply({ 
-          content: `⏳ **Withdrawal already in progress!**\n\nYou have a withdrawal for ${tokenTicker} currently processing. Please wait for it to complete before initiating another withdrawal.\n\nThis prevents double-spending and ensures your balance is correctly updated.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      // Create withdrawal lock promise IMMEDIATELY to prevent concurrent withdrawals
-      let withdrawalResolve;
-      const withdrawalPromise = new Promise((resolve) => {
-        withdrawalResolve = resolve;
-      });
-      withdrawalLocks.set(withdrawalLockKey, withdrawalPromise);
-      
-      // Ensure withdrawAmount is a string (deductFundsFromAccount expects string or number)
-      withdrawAmountStr = typeof withdrawAmount === 'object' && withdrawAmount.toString 
-        ? withdrawAmount.toString() 
-        : String(withdrawAmount);
-      
-      // CRITICAL FIX: Deduct balance BEFORE blockchain transaction to prevent race conditions
-      // This ensures that if a second withdrawal is attempted, it will see the reduced balance
-      console.log(`[WITHDRAW] Pre-deducting ${withdrawAmountStr} ${tokenIdentifier} from virtual account for user ${userId} (BEFORE blockchain transaction)`);
-      
-      let balanceBeforeDeduction = null;
-      balanceRestored = false;
-      
-      try {
-        // Get balance before deduction for potential restoration
-        balanceBeforeDeduction = await virtualAccounts.getUserBalance(guildId, userId, tokenIdentifier);
-        
-        // Deduct funds from virtual account BEFORE blockchain transaction
-        deductResult = await virtualAccounts.deductFundsFromAccount(guildId, userId, tokenIdentifier, withdrawAmountStr, 'withdrawal (pending blockchain confirmation)', memo);
-        
-        if (!deductResult.success) {
-          // Release lock before returning
-          withdrawalLocks.delete(withdrawalLockKey);
-          if (withdrawalResolve) {
-            withdrawalResolve();
-          }
-          
-          // Log detailed error information for debugging
-          console.log(`[WITHDRAW] Deduction failed for user ${userId}:`);
-          console.log(`[WITHDRAW]   Balance before deduction: ${balanceBeforeDeduction}`);
-          console.log(`[WITHDRAW]   Withdraw amount: ${withdrawAmount}`);
-          console.log(`[WITHDRAW]   Withdraw amount string: ${withdrawAmountStr}`);
-          console.log(`[WITHDRAW]   Deduct result error: ${deductResult.error}`);
-          console.log(`[WITHDRAW]   Deduct result currentBalance: ${deductResult.currentBalance}`);
-          console.log(`[WITHDRAW]   Deduct result requiredAmount: ${deductResult.requiredAmount}`);
-          
-          await interaction.editReply({ 
-            content: `❌ **Insufficient balance!**\n\nYou have: **${balanceBeforeDeduction}** ${tokenTicker}\nRequested: **${withdrawAmount}** ${tokenTicker}\n\nYour balance may have changed. Please check your balance and try again.`, 
-            flags: [MessageFlags.Ephemeral] 
-          });
-          return;
-        }
-        
-        console.log(`[WITHDRAW] Balance deducted successfully. New balance: ${deductResult.newBalance}`);
-      } catch (deductionException) {
-        // Release lock before returning
-        withdrawalLocks.delete(withdrawalLockKey);
-        if (withdrawalResolve) {
-          withdrawalResolve();
-        }
-        console.error(`[WITHDRAW] CRITICAL ERROR: Exception during pre-deduction!`, deductionException);
-        await interaction.editReply({ 
-          content: `❌ **Withdrawal failed!**\n\nError deducting balance: ${deductionException.message || String(deductionException)}\n\nPlease try again or contact an admin if the issue persists.`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        return;
-      }
-      
-      try {
-        await interaction.editReply({ 
-          content: `🔄 **Processing withdrawal...**\n\nWithdrawing **${withdrawAmount}** ${tokenTicker} to your wallet...\nMemo: ${memo}\n\n⏳ Balance has been reserved. Blockchain transaction in progress...`, 
-          flags: [MessageFlags.Ephemeral] 
-        });
-        
-        // Use internal project name "Community Fund" for the transfer function
-        const communityFundProjectName = getCommunityFundProjectName();
-        
-        console.log(`User ${interaction.user.tag} (${userId}) is withdrawing ${withdrawAmount} ${tokenTicker} to wallet ${userWallet} using Community Fund (${fundProject})`);
-        
-        // Perform the blockchain transfer AFTER balance has been deducted
-        const transferResult = await transferESDTFromCommunityFund(userWallet, tokenIdentifier, withdrawAmount, communityFundProjectName, guildId);
-        
-        if (transferResult.success) {
-          // Update transaction description with actual tx hash
-          try {
-            const dbVirtualAccounts = require('./db/virtual-accounts');
-            // Update the most recent withdrawal transaction with the actual tx hash
-            // This is done by finding the transaction and updating it
-            // For now, we'll just log it - the transaction was already recorded with "pending" status
-            console.log(`[WITHDRAW] Blockchain transaction successful. TxHash: ${transferResult.txHash}`);
-          } catch (updateError) {
-            console.error(`[WITHDRAW] Error updating transaction with tx hash:`, updateError);
-          }
-          
-          const explorerUrl = transferResult.txHash
-            ? `https://explorer.multiversx.com/transactions/${transferResult.txHash}`
-            : null;
-          const txHashFieldValue = transferResult.txHash
-            ? `[${transferResult.txHash}](${explorerUrl})`
-            : 'Not available';
-          
-          // Get Community Fund project logo for withdrawal notification
-          const projectLogoUrl = await getProjectLogoUrl(guildId, communityFundProjectName);
-          
-          const successEmbed = new EmbedBuilder()
-            .setTitle('💰 Withdrawal Successful!')
-            .setDescription(`Successfully withdrew **${withdrawAmount}** ${tokenTicker} to your wallet`)
-            .addFields([
-              { name: 'Amount Withdrawn', value: `${withdrawAmount} ${tokenTicker}`, inline: true },
-              { name: 'Remaining Balance', value: `${deductResult.newBalance} ${tokenTicker}`, inline: true },
-              { name: 'Recipient Wallet', value: `\`${userWallet}\``, inline: false },
-              { name: 'Transaction Hash', value: txHashFieldValue, inline: false },
-              { name: 'Memo', value: memo, inline: false },
-              { name: 'Status', value: '✅ Success', inline: true }
-            ])
-            .setColor('#00FF00')
-            .setThumbnail(projectLogoUrl)
-            .setFooter({ text: 'Powered by MakeX', iconURL: 'https://i.ibb.co/rsPX3fy/Make-X-Logo-Trnasparent-BG.png' })
-            .setTimestamp();
-          
-          await interaction.editReply({ 
-            content: `✅ **Withdrawal completed successfully!**`, 
-            embeds: [successEmbed], 
-            flags: [MessageFlags.Ephemeral] 
-          });
-          
-          console.log(`Withdrawal successful: ${withdrawAmount} ${tokenTicker} sent to ${userWallet}, new balance: ${deductResult.newBalance}`);
-        } else if (transferResult.pendingConfirmation && transferResult.txHash) {
-          // Tx was submitted but not confirmed in time — do NOT restore balance (tx may have succeeded)
-          console.error(`[WITHDRAW] Withdrawal pending confirmation. TxHash: ${transferResult.txHash}. Balance NOT restored.`);
-          const explorerUrl = `https://explorer.multiversx.com/transactions/${transferResult.txHash}`;
-          await interaction.editReply({
-            content: `⚠️ **Withdrawal status unknown**\n\nYour transaction was submitted on-chain but could not be confirmed in time.\n\n**Do not retry** until an admin verifies the outcome.\n\nTransaction: [\`${transferResult.txHash}\`](${explorerUrl})\n\nYour virtual account balance remains deducted (${deductResult.newBalance} ${tokenTicker} remaining). If the transaction succeeded on-chain, no further action is needed.`,
-            flags: [MessageFlags.Ephemeral]
-          });
-        } else {
-          // Blockchain transaction failed - RESTORE the balance only when no pending/successful on-chain tx
-          console.error(`[WITHDRAW] Blockchain transaction failed. Restoring balance...`);
-          console.error(`[WITHDRAW] Error: ${transferResult.errorMessage || 'Unknown error'}`);
-          
-          try {
-            const restoredBalance = await restoreEsdetWithdrawalBalance(
-              guildId,
-              userId,
-              tokenIdentifier,
-              withdrawAmountStr,
-              deductResult.newBalance,
-              'blockchain transaction failed'
-            );
-            balanceRestored = true;
-            console.log(`[WITHDRAW] Balance restored successfully. New balance: ${restoredBalance}`);
-          } catch (restoreError) {
-            console.error(`[WITHDRAW] CRITICAL: Failed to restore balance after blockchain failure!`, restoreError);
-            console.error(`[WITHDRAW] CRITICAL: User ${userId} balance needs manual correction!`);
-            console.error(`[WITHDRAW] CRITICAL: Should restore ${withdrawAmountStr} ${tokenIdentifier}`);
-          }
-          
-          await interaction.editReply({ 
-            content: `❌ **Withdrawal failed!**\n\nBlockchain transaction failed: ${transferResult.errorMessage || 'Unknown error'}\n\n${balanceRestored ? '✅ Your balance has been restored.' : '⚠️ **CRITICAL:** Balance restoration failed. Please contact an admin immediately.'}\n\nYour virtual account balance was not affected.`, 
-            flags: [MessageFlags.Ephemeral] 
-          });
-        }
-      } finally {
-        // Always release the withdrawal lock
-        withdrawalLocks.delete(withdrawalLockKey);
-        if (withdrawalResolve) {
-          withdrawalResolve();
-        }
-      }
-    } catch (error) {
-      console.error('Error in withdraw command:', error.message);
-
-      let restoredMessage = '';
-      if (typeof deductResult !== 'undefined' && deductResult?.success && !balanceRestored) {
-        try {
-          const restoredBalance = await restoreEsdetWithdrawalBalance(
-            guildId,
-            userId,
-            tokenIdentifier,
-            withdrawAmountStr,
-            deductResult.newBalance,
-            error.message || 'withdrawal error'
-          );
-          balanceRestored = true;
-          console.log(`[WITHDRAW] Balance restored after thrown error. New balance: ${restoredBalance}`);
-          restoredMessage = '\n\n✅ Your balance has been restored.';
-        } catch (restoreError) {
-          console.error(`[WITHDRAW] CRITICAL: Failed to restore balance after thrown error!`, restoreError);
-          console.error(`[WITHDRAW] CRITICAL: User ${userId} balance needs manual correction!`);
-          console.error(`[WITHDRAW] CRITICAL: Should restore ${withdrawAmountStr} ${tokenIdentifier}`);
-          restoredMessage = '\n\n⚠️ **CRITICAL:** Balance restoration failed. Please contact an admin immediately.';
-        }
-      }
-
-      if (interaction.deferred) {
-        await interaction.editReply({
-          content: `❌ **Withdrawal failed!**\n\n${error.message}${restoredMessage}`,
-          flags: [MessageFlags.Ephemeral]
-        });
-      } else {
-        await interaction.reply({
-          content: `❌ **Withdrawal failed!**\n\n${error.message}${restoredMessage}`,
-          flags: [MessageFlags.Ephemeral]
-        });
-      }
-    }
+    await handleWithdrawEsdt(interaction, {
+      virtualAccounts,
+      sanitizeTokenIdentifier,
+      resolveTokenIdentifier,
+      getUserWallets,
+      getCommunityFundProject,
+      checkCommunityFundBalances,
+      createBalanceErrorEmbed,
+      getProjects,
+      getCommunityFundProjectName,
+      assertGuildOnChainPlanActive,
+      getStoredTokenDecimals,
+      transferESDTFromCommunityFund,
+      getProjectLogoUrl,
+      withdrawals: esdtWithdrawals
+    });
   } else if (commandName === 'tip-virtual-esdt') {
     try {
       await interaction.deferReply();
@@ -13495,6 +12973,13 @@ client.on('interactionCreate', async (interaction) => {
         );
         
         if (!transferResult.success || !transferResult.txHash) {
+          if (!transferResult.authoritativeNonPayment) {
+            await interaction.editReply({
+              content: `⏳ **Transfer pending verification.**\n\n${transferResult.errorMessage || 'MakeX did not confirm this transfer.'}\n\nYour virtual balance stays reserved. Do not retry until an admin reconciles it.`,
+              flags: [MessageFlags.Ephemeral]
+            });
+            return;
+          }
           const { restored } = await tryRestoreVirtualAccountBalance(
             sourceGuildId,
             userId,
@@ -13548,7 +13033,7 @@ client.on('interactionCreate', async (interaction) => {
         console.error('[TRANSFER-CROSS-GUILD-ESDT] Transfer error:', transferError);
 
         let restoredMessage = '';
-        if (sourceDeductResult?.success) {
+        if (sourceDeductResult?.success && transferError.beforeBroadcast) {
           const { restored } = await tryRestoreVirtualAccountBalance(
             sourceGuildId,
             userId,
@@ -13560,6 +13045,8 @@ client.on('interactionCreate', async (interaction) => {
           restoredMessage = restored
             ? '\n\n✅ Your balance has been restored.'
             : '\n\n⚠️ **CRITICAL:** Balance restoration failed. Please contact an admin immediately.';
+        } else if (sourceDeductResult?.success) {
+          restoredMessage = '\n\nYour balance stays reserved because the transfer may have been broadcast. Do not retry until it is reconciled.';
         }
         
         await interaction.editReply({
@@ -25510,7 +24997,13 @@ async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
     );
 
     if (!transferResult.success) {
-      throw new Error(`Failed to transfer subscription fee on-chain: ${transferResult.error || 'Unknown error'}`);
+      const err = new Error(
+        transferResult.authoritativeNonPayment
+          ? `Failed to transfer subscription fee on-chain: ${transferResult.errorMessage || transferResult.error || 'Unknown error'}`
+          : `Subscription payment is pending verification. Do not retry until an admin checks the MakeX operation. ${transferResult.errorMessage || ''}`.trim()
+      );
+      err.paymentUnverified = transferResult.authoritativeNonPayment !== true;
+      throw err;
     }
 
     if (!transferResult.txHash) {
@@ -25523,7 +25016,7 @@ async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
       throw new Error(txOutcome.userMessage || 'Subscription payment failed on-chain.');
     }
   } catch (transferError) {
-    if (usedProvisionalWhitelist && whitelistSnapshot) {
+    if (usedProvisionalWhitelist && whitelistSnapshot && !transferError.paymentUnverified) {
       try {
         await makexWhitelist.rollbackGuildWhitelistSnapshot(whitelistSnapshot);
       } catch (rollbackError) {
@@ -25531,7 +25024,10 @@ async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
       }
     }
     console.error('[ON-CHAIN-SUB] Error making on-chain transfer for subscription:', transferError);
-    throw new Error(`Failed to process subscription payment: ${transferError.message}. Your balance was not deducted.`);
+    const balanceNote = transferError.paymentUnverified
+      ? ' Your virtual balance was not deducted. Do not start another payment until this one is reconciled.'
+      : ' Your balance was not deducted.';
+    throw new Error(`Failed to process subscription payment: ${transferError.message}.${balanceNote}`);
   }
 
   let whitelistResults;
@@ -25694,14 +25190,23 @@ async function chargePoolCreationFee(guildId, userId) {
       );
       
       if (!transferResult.success) {
-        throw new Error(`Failed to transfer fee on-chain: ${transferResult.error || 'Unknown error'}`);
+        const err = new Error(
+          transferResult.authoritativeNonPayment
+            ? `Failed to transfer fee on-chain: ${transferResult.errorMessage || transferResult.error || 'Unknown error'}`
+            : `Pool creation fee is pending verification. Do not retry until an admin checks the MakeX operation. ${transferResult.errorMessage || ''}`.trim()
+        );
+        err.paymentUnverified = transferResult.authoritativeNonPayment !== true;
+        throw err;
       }
       
       console.log(`[STAKING] Pool creation fee transferred successfully. TX Hash: ${transferResult.txHash || 'N/A'}`);
     } catch (transferError) {
       console.error('[STAKING] Error making on-chain transfer for pool creation fee:', transferError);
       // Transfer failed - don't deduct from user, just return error
-      throw new Error(`Failed to process pool creation fee: ${transferError.message}. Your balance was not deducted.`);
+      const balanceNote = transferError.paymentUnverified
+        ? ' Your virtual balance was not deducted. Do not start another payment until this one is reconciled.'
+        : ' Your balance was not deducted.';
+      throw new Error(`Failed to process pool creation fee: ${transferError.message}.${balanceNote}`);
     }
     
     // Only deduct from VA after successful on-chain transfer
@@ -28603,6 +28108,55 @@ async function cleanupForwardedMessages(sourceGuildId, activityType, activityId)
 }
 
 // Ready event
+
+async function resumePendingEsdtWithdrawals(workerId) {
+  if (!esdtWithdrawals.isConfigured()) {
+    console.warn('[WITHDRAW] Skipping withdrawal resume because SUPABASE_SERVICE_ROLE_KEY is not configured.');
+    return;
+  }
+  if (!esdtWithdrawalRecoveryEnabled()) {
+    const rows = await esdtWithdrawals.listUnresolved({ limit: 20 });
+    console.warn(`[WITHDRAW] Automated recovery is paused. ${rows.length} unresolved withdrawal(s) were not sent to MakeX.`);
+    return { checked: rows.length, posted: 0, recovery: 'paused' };
+  }
+  const summary = await resumeUnresolvedEsdtWithdrawals({
+    repo: esdtWithdrawals,
+    workerId,
+    recoveryEnabled: true,
+    send: async (record) => {
+      const result = await transferESDTFromCommunityFund(
+        record.recipientWallet,
+        record.tokenIdentifier,
+        record.amountHuman,
+        getCommunityFundProjectName(),
+        record.guildId,
+        {
+          exactDecimal: true,
+          decimals: record.decimals,
+          amountRaw: record.amountRaw,
+          idempotencyKey: record.withdrawalId,
+          withdrawalId: record.withdrawalId,
+          requireTransferIdentity: true,
+          expectFeeExempt: true,
+          expected: {
+            sender: record.senderWallet,
+            recipient: record.recipientWallet,
+            tokenIdentifier: record.tokenIdentifier,
+            amountHuman: record.amountHuman,
+            amountRaw: record.amountRaw,
+            decimals: record.decimals,
+            idempotencyKey: record.withdrawalId
+          }
+        }
+      );
+      return result.classified;
+    }
+  });
+  if (summary.checked) {
+    console.log(`[WITHDRAW] Resumed ${summary.checked} unresolved ESDT withdrawal(s).`);
+  }
+}
+
 client.on('ready', async () => {
   console.log(`Multi-Server ESDT Tipping Bot with Virtual Accounts is ready with ID: ${client.user.tag}`);
   console.log('Bot is using partials for: Message, Channel, User, GuildMember');
@@ -28611,6 +28165,23 @@ client.on('ready', async () => {
   // Start blockchain listener for automatic monitoring
   console.log('🚀 Starting blockchain listener for automatic monitoring...');
   blockchainListener.startBlockchainListener();
+
+  if (esdtWithdrawalsArePaused()) {
+    console.warn('[WITHDRAW] New ESDT withdrawals remain paused until ESDT_WITHDRAWALS_PAUSED=false.');
+  }
+  if (!esdtWithdrawalRecoveryEnabled()) {
+    console.warn('[WITHDRAW] Automated recovery remains paused until ESDT_WITHDRAWAL_RECOVERY_ENABLED=true.');
+  }
+  try {
+    await resumePendingEsdtWithdrawals(`boot-${process.pid}`);
+  } catch (resumeError) {
+    console.error('[WITHDRAW] Could not resume unresolved withdrawals:', resumeError.message);
+  }
+  setInterval(() => {
+    resumePendingEsdtWithdrawals(`interval-${process.pid}`).catch((resumeError) => {
+      console.error('[WITHDRAW] Unresolved withdrawal resume failed:', resumeError.message);
+    });
+  }, 120000);
   
   // Set up periodic cleanup of expired RPS challenges
   setInterval(async () => {

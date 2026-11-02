@@ -154,6 +154,72 @@ CREATE TABLE IF NOT EXISTS virtual_account_esdt_deposit_legs (
 CREATE INDEX IF NOT EXISTS idx_esdt_deposit_legs_guild_user
   ON virtual_account_esdt_deposit_legs (guild_id, user_id);
 
+-- Durable ESDT withdrawal reservations (one row per Discord withdrawal).
+-- Functions, grants, and the state machine live in
+-- supabase/migrations/20261101120000_esdt_withdrawal_reservations.sql.
+-- Service role only. Applying the migration does not move balances.
+CREATE TABLE IF NOT EXISTS esdt_withdrawals (
+    withdrawal_id TEXT PRIMARY KEY,
+    discord_interaction_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    token_identifier TEXT NOT NULL,
+    token_ticker TEXT NOT NULL,
+    amount_human TEXT NOT NULL,
+    amount_raw TEXT NOT NULL,
+    decimals INTEGER NOT NULL,
+    recipient_wallet TEXT NOT NULL,
+    sender_wallet TEXT NOT NULL,
+    memo TEXT,
+    status TEXT NOT NULL,
+    balance_before TEXT NOT NULL,
+    balance_after TEXT NOT NULL,
+    ledger_transaction_id TEXT NOT NULL,
+    restoration_transaction_id TEXT,
+    makex_operation_id TEXT,
+    primary_tx_hash TEXT,
+    blocking_tx_hash TEXT,
+    untrusted_tx_hash TEXT,
+    reservation_state TEXT,
+    http_status INTEGER,
+    error_code TEXT,
+    error_message TEXT,
+    fee_exempt BOOLEAN,
+    usage_fee TEXT,
+    usage_fee_hash TEXT,
+    nonce TEXT,
+    raw_result JSONB,
+    processing_owner TEXT,
+    processing_fence TEXT,
+    processing_lease_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    confirmed_at TIMESTAMPTZ,
+    failed_at TIMESTAMPTZ,
+    restored_at TIMESTAMPTZ,
+    CONSTRAINT esdt_withdrawals_status_check CHECK (
+        status IN ('RESERVED', 'PENDING', 'CONFIRMED', 'FAILED', 'NEEDS_RECONCILIATION')
+    ),
+    CONSTRAINT esdt_withdrawals_amount_raw_check CHECK (amount_raw ~ '^[0-9]+$'),
+    CONSTRAINT esdt_withdrawals_decimals_check CHECK (decimals >= 0 AND decimals <= 18)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS esdt_withdrawals_interaction_uidx
+    ON esdt_withdrawals (discord_interaction_id);
+CREATE INDEX IF NOT EXISTS esdt_withdrawals_guild_user_idx
+    ON esdt_withdrawals (guild_id, user_id);
+CREATE INDEX IF NOT EXISTS esdt_withdrawals_open_idx
+    ON esdt_withdrawals (updated_at)
+    WHERE status IN ('RESERVED', 'PENDING', 'NEEDS_RECONCILIATION');
+CREATE INDEX IF NOT EXISTS esdt_withdrawals_tx_hash_idx
+    ON esdt_withdrawals (primary_tx_hash)
+    WHERE primary_tx_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS esdt_withdrawals_operation_idx
+    ON esdt_withdrawals (makex_operation_id)
+    WHERE makex_operation_id IS NOT NULL;
+
+ALTER TABLE esdt_withdrawals ENABLE ROW LEVEL SECURITY;
+
 -- Swap transactions (AshSwap VA swap integration)
 CREATE TABLE IF NOT EXISTS swap_transactions (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

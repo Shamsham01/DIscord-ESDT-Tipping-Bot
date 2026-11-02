@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "register-commands": "node register-commands.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test": "node --test utils/esdt-withdrawal.test.js utils/esdt-transfer-contract.test.js utils/esdt-withdrawal.pg.test.js utils/nft-role-sync-schedule.test.js"
   },
   "keywords": [
     "discord",
