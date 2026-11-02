@@ -127,6 +127,21 @@ const {
 } = require('./utils/esdt-withdrawal-flow');
 const esdtWithdrawals = require('./db/esdt-withdrawals');
 const { handleWithdrawEsdt } = require('./handlers/withdraw-esdt');
+const esdtDisbursements = require('./db/esdt-disbursements');
+const {
+  esdtDisbursementRecoveryEnabled,
+  interactionDisbursementId,
+  massRefundDisbursementId,
+  poolFeeDisbursementId,
+  assetDisbursementId,
+  hashedDisbursementId,
+  buildEsdtTransferOptions,
+  legacyAttemptFlags,
+  unconfirmedLegacyTransfer,
+  executeEsdtDisbursement,
+  resumeUnresolvedEsdtDisbursements
+} = require('./utils/esdt-disbursement-flow');
+const { canonicalizeEsdtAmount, humanFromRaw, decimalStringFromInput } = require('./utils/esdt-amount');
 
 if (esdtWithdrawalsArePaused()) {
   console.warn('[WITHDRAW] New /withdraw-esdt requests are paused. Set ESDT_WITHDRAWALS_PAUSED=false only after the MakeX Transfers API hotfix is deployed and the 1 Nov 2026 incident has been reconciled.');
@@ -136,6 +151,9 @@ if (!esdtWithdrawalRecoveryEnabled()) {
 }
 if (!esdtWithdrawals.isConfigured()) {
   console.warn('[WITHDRAW] SUPABASE_SERVICE_ROLE_KEY is missing. ESDT withdrawal reservations cannot be stored.');
+}
+if (!esdtDisbursementRecoveryEnabled()) {
+  console.warn('[DISBURSE] Automated ESDT disbursement recovery is paused. Set ESDT_DISBURSEMENT_RECOVERY_ENABLED=true only after the migration is applied and open rows have been reviewed.');
 }
 
 // Validate dbFootball module is loaded correctly
@@ -917,9 +935,14 @@ async function checkLiveActivities(guildId) {
 }
 
 // Mass refund function - refunds all virtual account balances to users' wallets
-async function processMassRefund(guildId, communityFundProject, progressCallback = null) {
+async function processMassRefund(guildId, communityFundProject, progressCallback = null, options = {}) {
   try {
     await assertGuildOnChainPlanActive(guildId);
+    const interactionId = options && options.interactionId;
+    requireEsdtDisbursementStore();
+    if (!/^\d{10,32}$/.test(String(interactionId || ''))) {
+      throw new Error('A Discord interaction id is required before a mass refund. No transfer was sent.');
+    }
     console.log(`[MASS-REFUND] Starting mass refund for guild ${guildId} using project ${communityFundProject}`);
     
     // Get all virtual accounts with balances
@@ -932,6 +955,7 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
         totalAccounts: 0,
         successfulRefunds: 0,
         failedRefunds: 0,
+        unresolvedRefunds: 0,
         results: []
       };
     }
@@ -1020,10 +1044,35 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
     const results = [];
     let successfulRefunds = 0;
     let failedRefunds = 0;
+    let unresolvedRefunds = 0;
     let progressCounter = 0;
     const dbVirtualAccountsNFT = require('./db/virtual-accounts-nft');
     const projects = await getProjects(guildId);
     const project = projects[communityFundProject];
+    if (!project || !project.walletPem || !project.walletAddress) {
+      throw new Error(`Community Fund project "${communityFundProject}" is missing wallet configuration. No transfer was sent.`);
+    }
+
+    const noteRefundOutcome = (outcome, base) => {
+      if (outcome && outcome.kind === 'confirmed') {
+        successfulRefunds++;
+        results.push({
+          ...base,
+          txHash: outcome.record && outcome.record.primaryTxHash,
+          disbursementId: outcome.record && outcome.record.disbursementId,
+          success: true
+        });
+        return;
+      }
+      failedRefunds++;
+      if (!outcome || outcome.kind !== 'failed') unresolvedRefunds++;
+      results.push({
+        ...base,
+        error: disbursementPendingText(outcome || { kind: 'pending' }),
+        disbursementId: outcome && outcome.record && outcome.record.disbursementId,
+        success: false
+      });
+    };
 
     const reportProgress = async (refundDescription, currentRefund) => {
       progressCounter++;
@@ -1046,77 +1095,51 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
       await reportProgress(`${refundDescription} to ${refund.username}`, refund);
 
       try {
-        const storedDecimals = await getStoredTokenDecimals(guildId, refund.tokenTicker);
-        if (storedDecimals === null) {
-          throw new Error(`Token metadata missing for ${refund.tokenTicker}`);
-        }
-
         const tokenIdentifier = await resolveTokenIdentifier(guildId, refund.tokenTicker);
         const esdtIdentifierRegex = /^[A-Z0-9]+-[a-f0-9]{6}$/i;
         if (!esdtIdentifierRegex.test(tokenIdentifier)) {
-          throw new Error(`Invalid token identifier for refund: "${refund.tokenTicker}" -> "${tokenIdentifier}". Must be full identifier format.`);
+          throw Object.assign(new Error(`Invalid token identifier for refund: "${refund.tokenTicker}" -> "${tokenIdentifier}". Must be full identifier format.`), { beforeBroadcast: true });
         }
+        const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier)
+          ?? await getStoredTokenDecimals(guildId, refund.tokenTicker);
+        if (storedDecimals === null) {
+          throw Object.assign(new Error(`Token metadata missing for ${refund.tokenTicker}. Nothing was sent.`), { beforeBroadcast: true });
+        }
+        const amountHuman = typeof refund.amount === 'string'
+          ? refund.amount.trim()
+          : decimalStringFromInput(refund.amount);
 
-        const transferResult = await transferESDTFromCommunityFund(
-          refund.wallet,
-          tokenIdentifier,
-          refund.amount,
-          communityFundProject,
-          guildId
-        );
-
-        if (transferResult.success && transferResult.txHash) {
-          const deductResult = await virtualAccounts.deductFundsFromAccount(
+        const outcome = await executeEsdtDisbursement({
+          repo: esdtDisbursements,
+          send: sendReservedEsdtDisbursement,
+          workerId: `mass-refund-${interactionId}`,
+          input: {
+            operationKind: 'mass_refund',
+            disbursementId: massRefundDisbursementId(interactionId, refund.userId, tokenIdentifier),
+            interactionId,
             guildId,
-            refund.userId,
-            tokenIdentifier,
-            refund.amount,
-            'mass_refund',
-            `Mass refund - server deletion`
-          );
-
-          if (deductResult.success) {
-            successfulRefunds++;
-            results.push({
-              type: 'ESDT',
-              userId: refund.userId,
-              username: refund.username,
-              wallet: refund.wallet,
-              tokenTicker: refund.tokenTicker,
-              amount: refund.amount,
-              txHash: transferResult.txHash,
-              success: true
-            });
-            console.log(`[MASS-REFUND] ✅ Success: ${refund.amount} ${refund.tokenTicker} refunded to ${refund.username} (tx: ${transferResult.txHash})`);
-          } else {
-            failedRefunds++;
-            results.push({
-              type: 'ESDT',
-              userId: refund.userId,
-              username: refund.username,
-              wallet: refund.wallet,
-              tokenTicker: refund.tokenTicker,
-              amount: refund.amount,
-              error: `Failed to update virtual account: ${deductResult.error}`,
-              success: false
-            });
-            console.error(`[MASS-REFUND] ❌ Failed: Could not update virtual account for ${refund.username}`);
-          }
-        } else {
-          failedRefunds++;
-          results.push({
-            type: 'ESDT',
             userId: refund.userId,
-            username: refund.username,
-            wallet: refund.wallet,
+            tokenIdentifier,
             tokenTicker: refund.tokenTicker,
-            amount: refund.amount,
-            error: transferResult.pendingConfirmation
-              ? `Pending verification — do not retry until reconciled. ${transferResult.errorMessage || ''}`.trim()
-              : (transferResult.errorMessage || 'Transaction failed'),
-            success: false
-          });
-          console.error(`[MASS-REFUND] ❌ Failed: Transaction failed for ${refund.username} - ${transferResult.errorMessage || 'Unknown error'}`);
+            amountHuman,
+            decimals: storedDecimals,
+            recipientWallet: refund.wallet,
+            senderWallet: project.walletAddress,
+            memo: 'Mass refund - server deletion'
+          }
+        });
+        noteRefundOutcome(outcome, {
+          type: 'ESDT',
+          userId: refund.userId,
+          username: refund.username,
+          wallet: refund.wallet,
+          tokenTicker: refund.tokenTicker,
+          amount: amountHuman
+        });
+        if (outcome.kind === 'confirmed') {
+          console.log(`[MASS-REFUND] ✅ Confirmed: ${amountHuman} ${refund.tokenTicker} to ${refund.username} (${outcome.record.disbursementId})`);
+        } else {
+          console.error(`[MASS-REFUND] ${outcome.kind}: ${refund.username} ${refund.tokenTicker}`);
         }
       } catch (error) {
         failedRefunds++;
@@ -1130,6 +1153,7 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
           error: error.message,
           success: false
         });
+        if (!(error && error.beforeBroadcast === true)) unresolvedRefunds++;
         console.error(`[MASS-REFUND] ❌ Error processing ESDT refund for ${refund.username}:`, error.message);
       }
 
@@ -1144,80 +1168,39 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
       await reportProgress(`${refundDescription} to ${refund.username}`, refund);
 
       const fullTokenIdentifier = buildNftFullTokenIdentifier(refund);
-      const transferResult = await transferNFTFromCommunityFund(
-        refund.wallet,
-        fullTokenIdentifier,
-        communityFundProject,
+      const outcome = await executeLegacyNftDisbursement({
+        interactionId,
         guildId,
-        refund.amount,
-        refund.tokenType
-      );
-
-      if (transferResult.success && transferResult.txHash) {
-        try {
-          await dbVirtualAccountsNFT.removeNFTFromAccount(
-            guildId,
-            refund.userId,
-            refund.collection,
-            refund.nonce,
-            refund.amount
-          );
-
-          successfulRefunds++;
-          results.push({
-            type: 'NFT',
-            userId: refund.userId,
-            username: refund.username,
-            wallet: refund.wallet,
-            collection: refund.collection,
-            identifier: refund.identifier,
-            nonce: refund.nonce,
-            amount: refund.amount,
-            tokenType: refund.tokenType,
-            nftName: refund.nftName,
-            txHash: transferResult.txHash,
-            success: true
-          });
-          console.log(`[MASS-REFUND] ✅ Success: ${refundDescription} refunded to ${refund.username} (tx: ${transferResult.txHash})`);
-        } catch (removeError) {
-          failedRefunds++;
-          results.push({
-            type: 'NFT',
-            userId: refund.userId,
-            username: refund.username,
-            wallet: refund.wallet,
-            collection: refund.collection,
-            identifier: refund.identifier,
-            nonce: refund.nonce,
-            amount: refund.amount,
-            tokenType: refund.tokenType,
-            error: `Failed to update virtual account: ${removeError.message}`,
-            success: false
-          });
-          console.error(`[MASS-REFUND] ❌ Failed: Could not update virtual account for ${refund.username}: ${removeError.message}`);
-        }
-      } else {
-        failedRefunds++;
-        results.push({
-          type: 'NFT',
-          userId: refund.userId,
-          username: refund.username,
-          wallet: refund.wallet,
-          collection: refund.collection,
-          identifier: refund.identifier,
-          nonce: refund.nonce,
-          amount: refund.amount,
-          tokenType: refund.tokenType,
-          error: transferResult.errorMessage || 'Transaction failed',
-          success: false
-        });
-        console.error(`[MASS-REFUND] ❌ Failed: Transaction failed for ${refund.username} - ${transferResult.errorMessage || 'Unknown error'}`);
-      }
+        userId: refund.userId,
+        assetKey: fullTokenIdentifier,
+        amount: refund.amount || 1,
+        recipientWallet: refund.wallet,
+        senderWallet: project.walletAddress,
+        memo: 'Mass refund NFT',
+        workerId: `mass-refund-${interactionId}`,
+        sendLegacy: () => transferNFTFromCommunityFund(
+          refund.wallet,
+          fullTokenIdentifier,
+          communityFundProject,
+          guildId,
+          refund.amount,
+          refund.tokenType
+        )
+      });
+      noteRefundOutcome(outcome, {
+        type: 'NFT',
+        userId: refund.userId,
+        username: refund.username,
+        wallet: refund.wallet,
+        collection: refund.collection,
+        identifier: refund.identifier,
+        nonce: refund.nonce,
+        amount: refund.amount,
+        tokenType: refund.tokenType,
+        nftName: refund.nftName
+      });
+      console.log(`[MASS-REFUND] NFT ${refundDescription} for ${refund.username} is ${outcome.kind}. The NFT was not removed from the virtual account.`);
     };
-
-    if (!project || !project.walletPem) {
-      throw new Error(`Community Fund project "${communityFundProject}" is missing wallet configuration`);
-    }
 
     for (const [, userRefundData] of nftBulkRefundsByUser) {
       const { userId, username, wallet, nfts } = userRefundData;
@@ -1229,83 +1212,42 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
 
         try {
           const tokenIdentifiers = batch.map(buildNftFullTokenIdentifier);
-          const transferResult = await transferMultipleNFTs(
-            wallet,
-            tokenIdentifiers,
-            project.walletPem,
-            API_BASE_URL,
-            API_TOKEN,
-            project.walletAddress,
-            guildId
-          );
-
-          if (transferResult.success && transferResult.txHash) {
-            for (const refund of batch) {
-              const itemDescription = `${refund.nftName || refund.identifier || refund.collection} to ${username}`;
-              try {
-                await dbVirtualAccountsNFT.removeNFTFromAccount(
-                  guildId,
-                  refund.userId,
-                  refund.collection,
-                  refund.nonce,
-                  1
-                );
-                successfulRefunds++;
-                results.push({
-                  type: 'NFT',
-                  userId: refund.userId,
-                  username: refund.username,
-                  wallet: refund.wallet,
-                  collection: refund.collection,
-                  identifier: refund.identifier,
-                  nonce: refund.nonce,
-                  amount: 1,
-                  tokenType: refund.tokenType,
-                  nftName: refund.nftName,
-                  txHash: transferResult.txHash,
-                  success: true
-                });
-                await reportProgress(itemDescription, refund);
-              } catch (removeError) {
-                failedRefunds++;
-                results.push({
-                  type: 'NFT',
-                  userId: refund.userId,
-                  username: refund.username,
-                  wallet: refund.wallet,
-                  collection: refund.collection,
-                  identifier: refund.identifier,
-                  nonce: refund.nonce,
-                  amount: 1,
-                  tokenType: refund.tokenType,
-                  error: `Failed to update virtual account: ${removeError.message}`,
-                  success: false
-                });
-                await reportProgress(`${itemDescription} (failed)`, refund);
-                console.error(`[MASS-REFUND] ❌ Failed: Could not update virtual account for ${refund.username}: ${removeError.message}`);
-              }
-            }
-            console.log(`[MASS-REFUND] ✅ Success: Bulk NFT refund of ${batch.length} item(s) to ${username} (tx: ${transferResult.txHash})`);
-          } else {
-            for (const refund of batch) {
-              failedRefunds++;
-              results.push({
-                type: 'NFT',
-                userId: refund.userId,
-                username: refund.username,
-                wallet: refund.wallet,
-                collection: refund.collection,
-                identifier: refund.identifier,
-                nonce: refund.nonce,
-                amount: 1,
-                tokenType: refund.tokenType,
-                error: transferResult.errorMessage || 'Bulk transaction failed',
-                success: false
-              });
-              await reportProgress(`${refund.nftName || refund.identifier || refund.collection} to ${username} (failed)`, refund);
-            }
-            console.error(`[MASS-REFUND] ❌ Failed: Bulk NFT transaction failed for ${username} - ${transferResult.errorMessage || 'Unknown error'}`);
+          const outcome = await executeLegacyNftDisbursement({
+            interactionId,
+            guildId,
+            userId,
+            assetKey: `bulk:${tokenIdentifiers.join(',')}`,
+            amount: batch.length,
+            recipientWallet: wallet,
+            senderWallet: project.walletAddress,
+            memo: 'Mass refund bulk NFT',
+            workerId: `mass-refund-${interactionId}`,
+            sendLegacy: () => transferMultipleNFTs(
+              wallet,
+              tokenIdentifiers,
+              project.walletPem,
+              API_BASE_URL,
+              API_TOKEN,
+              project.walletAddress,
+              guildId
+            )
+          });
+          for (const refund of batch) {
+            noteRefundOutcome(outcome, {
+              type: 'NFT',
+              userId: refund.userId,
+              username: refund.username,
+              wallet: refund.wallet,
+              collection: refund.collection,
+              identifier: refund.identifier,
+              nonce: refund.nonce,
+              amount: 1,
+              tokenType: refund.tokenType,
+              nftName: refund.nftName
+            });
+            await reportProgress(`${refund.nftName || refund.identifier || refund.collection} to ${username}`, refund);
           }
+          console.log(`[MASS-REFUND] Bulk NFT refund for ${username} is ${outcome.kind}. NFTs were not removed from the virtual account.`);
         } catch (error) {
           for (const refund of batch) {
             failedRefunds++;
@@ -1324,6 +1266,7 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
             });
             await reportProgress(`${refund.nftName || refund.identifier || refund.collection} to ${username} (failed)`, refund);
           }
+          if (!(error && error.beforeBroadcast === true)) unresolvedRefunds++;
           console.error(`[MASS-REFUND] ❌ Error processing bulk NFT refund for ${username}:`, error.message);
         }
 
@@ -1352,6 +1295,7 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
           error: error.message,
           success: false
         });
+        if (!(error && error.beforeBroadcast === true)) unresolvedRefunds++;
         console.error(`[MASS-REFUND] ❌ Error processing SFT refund for ${refund.username}:`, error.message);
       }
 
@@ -1369,6 +1313,7 @@ async function processMassRefund(guildId, communityFundProject, progressCallback
       totalTransactions: txCounts.totalTransactions,
       successfulRefunds: successfulRefunds,
       failedRefunds: failedRefunds,
+      unresolvedRefunds: unresolvedRefunds,
       results: results
     };
   } catch (error) {
@@ -2551,6 +2496,135 @@ function noteEsdtTransferError(error, requestStarted) {
   return error;
 }
 
+function stampLegacyTransfer(target, details) {
+  if (!target || typeof target !== 'object') return target;
+  if (target.beforeBroadcast != null || target.broadcastAttempted != null) return target;
+  return Object.assign(target, legacyAttemptFlags(details));
+}
+
+function requireEsdtDisbursementStore() {
+  if (!esdtDisbursements.isConfigured()) {
+    const error = new Error('SUPABASE_SERVICE_ROLE_KEY is required before a MakeX payment. The transfer was not sent.');
+    error.code = 'DISBURSEMENT_STORE_UNAVAILABLE';
+    error.beforeBroadcast = true;
+    throw error;
+  }
+}
+
+async function sendReservedEsdtDisbursement(record) {
+  const options = buildEsdtTransferOptions(record);
+  if (record.operationKind === 'admin_send') {
+    const projectName = record.effectPayload && record.effectPayload.projectName;
+    if (!projectName) {
+      const error = new Error('Admin send is missing its project name. The transfer was not sent.');
+      error.beforeBroadcast = true;
+      error.code = 'PROJECT_REQUIRED';
+      throw error;
+    }
+    const result = await transferESDT(
+      record.recipientWallet,
+      record.tokenIdentifier,
+      record.amountHuman,
+      projectName,
+      record.guildId,
+      options
+    );
+    if (result && result.classified) return result.classified;
+    const error = new Error((result && result.errorMessage) || 'MakeX did not return a classified ESDT result');
+    error.beforeBroadcast = true;
+    throw error;
+  }
+  const result = await transferESDTFromCommunityFund(
+    record.recipientWallet,
+    record.tokenIdentifier,
+    record.amountHuman,
+    getCommunityFundProjectName(),
+    record.guildId,
+    options
+  );
+  if (result && result.classified) return result.classified;
+  const error = new Error((result && result.errorMessage) || 'MakeX did not return a classified ESDT result');
+  error.beforeBroadcast = true;
+  throw error;
+}
+
+function disbursementPendingText(outcome) {
+  const id = outcome && outcome.record && outcome.record.disbursementId;
+  const detail = (outcome && outcome.record && outcome.record.errorMessage) || '';
+  if (outcome && outcome.kind === 'failed') {
+    return `The payment was not sent. ${detail}`.trim();
+  }
+  if (outcome && outcome.kind === 'insufficient') {
+    return 'Insufficient virtual balance. Nothing was sent.';
+  }
+  if (outcome && outcome.kind === 'blocked') {
+    return 'Another payment of this kind is still unresolved. Do not start a new one until it is reconciled.';
+  }
+  if (outcome && outcome.kind === 'conflict') {
+    return 'This payment does not match the stored operation. Nothing new was sent.';
+  }
+  return `Payment${id ? ` ${id}` : ''} is pending verification and was not confirmed. The balance stays reserved. Do not retry until an admin reconciles it. ${detail}`.trim();
+}
+
+async function applyConfirmedDisbursementEffect(record) {
+  if (!record || record.effectRequired !== true || record.status !== 'CONFIRMED' || record.effectAppliedAt) {
+    return record;
+  }
+  if (record.operationKind === 'subscription') {
+    const payload = record.effectPayload || {};
+    await dbOnChainSubscriptions.upsertSubscription({
+      guildId: record.guildId,
+      subscribedByDiscordId: record.userId,
+      planMonths: payload.planMonths,
+      amountUsdc: payload.amountUsdc,
+      subscriptionStart: payload.subscriptionStart,
+      subscriptionEnd: payload.subscriptionEnd,
+      lastPaymentTxHash: record.primaryTxHash || null
+    });
+  }
+  const noted = await esdtDisbursements.noteEffect(record.disbursementId);
+  return noted.record || record;
+}
+
+async function executeLegacyNftDisbursement({
+  interactionId,
+  stableKey,
+  guildId,
+  userId,
+  assetKey,
+  amount,
+  recipientWallet,
+  senderWallet,
+  memo,
+  workerId,
+  sendLegacy
+}) {
+  requireEsdtDisbursementStore();
+  const disbursementId = interactionId
+    ? assetDisbursementId('nr', interactionId, userId, assetKey)
+    : hashedDisbursementId('auc', stableKey || `${guildId}|${userId}|${assetKey}`);
+  return executeEsdtDisbursement({
+    repo: esdtDisbursements,
+    workerId: workerId || `nft-${process.pid}`,
+    input: {
+      operationKind: 'nft_transfer',
+      disbursementId,
+      businessActionId: disbursementId,
+      interactionId: interactionId || null,
+      guildId,
+      userId,
+      tokenIdentifier: assetKey,
+      tokenTicker: String(assetKey || 'NFT').split('-')[0] || 'NFT',
+      amountHuman: String(amount),
+      decimals: 0,
+      recipientWallet,
+      senderWallet,
+      memo: memo || null
+    },
+    send: async () => unconfirmedLegacyTransfer(await sendLegacy())
+  });
+}
+
 async function restoreVirtualAccountBalance(guildId, userId, tokenIdentifier, amount, balanceAfterDeduction, reason) {
   const dbVirtualAccounts = require('./db/virtual-accounts');
   const amountStr = typeof amount === 'object' && amount?.toString ? amount.toString() : String(amount);
@@ -2611,6 +2685,7 @@ async function restoreEsdetWithdrawalBalance(guildId, userId, tokenIdentifier, w
 
 // Transfer NFT using project wallet
 async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, guildId, options = {}) {
+  let requestStarted = false;
   try {
     if (!options.skipSubscriptionCheck) {
       await assertGuildOnChainPlanActive(guildId);
@@ -2664,6 +2739,7 @@ async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, gu
     const timeoutId = setTimeout(() => controller.abort(), 60000);
     
     try {
+      requestStarted = true;
       const response = await fetch(fullEndpoint, {
         method: 'POST',
         headers: {
@@ -2736,13 +2812,13 @@ async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, gu
       // Only treat as success if status is 'success', HTTP is OK, and txHash exists
       const isApiSuccess = response.ok && txStatus === 'success' && !!txHash;
       
-      const result = {
+      const result = stampLegacyTransfer({
         success: isApiSuccess,
         txHash: txHash,
         errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status
-      };
+      }, { httpStatus: response.status, txHash, requestStarted: true });
       
       if (result.success) {
         console.log(`Successfully sent NFT ${fullTokenIdentifier} to: ${recipientWallet} using project: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
@@ -2759,18 +2835,19 @@ async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, gu
       
       if (fetchError.name === 'AbortError') {
         console.error('NFT transfer API request timed out after 60 seconds');
-        throw new Error('API request timed out after 60 seconds');
+        throw stampLegacyTransfer(new Error('API request timed out after 60 seconds'), { requestStarted: true });
       }
-      throw fetchError;
+      throw stampLegacyTransfer(fetchError, { requestStarted });
     }
   } catch (error) {
     console.error(`Error transferring NFT:`, error.message);
-    throw error;
+    throw stampLegacyTransfer(error, { requestStarted });
   }
 }
 
 // Transfer SFT from Community Fund to user wallet
 async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenNonce, amount, projectName, guildId, options = {}) {
+  let requestStarted = false;
   try {
     if (!options.skipSubscriptionCheck) {
       await assertGuildOnChainPlanActive(guildId);
@@ -2845,6 +2922,7 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
     const timeoutId = setTimeout(() => controller.abort(), 60000);
     
     try {
+      requestStarted = true;
       const response = await fetch(fullEndpoint, {
         method: 'POST',
         headers: {
@@ -2922,13 +3000,13 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
       // Consider successful if: HTTP OK + has txHash + (status success OR no error)
       const isApiSuccess = isHttpOk && hasTxHash && (isStatusSuccess || hasNoError);
       
-      const result = {
+      const result = stampLegacyTransfer({
         success: isApiSuccess,
         txHash: txHash,
         errorMessage: errorMessage || (txStatusString && !isStatusSuccess && hasNoError ? `Transaction status: ${txStatusString}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status
-      };
+      }, { httpStatus: response.status, txHash, requestStarted: true });
       
       if (result.success) {
         console.log(`[WITHDRAW-SFT] Successfully sent SFT ${tokenTicker}#${tokenNonce} (amount: ${amountStr}) to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
@@ -2945,19 +3023,20 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
       
       if (fetchError.name === 'AbortError') {
         console.error('[WITHDRAW-SFT] SFT transfer API request timed out after 60 seconds');
-        throw new Error('API request timed out after 60 seconds');
+        throw stampLegacyTransfer(new Error('API request timed out after 60 seconds'), { requestStarted: true });
       }
-      throw fetchError;
+      throw stampLegacyTransfer(fetchError, { requestStarted });
     }
   } catch (error) {
     console.error(`[WITHDRAW-SFT] Error transferring SFT:`, error.message);
-    throw error;
+    throw stampLegacyTransfer(error, { requestStarted });
   }
 }
 
 // Transfer NFT from Community Fund to user wallet
 // Auto-detects SFT vs NFT based on token_type from database (bulletproof detection)
 async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier, projectName, guildId, amount = 1, tokenType = null, options = {}) {
+  let requestStarted = false;
   try {
     if (!options.skipSubscriptionCheck) {
       await assertGuildOnChainPlanActive(guildId);
@@ -3092,6 +3171,7 @@ async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier
     const timeoutId = setTimeout(() => controller.abort(), 90000);
     
     try {
+      requestStarted = true;
       const response = await fetch(fullEndpoint, {
         method: 'POST',
         headers: {
@@ -3178,13 +3258,13 @@ async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier
         isApiSuccess = isHttpOk && hasTxHash && hasNoError;
       }
       
-      const result = {
+      const result = stampLegacyTransfer({
         success: isApiSuccess,
         txHash: txHash,
         errorMessage: errorMessage || (txStatusString && !isStatusSuccess ? `Transaction status: ${txStatusString}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status
-      };
+      }, { httpStatus: response.status, txHash, requestStarted: true });
       
       if (result.success) {
         console.log(`[WITHDRAW-NFT] Successfully sent NFT ${fullTokenIdentifier} to: ${recipientWallet} using Community Fund: ${projectName}${txHash ? ` (txHash: ${txHash})` : ''}`);
@@ -3201,13 +3281,13 @@ async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier
       
       if (fetchError.name === 'AbortError') {
         console.error('[WITHDRAW-NFT] NFT transfer API request timed out after 90 seconds');
-        throw new Error('API request timed out after 90 seconds');
+        throw stampLegacyTransfer(new Error('API request timed out after 90 seconds'), { requestStarted: true });
       }
-      throw fetchError;
+      throw stampLegacyTransfer(fetchError, { requestStarted });
     }
   } catch (error) {
     console.error(`[WITHDRAW-NFT] Error transferring NFT:`, error.message);
-    throw error;
+    throw stampLegacyTransfer(error, { requestStarted });
   }
 }
 
@@ -3990,7 +4070,50 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      const transferResult = await transferESDT(recipientWallet, tokenIdentifier, amount, projectName, guildId);
+      const storedDecimals = await getStoredTokenDecimals(guildId, tokenIdentifier);
+      if (storedDecimals === null) {
+        await interaction.editReply({
+          content: `❌ Token metadata missing for ${tokenTicker}. Nothing was sent.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+      let amountHuman;
+      try {
+        amountHuman = canonicalizeEsdtAmount(decimalStringFromInput(amount), storedDecimals).human;
+      } catch (amountError) {
+        await interaction.editReply({
+          content: `❌ ${amountError.message} Nothing was sent.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      const outcome = await executeEsdtDisbursement({
+        repo: esdtDisbursements,
+        send: sendReservedEsdtDisbursement,
+        workerId: `send-${interaction.id}`,
+        input: {
+          operationKind: 'admin_send',
+          disbursementId: interactionDisbursementId('send', interaction.id),
+          interactionId: interaction.id,
+          guildId,
+          userId: targetUserId,
+          tokenIdentifier,
+          tokenTicker,
+          amountHuman,
+          decimals: storedDecimals,
+          recipientWallet,
+          senderWallet: projects[projectName].walletAddress,
+          memo,
+          effectPayload: { projectName }
+        }
+      });
+      const transferResult = {
+        success: outcome.kind === 'confirmed',
+        txHash: outcome.record && outcome.record.primaryTxHash,
+        errorMessage: disbursementPendingText(outcome)
+      };
       
       if (transferResult.success) {
         // Fetch token USD price
@@ -4304,12 +4427,23 @@ client.on('interactionCreate', async (interaction) => {
       console.log(`Transfer memo: ${memo}`);
       console.log(`Full token identifier: ${fullTokenIdentifier}`);
       
-      const transferResult = await transferNFT(
-        recipientWallet, 
-        fullTokenIdentifier, // Full identifier includes nonce
-        projectName, 
-        guildId
-      );
+      const nftOutcome = await executeLegacyNftDisbursement({
+        interactionId: interaction.id,
+        guildId,
+        userId: interaction.user.id,
+        assetKey: fullTokenIdentifier,
+        amount: 1,
+        recipientWallet,
+        senderWallet: walletAddress,
+        memo,
+        workerId: `send-nft-${interaction.id}`,
+        sendLegacy: () => transferNFT(recipientWallet, fullTokenIdentifier, projectName, guildId)
+      });
+      const transferResult = {
+        success: nftOutcome.kind === 'confirmed',
+        txHash: nftOutcome.record && nftOutcome.record.primaryTxHash,
+        errorMessage: disbursementPendingText(nftOutcome)
+      };
       
       if (transferResult.success) {
         const explorerUrl = transferResult.txHash
@@ -6138,7 +6272,15 @@ client.on('interactionCreate', async (interaction) => {
                 // Ignore update errors during processing
               }
             }
-          });
+          }, { interactionId: interaction.id });
+
+          if ((refundResult.unresolvedRefunds || 0) > 0) {
+            await interaction.editReply({
+              content: `❌ **Mass Refund is not confirmed.**\n\n**${refundResult.unresolvedRefunds}** payment(s) are pending verification. Reserved balances can already be zero, so deletion is cancelled.\n\nDo not retry until those disbursements are reconciled.`,
+              flags: [MessageFlags.Ephemeral]
+            });
+            return;
+          }
 
           // Verify all balances are zero (ESDT + NFT/SFT)
           const remainingAccounts = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
@@ -6379,7 +6521,15 @@ client.on('interactionCreate', async (interaction) => {
               // Ignore update errors during processing
             }
           }
-        });
+        }, { interactionId: interaction.id });
+
+        if ((refundResult.unresolvedRefunds || 0) > 0) {
+          await interaction.editReply({
+            content: `❌ **Mass Refund is not confirmed.**\n\n**${refundResult.unresolvedRefunds}** payment(s) are pending verification. Reserved balances can already be zero, so deletion is cancelled.\n\nDo not retry until those disbursements are reconciled.`,
+            flags: [MessageFlags.Ephemeral]
+          });
+          return;
+        }
 
         // Verify all balances are zero (ESDT + NFT/SFT)
         const remainingAccounts = await virtualAccounts.getAllVirtualAccountsWithBalances(guildId);
@@ -8541,39 +8691,28 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // Handle MAX amount option
-      let amountToWithdraw;
-      if (typeof amount === 'string' && amount.toUpperCase() === 'MAX') {
-        // Calculate maximum withdrawable amount (full balance)
-        const maxAmount = houseBalance.dividedBy(new BigNumber(10).pow(storedDecimals));
-        amountToWithdraw = parseFloat(maxAmount.toString());
-      } else if (typeof amount === 'number') {
-        amountToWithdraw = amount;
-      } else if (typeof amount === 'string') {
-        // Try to parse as number
-        const parsedAmount = parseFloat(amount);
-        if (isNaN(parsedAmount) || parsedAmount <= 0) {
-          await interaction.editReply({ content: '❌ Invalid amount. Please enter a positive number or "MAX".', flags: [MessageFlags.Ephemeral] });
-          return;
-        }
-        amountToWithdraw = parsedAmount;
-      } else {
-        await interaction.editReply({ content: '❌ Invalid amount. Please enter a number or "MAX".', flags: [MessageFlags.Ephemeral] });
-        return;
-      }
-      
-      if (amountToWithdraw <= 0) {
-        await interaction.editReply({ content: '❌ Amount must be greater than 0.', flags: [MessageFlags.Ephemeral] });
+      if (!['betting', 'auction', 'lottery', 'drop'].includes(source)) {
+        await interaction.editReply({ content: '❌ Unknown house source. Nothing was sent.', flags: [MessageFlags.Ephemeral] });
         return;
       }
 
-      const amountWei = toBlockchainAmount(amountToWithdraw, storedDecimals);
-      
-      // Check if house has enough balance
-      if (houseBalance.isLessThan(amountWei)) {
+      let amountHuman;
+      try {
+        if (typeof amount === 'string' && amount.toUpperCase() === 'MAX') {
+          amountHuman = humanFromRaw(houseBalance.toFixed(0), storedDecimals).human;
+        } else {
+          amountHuman = canonicalizeEsdtAmount(decimalStringFromInput(amount), storedDecimals).human;
+        }
+      } catch (amountError) {
+        await interaction.editReply({ content: `❌ Invalid amount. Enter a positive decimal or "MAX". ${amountError.message}`, flags: [MessageFlags.Ephemeral] });
+        return;
+      }
+      const amountRaw = canonicalizeEsdtAmount(amountHuman, storedDecimals).raw;
+
+      if (houseBalance.isLessThan(amountRaw)) {
         const currentBalance = houseBalance.dividedBy(new BigNumber(10).pow(storedDecimals)).toString();
         await interaction.editReply({ 
-          content: `❌ **Insufficient house balance!**\n\nCurrent house balance: **${currentBalance}** ${tokenTicker}\nRequired: **${amountToWithdraw}** ${tokenTicker}`, 
+          content: `❌ **Insufficient house balance!**\n\nCurrent house balance: **${currentBalance}** ${tokenTicker}\nRequired: **${amountHuman}** ${tokenTicker}`, 
           flags: [MessageFlags.Ephemeral] 
         });
         return;
@@ -8581,21 +8720,44 @@ client.on('interactionCreate', async (interaction) => {
 
       await interaction.editReply({ content: '💸 Processing withdrawal from Community Fund to project wallet...', flags: [MessageFlags.Ephemeral] });
 
-      // Transfer on-chain from Community Fund wallet to destination project wallet
-      const transferResult = await transferESDTFromCommunityFund(
-        destinationProject.walletAddress,
-        tokenTicker,
-        amountToWithdraw,
-        communityFundProjectName,
-        guildId
-      );
+      const outcome = await executeEsdtDisbursement({
+        repo: esdtDisbursements,
+        send: sendReservedEsdtDisbursement,
+        workerId: `house-${interaction.id}`,
+        input: {
+          operationKind: 'house_withdraw',
+          disbursementId: interactionDisbursementId('hw', interaction.id),
+          interactionId: interaction.id,
+          guildId,
+          userId: interaction.user.id,
+          tokenIdentifier,
+          tokenTicker,
+          amountHuman,
+          decimals: storedDecimals,
+          recipientWallet: destinationProject.walletAddress,
+          senderWallet: communityFundProject.walletAddress,
+          memo,
+          effectPayload: { source, projectName }
+        }
+      });
+      let settled = outcome.record;
+      if (outcome.kind === 'confirmed') {
+        settled = await applyConfirmedDisbursementEffect(outcome.record);
+      }
+      const amountToWithdraw = amountHuman;
+      const transferResult = {
+        success: outcome.kind === 'confirmed' && settled && settled.effectAppliedAt,
+        txHash: settled && settled.primaryTxHash,
+        pendingConfirmation: outcome.kind === 'pending'
+          || outcome.kind === 'needs_reconciliation'
+          || outcome.kind === 'blocked'
+          || (outcome.kind === 'confirmed' && !(settled && settled.effectAppliedAt)),
+        errorMessage: outcome.kind === 'confirmed'
+          ? 'The transfer is confirmed. House spending is still being recorded. Do not send it again.'
+          : disbursementPendingText(outcome)
+      };
 
       if (transferResult.success) {
-        // Resolve token identifier from ticker/identifier
-        const tokenIdentifier = await resolveTokenIdentifier(guildId, tokenTicker);
-        
-        // Track house spending with source - using identifier
-        await trackHouseSpending(guildId, amountWei, tokenIdentifier, memo, source);
 
         const successEmbed = new EmbedBuilder()
           .setTitle('💰 House Withdrawal Completed')
@@ -10467,14 +10629,30 @@ client.on('interactionCreate', async (interaction) => {
       console.log(`[WITHDRAW-NFT] Full token identifier: ${fullTokenIdentifier}`);
       
       // Transfer NFT/SFT from Community Fund to user wallet (use token_type from database)
-      const transferResult = await transferNFTFromCommunityFund(
-        userWallet,
-        fullTokenIdentifier, // Full identifier includes nonce
-        communityFundProjectName,
+      const nftOutcome = await executeLegacyNftDisbursement({
+        interactionId: interaction.id,
         guildId,
+        userId,
+        assetKey: fullTokenIdentifier,
         amount,
-        tokenType
-      );
+        recipientWallet: userWallet,
+        senderWallet: communityFundProject.walletAddress,
+        memo: 'NFT withdrawal',
+        workerId: `withdraw-nft-${interaction.id}`,
+        sendLegacy: () => transferNFTFromCommunityFund(
+          userWallet,
+          fullTokenIdentifier,
+          communityFundProjectName,
+          guildId,
+          amount,
+          tokenType
+        )
+      });
+      const transferResult = {
+        success: nftOutcome.kind === 'confirmed',
+        txHash: nftOutcome.record && nftOutcome.record.primaryTxHash,
+        errorMessage: disbursementPendingText(nftOutcome)
+      };
       
       if (transferResult.success) {
         // Remove NFT/SFT from virtual account (handles partial removal)
@@ -10574,7 +10752,7 @@ client.on('interactionCreate', async (interaction) => {
         console.log(`[WITHDRAW-NFT] Successfully withdrew ${tokenType} ${nftDisplayName}${amountText} (${collection}#${nft.nonce}) for user ${interaction.user.tag} (${userId})`);
       } else {
         await interaction.editReply({ 
-          content: `❌ **Withdrawal failed!**\n\n**Error:** ${transferResult.errorMessage || 'Unknown error'}\n\nPlease try again or contact an administrator if the issue persists.`, 
+          content: `❌ **Withdrawal was not confirmed.**\n\n${transferResult.errorMessage || 'Unknown error'}\n\nThe NFT was not removed from the virtual account.`, 
           flags: [MessageFlags.Ephemeral] 
         });
         console.error(`[WITHDRAW-NFT] Failed to withdraw ${tokenType} for user ${interaction.user.tag} (${userId}): ${transferResult.errorMessage}`);
@@ -12835,7 +13013,6 @@ client.on('interactionCreate', async (interaction) => {
       
       // Parse amount - handle "MAX" option
       let transferAmount;
-      const BigNumber = require('bignumber.js');
       const auctionReservations = require('./db/auction-reservations');
       
       // Get source balance and check auction reservations
@@ -12858,15 +13035,15 @@ client.on('interactionCreate', async (interaction) => {
         
         transferAmount = availableBalanceBN.toString();
       } else {
-        const parsedAmount = parseFloat(amountStr);
-        if (isNaN(parsedAmount) || parsedAmount <= 0) {
+        try {
+          transferAmount = decimalStringFromInput(amountStr);
+        } catch (amountError) {
           await interaction.editReply({
-            content: '❌ **Invalid amount!**\n\nAmount must be a positive number or "MAX" for full balance.',
+            content: `❌ **Invalid amount!**\n\n${amountError.message}\n\nAmount must be a positive decimal or "MAX" for full balance.`,
             flags: [MessageFlags.Ephemeral]
           });
           return;
         }
-        transferAmount = parsedAmount.toString();
       }
       
       const totalBalanceBN = new BigNumber(totalBalance || '0');
@@ -12936,125 +13113,85 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       
-      // Perform transfer
-      let sourceDeductResult;
-      try {
-        // Step 1: Deduct from source user's VA
-        sourceDeductResult = await virtualAccounts.deductFundsFromAccount(
-          sourceGuildId,
-          userId,
-          tokenIdentifier,
-          transferAmount,
-          `Cross-guild transfer to ${await getGuildName(destinationGuildId)}`,
-          'cross_guild_transfer'
-        );
-        
-        if (!sourceDeductResult.success) {
-          await interaction.editReply({
-            content: `❌ **Failed to deduct balance!**\n\n${sourceDeductResult.error}`,
-            flags: [MessageFlags.Ephemeral]
-          });
-          return;
-        }
-        
-        // Step 2: Make on-chain transaction from source Community Fund to destination Community Fund
+      const storedDecimals = await getStoredTokenDecimals(sourceGuildId, tokenIdentifier);
+      if (storedDecimals === null) {
         await interaction.editReply({
-          content: `🔄 **Processing transfer...**\n\nTransferring **${transferAmount}** ${tokenIdentifier.split('-')[0]} from source Community Fund to destination Community Fund...\n\n⏳ Blockchain transaction in progress...`,
-          flags: [MessageFlags.Ephemeral]
-        });
-        
-        const sourceCommunityFundProjectName = getCommunityFundProjectName();
-        const transferResult = await transferESDTFromCommunityFund(
-          destinationWalletAddress,
-          tokenIdentifier,
-          transferAmount,
-          sourceCommunityFundProjectName,
-          sourceGuildId
-        );
-        
-        if (!transferResult.success || !transferResult.txHash) {
-          if (!transferResult.authoritativeNonPayment) {
-            await interaction.editReply({
-              content: `⏳ **Transfer pending verification.**\n\n${transferResult.errorMessage || 'MakeX did not confirm this transfer.'}\n\nYour virtual balance stays reserved. Do not retry until an admin reconciles it.`,
-              flags: [MessageFlags.Ephemeral]
-            });
-            return;
-          }
-          const { restored } = await tryRestoreVirtualAccountBalance(
-            sourceGuildId,
-            userId,
-            tokenIdentifier,
-            transferAmount,
-            sourceDeductResult.newBalance,
-            'cross-guild transfer failed'
-          );
-          
-          await interaction.editReply({
-            content: `❌ **Transfer failed!**\n\n${transferResult.errorMessage || transferResult.error || 'Blockchain transaction failed'}\n\n${restored ? '✅ Your balance has been restored.' : '⚠️ Balance restoration failed. Please contact an admin immediately.'}`,
-            flags: [MessageFlags.Ephemeral]
-          });
-          return;
-        }
-        
-        // Step 3: Add to destination user's VA after successful transaction
-        const addResult = await virtualAccounts.addFundsToAccount(
-          destinationGuildId,
-          userId,
-          tokenIdentifier,
-          transferAmount,
-          transferResult.txHash,
-          'cross_guild_transfer',
-          interaction.user.tag
-        );
-        
-        if (!addResult.success) {
-          console.error('[TRANSFER-CROSS-GUILD-ESDT] Failed to add funds to destination VA:', addResult.error);
-          // Transaction succeeded but VA update failed - this is a critical error
-          // The tokens are now in destination Community Fund, but user's VA wasn't updated
-          // We should log this and notify admin
-          await interaction.editReply({
-            content: `⚠️ **Transfer completed on-chain but VA update failed!**\n\nTransaction hash: \`${transferResult.txHash}\`\n\nPlease contact an administrator. Your tokens are safe in the destination Community Fund wallet.`,
-            flags: [MessageFlags.Ephemeral]
-          });
-          return;
-        }
-        
-        // Get guild names for success message
-        const sourceGuildName = await getGuildName(sourceGuildId);
-        const destinationGuildName = await getGuildName(destinationGuildId);
-        const tokenTicker = tokenIdentifier.split('-')[0];
-        
-        await interaction.editReply({
-          content: `✅ **Transfer successful!**\n\nTransferred **${transferAmount}** ${tokenTicker} from **${sourceGuildName}** to **${destinationGuildName}**.\n\n**Transaction:** \`${transferResult.txHash}\``,
-          flags: [MessageFlags.Ephemeral]
-        });
-        
-      } catch (transferError) {
-        console.error('[TRANSFER-CROSS-GUILD-ESDT] Transfer error:', transferError);
-
-        let restoredMessage = '';
-        if (sourceDeductResult?.success && transferError.beforeBroadcast) {
-          const { restored } = await tryRestoreVirtualAccountBalance(
-            sourceGuildId,
-            userId,
-            tokenIdentifier,
-            transferAmount,
-            sourceDeductResult.newBalance,
-            transferError.message || 'cross-guild transfer error'
-          );
-          restoredMessage = restored
-            ? '\n\n✅ Your balance has been restored.'
-            : '\n\n⚠️ **CRITICAL:** Balance restoration failed. Please contact an admin immediately.';
-        } else if (sourceDeductResult?.success) {
-          restoredMessage = '\n\nYour balance stays reserved because the transfer may have been broadcast. Do not retry until it is reconciled.';
-        }
-        
-        await interaction.editReply({
-          content: `❌ **Transfer failed!**\n\n${transferError.message}${restoredMessage}`,
+          content: `❌ Token metadata missing for ${tokenIdentifier}. Nothing was sent.`,
           flags: [MessageFlags.Ephemeral]
         });
         return;
       }
+      let amountHuman;
+      try {
+        amountHuman = canonicalizeEsdtAmount(transferAmount, storedDecimals).human;
+      } catch (amountError) {
+        await interaction.editReply({
+          content: `❌ **Invalid amount!**\n\n${amountError.message}`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      const sourceProjects = await getProjects(sourceGuildId);
+      const sourceCommunityFund = sourceProjects[getCommunityFundProjectName()];
+      if (!sourceCommunityFund || !sourceCommunityFund.walletAddress) {
+        await interaction.editReply({
+          content: '❌ Source Community Fund wallet is not configured. Nothing was sent.',
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      await interaction.editReply({
+        content: `🔄 **Processing transfer...**\n\nTransferring **${amountHuman}** ${tokenIdentifier.split('-')[0]} from source Community Fund to destination Community Fund...\n\n⏳ Blockchain transaction in progress...`,
+        flags: [MessageFlags.Ephemeral]
+      });
+
+      const outcome = await executeEsdtDisbursement({
+        repo: esdtDisbursements,
+        send: sendReservedEsdtDisbursement,
+        workerId: `cross-${interaction.id}`,
+        input: {
+          operationKind: 'cross_guild',
+          disbursementId: interactionDisbursementId('xg', interaction.id),
+          interactionId: interaction.id,
+          guildId: sourceGuildId,
+          userId,
+          counterpartyGuildId: destinationGuildId,
+          counterpartyUserId: userId,
+          tokenIdentifier,
+          amountHuman,
+          decimals: storedDecimals,
+          recipientWallet: destinationWalletAddress,
+          senderWallet: sourceCommunityFund.walletAddress,
+          memo: `Cross-guild transfer to ${destinationGuildId}`
+        }
+      });
+
+      if (outcome.kind === 'confirmed') {
+        const sourceGuildName = await getGuildName(sourceGuildId);
+        const destinationGuildName = await getGuildName(destinationGuildId);
+        const tokenTicker = tokenIdentifier.split('-')[0];
+        await interaction.editReply({
+          content: `✅ **Transfer successful!**\n\nTransferred **${amountHuman}** ${tokenTicker} from **${sourceGuildName}** to **${destinationGuildName}**.\n\n**Transaction:** \`${outcome.record.primaryTxHash}\`\n**Payment id:** \`${outcome.record.disbursementId}\``,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      if (outcome.kind === 'failed' || outcome.kind === 'insufficient') {
+        await interaction.editReply({
+          content: `❌ **Transfer failed!**\n\n${disbursementPendingText(outcome)}\n\n${outcome.kind === 'failed' ? '✅ The reserved balance was restored.' : ''}`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      await interaction.editReply({
+        content: `⏳ **Transfer pending verification.**\n\n${disbursementPendingText(outcome)}`,
+        flags: [MessageFlags.Ephemeral]
+      });
+      return;
       
     } catch (error) {
       console.error('Error in transfer-cross-guild-esdt command:', error.message);
@@ -13214,98 +13351,54 @@ client.on('interactionCreate', async (interaction) => {
       const fullTokenIdentifier = verifyNFT.identifier || `${collection}-${nft.nonce.toString().padStart(4, '0')}`;
       const tokenType = verifyNFT.token_type || 'NFT';
       
-      // Perform transfer
-      let nftReserved = false;
-      try {
-        // Step 1: Remove from source user's VA
-        await virtualAccountsNFT.removeNFTFromAccount(sourceGuildId, userId, collection, nft.nonce, amount);
-        nftReserved = true;
-        
-        // Step 2: Make on-chain transaction from source Community Fund to destination Community Fund
+      const sourceProjects = await getProjects(sourceGuildId);
+      const sourceCommunityFund = sourceProjects[getCommunityFundProjectName()];
+      if (!sourceCommunityFund || !sourceCommunityFund.walletAddress) {
         await interaction.editReply({
-          content: `🔄 **Processing transfer...**\n\nTransferring ${tokenType} "${nftName}"${amount > 1 ? ` (${amount}x)` : ''} from source Community Fund to destination Community Fund...\n\n⏳ Blockchain transaction in progress...`,
-          flags: [MessageFlags.Ephemeral]
-        });
-        
-        const sourceCommunityFundProjectName = getCommunityFundProjectName();
-        const transferResult = await transferNFTFromCommunityFund(
-          destinationWalletAddress,
-          fullTokenIdentifier,
-          sourceCommunityFundProjectName,
-          sourceGuildId,
-          amount,
-          tokenType
-        );
-        
-        if (!transferResult.success || !transferResult.txHash) {
-          const { restored } = await tryRestoreNftToVirtualAccount(
-            sourceGuildId, userId, collection, verifyNFT, nft.nonce, amount, tokenType
-          );
-          
-          await interaction.editReply({
-            content: `❌ **Transfer failed!**\n\n${transferResult.errorMessage || transferResult.error || 'Blockchain transaction failed'}\n\n${restored ? '✅ Your NFT has been restored to your source account.' : '⚠️ NFT restoration failed. Please contact an admin immediately.'}`,
-            flags: [MessageFlags.Ephemeral]
-          });
-          return;
-        }
-        
-        // Step 3: Add to destination user's VA after successful transaction
-        try {
-          await virtualAccountsNFT.addNFTToAccount(
-            destinationGuildId,
-            userId,
-            collection,
-            verifyNFT.identifier,
-            nft.nonce,
-            {
-              nft_name: verifyNFT.nft_name,
-              nft_image_url: verifyNFT.nft_image_url,
-              metadata: verifyNFT.metadata
-            },
-            amount,
-            tokenType
-          );
-        } catch (addError) {
-          console.error('[TRANSFER-CROSS-GUILD-NFT] Failed to add NFT to destination VA:', addError);
-          // Transaction succeeded but VA update failed - this is a critical error
-          // The NFT is now in destination Community Fund, but user's VA wasn't updated
-          // We should log this and notify admin
-          await interaction.editReply({
-            content: `⚠️ **Transfer completed on-chain but VA update failed!**\n\nTransaction hash: \`${transferResult.txHash}\`\n\nError: ${addError.message}\n\nPlease contact an administrator. Your NFT is safe in the destination Community Fund wallet.`,
-            flags: [MessageFlags.Ephemeral]
-          });
-          return;
-        }
-        
-        // Get guild names for success message
-        const sourceGuildName = await getGuildName(sourceGuildId);
-        const destinationGuildName = await getGuildName(destinationGuildId);
-        const amountText = amount > 1 ? ` (${amount}x)` : '';
-        
-        await interaction.editReply({
-          content: `✅ **Transfer successful!**\n\nTransferred ${tokenType} "${nftName}"${amountText} from **${sourceGuildName}** to **${destinationGuildName}**.\n\n**Transaction:** \`${transferResult.txHash}\``,
-          flags: [MessageFlags.Ephemeral]
-        });
-        
-      } catch (transferError) {
-        console.error('[TRANSFER-CROSS-GUILD-NFT] Transfer error:', transferError);
-
-        let restoredMessage = '';
-        if (nftReserved) {
-          const { restored } = await tryRestoreNftToVirtualAccount(
-            sourceGuildId, userId, collection, verifyNFT, nft.nonce, amount, tokenType
-          );
-          restoredMessage = restored
-            ? '\n\n✅ Your NFT has been restored to your source account.'
-            : '\n\n⚠️ **CRITICAL:** NFT restoration failed. Please contact an admin immediately.';
-        }
-        
-        await interaction.editReply({
-          content: `❌ **Transfer failed!**\n\n${transferError.message}${restoredMessage}`,
+          content: '❌ Source Community Fund wallet is not configured. Nothing was sent.',
           flags: [MessageFlags.Ephemeral]
         });
         return;
       }
+
+      await interaction.editReply({
+        content: `🔄 **Processing transfer...**\n\nTransferring ${tokenType} "${nftName}"${amount > 1 ? ` (${amount}x)` : ''} from source Community Fund to destination Community Fund...\n\n⏳ This NFT endpoint cannot be confirmed yet. The virtual NFT stays in the source account.`,
+        flags: [MessageFlags.Ephemeral]
+      });
+
+      const outcome = await executeLegacyNftDisbursement({
+        interactionId: interaction.id,
+        guildId: sourceGuildId,
+        userId,
+        assetKey: fullTokenIdentifier,
+        amount,
+        recipientWallet: destinationWalletAddress,
+        senderWallet: sourceCommunityFund.walletAddress,
+        memo: `Cross-guild NFT to ${destinationGuildId}`,
+        workerId: `cross-nft-${interaction.id}`,
+        sendLegacy: () => transferNFTFromCommunityFund(
+          destinationWalletAddress,
+          fullTokenIdentifier,
+          getCommunityFundProjectName(),
+          sourceGuildId,
+          amount,
+          tokenType
+        )
+      });
+
+      if (outcome.kind === 'failed') {
+        await interaction.editReply({
+          content: `❌ **Transfer was not sent.**\n\n${disbursementPendingText(outcome)}\n\nYour NFT is still in the source account.`,
+          flags: [MessageFlags.Ephemeral]
+        });
+        return;
+      }
+
+      await interaction.editReply({
+        content: `⏳ **NFT transfer needs reconciliation.**\n\n${disbursementPendingText(outcome)}\n\nThe virtual NFT was not removed and was not credited on the destination server. Do not retry this transfer.`,
+        flags: [MessageFlags.Ephemeral]
+      });
+      return;
       
     } catch (error) {
       console.error('Error in transfer-cross-guild-nft command:', error.message);
@@ -13331,7 +13424,7 @@ client.on('interactionCreate', async (interaction) => {
       const userId = interaction.user.id;
       const guildName = interaction.guild?.name || 'Unknown';
 
-      const result = await chargeOnChainSubscription(guildId, userId, planKey, guildName);
+      const result = await chargeOnChainSubscription(guildId, userId, planKey, guildName, interaction.id);
 
       if (!result.sufficient) {
         const embed = new EmbedBuilder()
@@ -22156,15 +22249,31 @@ client.on('interactionCreate', async (interaction) => {
       console.log(`[WITHDRAW-NFT-BULK] User ${interaction.user.tag} (${interaction.user.id}) withdrawing ${nftsToWithdraw.length} NFT(s) to ${userWallet}`);
       
       // Call bulk transfer API
-      const transferResult = await transferMultipleNFTs(
-        userWallet,
-        tokenIdentifiers,
-        communityFundProject.walletPem,
-        API_BASE_URL,
-        API_TOKEN,
-        communityFundProject.walletAddress,
-        guildIdFromCustomId
-      );
+      const nftOutcome = await executeLegacyNftDisbursement({
+        interactionId: interaction.id,
+        guildId: guildIdFromCustomId,
+        userId: interaction.user.id,
+        assetKey: `bulk:${tokenIdentifiers.join(',')}`,
+        amount: tokenIdentifiers.length,
+        recipientWallet: userWallet,
+        senderWallet: communityFundProject.walletAddress,
+        memo: 'Bulk NFT withdrawal',
+        workerId: `withdraw-nft-bulk-${interaction.id}`,
+        sendLegacy: () => transferMultipleNFTs(
+          userWallet,
+          tokenIdentifiers,
+          communityFundProject.walletPem,
+          API_BASE_URL,
+          API_TOKEN,
+          communityFundProject.walletAddress,
+          guildIdFromCustomId
+        )
+      });
+      const transferResult = {
+        success: nftOutcome.kind === 'confirmed',
+        txHash: nftOutcome.record && nftOutcome.record.primaryTxHash,
+        errorMessage: disbursementPendingText(nftOutcome)
+      };
       
       if (transferResult.success && transferResult.txHash) {
         // Remove NFTs from virtual account
@@ -24525,7 +24634,19 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
     }
     
     // Charge pool creation fee
-    const feeResult = await chargePoolCreationFee(guildId, userId);
+    const feeResult = await chargePoolCreationFee(guildId, userId, poolId, interaction && interaction.id);
+    if (feeResult.pending) {
+      const pendingEmbed = new EmbedBuilder()
+        .setTitle('⏳ Pool Creation Fee Pending')
+        .setDescription('The fee was reserved and was not confirmed. Pool setup stopped. The fee was not refunded. Do not create another pool until this payment is reconciled.')
+        .setColor(0xFFAA00)
+        .setTimestamp();
+      if (loadingMessage) {
+        try { await loadingMessage.edit({ embeds: [pendingEmbed] }); } catch (editError) { console.warn('[STAKING] Could not show pending fee:', editError.message); }
+      }
+      return;
+    }
+
     if (!feeResult.sufficient) {
       // Delete the pool since fee payment failed
       await dbStakingPools.updateStakingPool(guildId, poolId, { status: 'CLOSED' });
@@ -24603,18 +24724,6 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
         // If balance is insufficient, close the pool
         await dbStakingPools.updateStakingPool(guildId, poolId, { status: 'CLOSED' });
 
-        if (!feeResult.waived && feeAmountHuman !== '0') {
-          const balAfterFee = await virtualAccounts.getUserBalance(guildId, userId, REWARD_IDENTIFIER);
-          await tryRestoreVirtualAccountBalance(
-            guildId,
-            userId,
-            REWARD_IDENTIFIER,
-            feeAmountHuman,
-            balAfterFee,
-            'pool creation aborted — insufficient initial supply (fee refund)'
-          );
-        }
-
         const embed = new EmbedBuilder()
           .setTitle('❌ Insufficient Balance for Initial Supply')
           .setDescription(`Pool creation failed due to insufficient balance for initial supply.`)
@@ -24660,18 +24769,7 @@ async function handlePoolCreationCompletion(guildId, userId, poolId, traitType, 
       if (!initialSupplyDeductResult.success) {
         // If deduction fails, close the pool
         await dbStakingPools.updateStakingPool(guildId, poolId, { status: 'CLOSED' });
-        if (!feeResult.waived && feeAmountHuman !== '0') {
-          const balAfterFee = await virtualAccounts.getUserBalance(guildId, userId, REWARD_IDENTIFIER);
-          await tryRestoreVirtualAccountBalance(
-            guildId,
-            userId,
-            REWARD_IDENTIFIER,
-            feeAmountHuman,
-            balAfterFee,
-            'pool creation aborted — initial supply deduction failed (fee refund)'
-          );
-        }
-        throw new Error(`Failed to deduct initial supply: ${initialSupplyDeductResult.error}`);
+        throw new Error(`Failed to deduct initial supply: ${initialSupplyDeductResult.error}. A confirmed pool-creation fee was not refunded.`);
       }
       
       console.log(`[STAKING] Deducted initial supply: ${initialSupplyHuman} ${rewardTokenTicker} from user ${userId} for pool ${poolId}`);
@@ -24922,7 +25020,7 @@ async function getWalletEsdtBalanceHuman(walletAddress, tokenIdentifier) {
   }
 }
 
-async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
+async function chargeOnChainSubscription(guildId, userId, planKey, guildName, interactionId) {
   const plan = getPlan(planKey);
   if (!plan) {
     throw new Error('Invalid subscription plan selected.');
@@ -24984,53 +25082,76 @@ async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
     usedProvisionalWhitelist = true;
   }
 
-  let transferResult;
+  const storedDecimals = await getStoredTokenDecimals(guildId, USDC_TOKEN_IDENTIFIER);
+  if (storedDecimals === null) {
+    throw new Error(`Token metadata missing for ${USDC_TOKEN_IDENTIFIER}. Nothing was sent.`);
+  }
+  if (!/^\d{10,32}$/.test(String(interactionId || ''))) {
+    throw new Error('A Discord interaction id is required before a subscription payment. Nothing was sent.');
+  }
+  const amountHuman = canonicalizeEsdtAmount(amountStr, storedDecimals).human;
+
+  let outcome;
   try {
-    console.log(`[ON-CHAIN-SUB] Transferring subscription fee: ${amountStr} ${USDC_TOKEN_IDENTIFIER} from Community Fund to treasury`);
-    transferResult = await transferESDTFromCommunityFund(
-      ON_CHAIN_SUBSCRIPTION_TREASURY_WALLET,
-      USDC_TOKEN_IDENTIFIER,
-      amountStr,
-      communityFundProjectName,
-      guildId,
-      { skipSubscriptionCheck: true }
-    );
-
-    if (!transferResult.success) {
-      const err = new Error(
-        transferResult.authoritativeNonPayment
-          ? `Failed to transfer subscription fee on-chain: ${transferResult.errorMessage || transferResult.error || 'Unknown error'}`
-          : `Subscription payment is pending verification. Do not retry until an admin checks the MakeX operation. ${transferResult.errorMessage || ''}`.trim()
-      );
-      err.paymentUnverified = transferResult.authoritativeNonPayment !== true;
-      throw err;
-    }
-
-    if (!transferResult.txHash) {
-      throw new Error('Subscription payment did not return a transaction hash.');
-    }
-
-    console.log(`[ON-CHAIN-SUB] Verifying subscription payment on-chain: ${transferResult.txHash}`);
-    const txOutcome = await waitForMultiversXTransactionTerminalOutcome(transferResult.txHash);
-    if (txOutcome.status !== 'success') {
-      throw new Error(txOutcome.userMessage || 'Subscription payment failed on-chain.');
-    }
+    console.log(`[ON-CHAIN-SUB] Reserving subscription fee: ${amountHuman} ${USDC_TOKEN_IDENTIFIER}`);
+    outcome = await executeEsdtDisbursement({
+      repo: esdtDisbursements,
+      send: sendReservedEsdtDisbursement,
+      workerId: `sub-${interactionId}`,
+      input: {
+        operationKind: 'subscription',
+        disbursementId: interactionDisbursementId('sub', interactionId),
+        interactionId,
+        guildId,
+        userId,
+        tokenIdentifier: USDC_TOKEN_IDENTIFIER,
+        amountHuman,
+        decimals: storedDecimals,
+        recipientWallet: ON_CHAIN_SUBSCRIPTION_TREASURY_WALLET,
+        senderWallet: communityFund.walletAddress,
+        memo: `On-chain plan ${plan.label}`,
+        effectPayload: {
+          planKey,
+          planMonths: plan.months,
+          amountUsdc,
+          guildName,
+          subscriptionStart: whitelistStartIso,
+          subscriptionEnd: whitelistEndIso
+        }
+      }
+    });
   } catch (transferError) {
-    if (usedProvisionalWhitelist && whitelistSnapshot && !transferError.paymentUnverified) {
+    if (usedProvisionalWhitelist && whitelistSnapshot) {
       try {
         await makexWhitelist.rollbackGuildWhitelistSnapshot(whitelistSnapshot);
       } catch (rollbackError) {
         console.error('[ON-CHAIN-SUB] Failed to rollback provisional whitelist:', rollbackError);
       }
     }
-    console.error('[ON-CHAIN-SUB] Error making on-chain transfer for subscription:', transferError);
-    const balanceNote = transferError.paymentUnverified
-      ? ' Your virtual balance was not deducted. Do not start another payment until this one is reconciled.'
-      : ' Your balance was not deducted.';
-    throw new Error(`Failed to process subscription payment: ${transferError.message}.${balanceNote}`);
+    throw new Error(`Failed to process subscription payment: ${transferError.message}. Your balance was not left reserved by a confirmed send.`);
   }
 
-  let whitelistResults;
+  const keepWhitelist = outcome.kind === 'confirmed'
+    || outcome.kind === 'pending'
+    || outcome.kind === 'needs_reconciliation';
+  if (usedProvisionalWhitelist && whitelistSnapshot && !keepWhitelist) {
+    try {
+      await makexWhitelist.rollbackGuildWhitelistSnapshot(whitelistSnapshot);
+    } catch (rollbackError) {
+      console.error('[ON-CHAIN-SUB] Failed to rollback provisional whitelist:', rollbackError);
+    }
+  }
+  if (outcome.kind === 'insufficient') {
+    return { success: false, sufficient: false, needed: outcome.available || '0', amountUsdc };
+  }
+  if (outcome.kind !== 'confirmed') {
+    const reserved = outcome.kind === 'pending' || outcome.kind === 'needs_reconciliation';
+    throw new Error(
+      `Failed to process subscription payment: ${disbursementPendingText(outcome)}. ${reserved ? 'Your virtual balance stays reserved. The provisional whitelist was kept. Do not start another payment.' : 'Nothing further was sent.'}`
+    );
+  }
+
+  let whitelistResults = [];
   try {
     if (usedProvisionalWhitelist) {
       whitelistResults = await makexWhitelist.confirmGuildWalletsAfterPayment(
@@ -25052,42 +25173,7 @@ async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
     whitelistResults = [];
   }
 
-  await dbOnChainSubscriptions.upsertSubscription({
-    guildId,
-    subscribedByDiscordId: userId,
-    planMonths: plan.months,
-    amountUsdc,
-    subscriptionStart: whitelistStartIso,
-    subscriptionEnd: whitelistEndIso,
-    lastPaymentTxHash: transferResult.txHash || null
-  });
-
-  const deductResult = await virtualAccounts.deductFundsFromAccount(
-    guildId,
-    userId,
-    USDC_TOKEN_IDENTIFIER,
-    amountStr,
-    `On-chain plan subscription (${plan.label})`
-  );
-
-  if (!deductResult.success) {
-    console.error(`[ON-CHAIN-SUB] WARNING: On-chain transfer succeeded but VA deduction failed for user ${userId}. TX Hash: ${transferResult.txHash || 'N/A'}`);
-  } else if (transferResult.txHash && deductResult.transaction) {
-    try {
-      const supabase = require('./supabase-client');
-      await supabase
-        .from('virtual_account_transactions')
-        .update({
-          tx_hash: transferResult.txHash,
-          source: 'on_chain_subscription'
-        })
-        .eq('transaction_id', deductResult.transaction.id)
-        .eq('guild_id', guildId)
-        .eq('user_id', userId);
-    } catch (updateError) {
-      console.error('[ON-CHAIN-SUB] Error updating transaction record:', updateError);
-    }
-  }
+  await applyConfirmedDisbursementEffect(outcome.record);
 
   return {
     success: true,
@@ -25095,8 +25181,8 @@ async function chargeOnChainSubscription(guildId, userId, planKey, guildName) {
     amountUsdc,
     plan,
     subscriptionEnd,
-    txHash: transferResult.txHash || null,
-    walletsWhitelisted: whitelistResults.length,
+    txHash: outcome.record.primaryTxHash || null,
+    walletsWhitelisted: Array.isArray(whitelistResults) ? whitelistResults.length : 0,
     provisionalWhitelist: usedProvisionalWhitelist
   };
 }
@@ -25140,7 +25226,7 @@ async function calculatePoolCreationFee() {
 }
 
 // Charge pool creation fee from user VA and transfer on-chain
-async function chargePoolCreationFee(guildId, userId) {
+async function chargePoolCreationFee(guildId, userId, poolId, interactionId) {
   try {
     if (await isGuildOnChainPlanActive(guildId)) {
       console.log(`[STAKING] Skipping pool creation fee for guild ${guildId} (active on-chain plan)`);
@@ -25153,108 +25239,89 @@ async function chargePoolCreationFee(guildId, userId) {
       };
     }
 
-    const feeInfo = await calculatePoolCreationFee();
     const REWARD_IDENTIFIER = 'REWARD-cf6eac';
-    const FEE_RECIPIENT_WALLET = 'erd158k2c3aserjmwnyxzpln24xukl2fsvlk9x46xae4dxl5xds79g6sdz37qn';
-    
-    // Convert fee from wei to human-readable format
-    const feeAmountHuman = new BigNumber(feeInfo.feeAmountWei).dividedBy(new BigNumber(10).pow(feeInfo.rewardDecimals)).toString();
-    
-    // Check user VA balance (getUserBalance returns human-readable format)
-    const userBalance = await virtualAccounts.getUserBalance(guildId, userId, REWARD_IDENTIFIER);
-    const balanceBN = new BigNumber(userBalance || '0');
-    const feeBN = new BigNumber(feeAmountHuman);
-    
-    if (balanceBN.isLessThan(feeBN)) {
-      const needed = feeBN.minus(balanceBN).toString();
+    const FEE_RECIPIENT_WALLET = ON_CHAIN_SUBSCRIPTION_TREASURY_WALLET;
+    requireEsdtDisbursementStore();
+    const disbursementId = poolFeeDisbursementId(poolId);
+    const existing = await esdtDisbursements.getById(disbursementId);
+    let feeAmountHuman;
+    let rewardDecimals;
+    let feeAmountUsd;
+    let feeAmountWei;
+    if (existing) {
+      feeAmountHuman = existing.amountHuman;
+      rewardDecimals = existing.decimals;
+      feeAmountWei = existing.amountRaw;
+      feeAmountUsd = existing.effectPayload && existing.effectPayload.feeAmountUsd;
+    } else {
+      const feeInfo = await calculatePoolCreationFee();
+      const canonical = humanFromRaw(feeInfo.feeAmountWei, feeInfo.rewardDecimals);
+      feeAmountHuman = canonical.human;
+      rewardDecimals = canonical.decimals;
+      feeAmountWei = canonical.raw;
+      feeAmountUsd = feeInfo.feeAmountUsd;
+    }
+
+    const projects = await getProjects(guildId);
+    const communityFund = projects[getCommunityFundProjectName()];
+    if (!communityFund || !communityFund.walletAddress) {
+      throw new Error('Community Fund is not configured. The pool fee was not sent.');
+    }
+    if (!/^\d{10,32}$/.test(String(interactionId || '')) && !existing) {
+      throw new Error('A Discord interaction id is required before a new pool fee. Nothing was sent.');
+    }
+
+    const outcome = await executeEsdtDisbursement({
+      repo: esdtDisbursements,
+      send: sendReservedEsdtDisbursement,
+      workerId: `pool-${poolId}`,
+      input: {
+        operationKind: 'pool_fee',
+        disbursementId,
+        businessActionId: disbursementId,
+        interactionId: (existing && existing.discordInteractionId) || interactionId,
+        guildId,
+        userId,
+        tokenIdentifier: REWARD_IDENTIFIER,
+        amountHuman: feeAmountHuman,
+        decimals: rewardDecimals,
+        recipientWallet: FEE_RECIPIENT_WALLET,
+        senderWallet: communityFund.walletAddress,
+        memo: `Pool creation fee ${poolId}`,
+        effectPayload: { poolId, feeAmountUsd }
+      }
+    });
+
+    if (outcome.kind === 'insufficient') {
       return {
         sufficient: false,
-        needed: needed,
-        feeAmountUsd: feeInfo.feeAmountUsd
+        needed: outcome.available || '0',
+        feeAmountUsd: feeAmountUsd || 0
       };
     }
-    
-    // Make on-chain transfer from Community Fund to fee recipient wallet FIRST
-    // This protects user funds - if transfer fails, we don't deduct anything
-    let transferResult;
-    try {
-      const communityFundProjectName = getCommunityFundProjectName();
-      console.log(`[STAKING] Transferring pool creation fee: ${feeAmountHuman} ${REWARD_IDENTIFIER} from Community Fund to ${FEE_RECIPIENT_WALLET}`);
-      
-      transferResult = await transferESDTFromCommunityFund(
-        FEE_RECIPIENT_WALLET,
-        REWARD_IDENTIFIER,
-        feeAmountHuman,
-        communityFundProjectName,
-        guildId
-      );
-      
-      if (!transferResult.success) {
-        const err = new Error(
-          transferResult.authoritativeNonPayment
-            ? `Failed to transfer fee on-chain: ${transferResult.errorMessage || transferResult.error || 'Unknown error'}`
-            : `Pool creation fee is pending verification. Do not retry until an admin checks the MakeX operation. ${transferResult.errorMessage || ''}`.trim()
-        );
-        err.paymentUnverified = transferResult.authoritativeNonPayment !== true;
-        throw err;
-      }
-      
-      console.log(`[STAKING] Pool creation fee transferred successfully. TX Hash: ${transferResult.txHash || 'N/A'}`);
-    } catch (transferError) {
-      console.error('[STAKING] Error making on-chain transfer for pool creation fee:', transferError);
-      // Transfer failed - don't deduct from user, just return error
-      const balanceNote = transferError.paymentUnverified
-        ? ' Your virtual balance was not deducted. Do not start another payment until this one is reconciled.'
-        : ' Your balance was not deducted.';
-      throw new Error(`Failed to process pool creation fee: ${transferError.message}.${balanceNote}`);
+    if (outcome.kind === 'failed') {
+      throw new Error(`Failed to process pool creation fee: ${disbursementPendingText(outcome)}. The reserved balance was restored.`);
     }
-    
-    // Only deduct from VA after successful on-chain transfer
-    // This ensures user funds are protected - if transfer fails, user keeps their balance
-    const deductResult = await virtualAccounts.deductFundsFromAccount(
-      guildId,
-      userId,
-      REWARD_IDENTIFIER,
-      feeAmountHuman,
-      `Pool creation fee ($${feeInfo.feeAmountUsd} REWARD)`
-    );
-    
-    if (!deductResult.success) {
-      // If deduction fails after successful transfer, log error but don't fail the pool creation
-      // The transfer already happened, so we'll just log this for manual review
-      console.error(`[STAKING] WARNING: On-chain transfer succeeded but VA deduction failed for user ${userId}. TX Hash: ${transferResult.txHash || 'N/A'}`);
-      // Continue anyway since the transfer already happened
-    } else {
-      // Update the transaction record with tx_hash
-      if (transferResult.txHash && deductResult.transaction) {
-        try {
-          const supabase = require('./supabase-client');
-          const { error: updateError } = await supabase
-            .from('virtual_account_transactions')
-            .update({ 
-              tx_hash: transferResult.txHash,
-              source: 'staking_pool_fee'
-            })
-            .eq('transaction_id', deductResult.transaction.id)
-            .eq('guild_id', guildId)
-            .eq('user_id', userId);
-          
-          if (updateError) {
-            console.error(`[STAKING] Error updating transaction with tx_hash:`, updateError);
-          } else {
-            console.log(`[STAKING] Updated transaction ${deductResult.transaction.id} with tx_hash: ${transferResult.txHash}`);
-          }
-        } catch (updateError) {
-          console.error(`[STAKING] Error updating transaction record:`, updateError);
-        }
-      }
+    if (outcome.kind !== 'confirmed') {
+      return {
+        sufficient: true,
+        pending: true,
+        confirmed: false,
+        feeAmountWei,
+        feeAmountUsd: feeAmountUsd || 0,
+        txHash: null,
+        waived: false
+      };
     }
-    
+
     return {
       sufficient: true,
-      feeAmountWei: feeInfo.feeAmountWei,
-      feeAmountUsd: feeInfo.feeAmountUsd,
-      txHash: transferResult.txHash || null
+      pending: false,
+      confirmed: true,
+      feeAmountWei: outcome.record.amountRaw,
+      feeAmountUsd: feeAmountUsd || 0,
+      txHash: outcome.record.primaryTxHash || null,
+      waived: false
     };
   } catch (error) {
     console.error('[STAKING] Error charging pool creation fee:', error);
@@ -28157,6 +28224,33 @@ async function resumePendingEsdtWithdrawals(workerId) {
   }
 }
 
+async function resumePendingEsdtDisbursements(workerId) {
+  if (!esdtDisbursements.isConfigured()) {
+    console.warn('[DISBURSE] Skipping disbursement resume because SUPABASE_SERVICE_ROLE_KEY is not configured.');
+    return;
+  }
+  const recoveryEnabled = esdtDisbursementRecoveryEnabled();
+  const summary = await resumeUnresolvedEsdtDisbursements({
+    repo: esdtDisbursements,
+    send: sendReservedEsdtDisbursement,
+    workerId,
+    recoveryEnabled
+  });
+  if (!recoveryEnabled) {
+    console.warn(`[DISBURSE] Automated recovery is paused. ${summary.checked} unresolved disbursement(s) were not sent to MakeX.`);
+  } else if (summary.checked) {
+    console.log(`[DISBURSE] Resumed ${summary.checked} unresolved ESDT disbursement(s); posted ${summary.posted}.`);
+  }
+  try {
+    const effects = await esdtDisbursements.listEffectsDue({ limit: 20 });
+    for (const row of effects) {
+      await applyConfirmedDisbursementEffect(row);
+    }
+  } catch (effectError) {
+    console.error('[DISBURSE] Effect sweep failed:', effectError.message);
+  }
+}
+
 client.on('ready', async () => {
   console.log(`Multi-Server ESDT Tipping Bot with Virtual Accounts is ready with ID: ${client.user.tag}`);
   console.log('Bot is using partials for: Message, Channel, User, GuildMember');
@@ -28177,9 +28271,17 @@ client.on('ready', async () => {
   } catch (resumeError) {
     console.error('[WITHDRAW] Could not resume unresolved withdrawals:', resumeError.message);
   }
+  try {
+    await resumePendingEsdtDisbursements(`boot-${process.pid}`);
+  } catch (resumeError) {
+    console.error('[DISBURSE] Could not resume unresolved disbursements:', resumeError.message);
+  }
   setInterval(() => {
     resumePendingEsdtWithdrawals(`interval-${process.pid}`).catch((resumeError) => {
       console.error('[WITHDRAW] Unresolved withdrawal resume failed:', resumeError.message);
+    });
+    resumePendingEsdtDisbursements(`interval-${process.pid}`).catch((resumeError) => {
+      console.error('[DISBURSE] Unresolved disbursement resume failed:', resumeError.message);
     });
   }, 120000);
   
@@ -30385,14 +30487,31 @@ async function processAuctionClosure(guildId, auctionId) {
         console.log(`[AUCTIONS] - Winner Wallet: ${winnerWallet}`);
         console.log(`[AUCTIONS] - Project: ${auction.projectName}`);
         
-        transferResult = await transferNFTFromCommunityFund(
-          winnerWallet,
-          fullTokenIdentifier, // Full identifier includes nonce
-          auction.projectName,
+        const auctionOutcome = await executeLegacyNftDisbursement({
+          stableKey: `${guildId}|${auctionId}|${fullTokenIdentifier}`,
           guildId,
-          auctionAmount,
-          tokenType  // Pass tokenType for reliable detection
-        );
+          userId: auction.highestBidderId || auction.sellerId || 'auction',
+          assetKey: fullTokenIdentifier,
+          amount: auctionAmount,
+          recipientWallet: winnerWallet,
+          senderWallet: project.walletAddress,
+          memo: `Auction settlement ${auctionId}`,
+          workerId: `auction-${auctionId}`,
+          sendLegacy: () => transferNFTFromCommunityFund(
+            winnerWallet,
+            fullTokenIdentifier,
+            auction.projectName,
+            guildId,
+            auctionAmount,
+            tokenType
+          )
+        });
+        transferResult = {
+          success: auctionOutcome.kind === 'confirmed',
+          txHash: auctionOutcome.record && auctionOutcome.record.primaryTxHash,
+          errorMessage: disbursementPendingText(auctionOutcome),
+          authoritativeNonPayment: auctionOutcome.kind === 'failed'
+        };
         
         console.log(`[AUCTIONS] Transfer result for auction ${auctionId}:`, {
           success: transferResult.success,
@@ -30524,7 +30643,7 @@ async function processAuctionClosure(guildId, auctionId) {
       await dbAuctions.updateAuction(guildId, auctionId, { status: 'FINISHED' });
       // Clean up forwarded messages
       await cleanupForwardedMessages(guildId, 'auction', auctionId);
-    } else {
+    } else if (transferResult.authoritativeNonPayment === true) {
       // Refund the deduction (using identifier)
       await virtualAccounts.addFundsToAccount(
         guildId,
@@ -30555,6 +30674,22 @@ async function processAuctionClosure(guildId, auctionId) {
         await thread.send(`❌ **NFT transfer failed.** Payment has been refunded to <@${auction.highestBidderId}>.`);
       }
 
+      await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
+    } else {
+      const pendingEmbed = new EmbedBuilder()
+        .setTitle('⏳ Auction NFT transfer needs reconciliation')
+        .setDescription('The NFT transfer was not confirmed. The winning bid was not refunded and the auction was not marked finished. Do not replay this settlement.')
+        .addFields([
+          { name: 'Winner', value: `<@${auction.highestBidderId}>`, inline: true },
+          { name: 'Final Bid', value: `${auction.currentBid} ${auction.tokenTicker}`, inline: true },
+          { name: 'Detail', value: (transferResult && transferResult.errorMessage) || 'Pending verification', inline: false }
+        ])
+        .setColor(0xFFAA00)
+        .setTimestamp();
+      await message.reply({ embeds: [pendingEmbed] });
+      if (thread) {
+        await thread.send(`⏳ **NFT transfer needs reconciliation.** The winning bid was not refunded.`);
+      }
       await dbAuctions.updateAuction(guildId, auctionId, { status: 'FAILED' });
     }
   } catch (error) {

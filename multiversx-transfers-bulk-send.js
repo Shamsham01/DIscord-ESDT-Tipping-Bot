@@ -61,6 +61,13 @@ function extractCollectionAndNonce(fullTokenIdentifier) {
  * @returns {Promise<Object>} Transfer result with txHash, success status, etc.
  */
 async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem, apiBaseUrl, apiToken, senderWalletAddress = null, guildId = null) {
+  const { legacyAttemptFlags } = require('./utils/esdt-disbursement-flow');
+  let requestStarted = false;
+  const stamp = (target, details) => {
+    if (!target || typeof target !== 'object') return target;
+    if (target.beforeBroadcast != null || target.broadcastAttempted != null) return target;
+    return Object.assign(target, legacyAttemptFlags(details));
+  };
   try {
     if (!apiBaseUrl || !apiToken) {
       throw new Error('API configuration missing. Please set API_BASE_URL and API_TOKEN environment variables.');
@@ -142,6 +149,7 @@ async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem
     const timeoutId = setTimeout(() => controller.abort(), 120000); // 2 minutes timeout for bulk transfers
     
     try {
+      requestStarted = true;
       const response = await fetch(fullEndpoint, {
         method: 'POST',
         headers: {
@@ -214,14 +222,14 @@ async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem
       // Only treat as success if status is 'success', HTTP is OK, and txHash exists
       const isApiSuccess = response.ok && txStatus === 'success' && !!txHash;
       
-      const result = {
+      const result = stamp({
         success: isApiSuccess,
         txHash: txHash,
         errorMessage: errorMessage || (txStatus && txStatus !== 'success' ? `Transaction status: ${txStatus}` : null),
         rawResponse: parsedResponse,
         httpStatus: response.status,
         nftCount: tokenIdentifiers.length
-      };
+      }, { httpStatus: response.status, txHash, requestStarted: true });
       
       if (result.success) {
         console.log(`Successfully sent ${tokenIdentifiers.length} NFTs to: ${recipientWallet}${txHash ? ` (txHash: ${txHash})` : ''}`);
@@ -238,13 +246,13 @@ async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem
       
       if (fetchError.name === 'AbortError') {
         console.error('Multi NFT transfer API request timed out after 120 seconds');
-        throw new Error('API request timed out after 120 seconds');
+        throw stamp(new Error('API request timed out after 120 seconds'), { requestStarted: true });
       }
-      throw fetchError;
+      throw stamp(fetchError, { requestStarted });
     }
   } catch (error) {
     console.error(`Error transferring multiple NFTs:`, error.message);
-    throw error;
+    throw stamp(error, { requestStarted });
   }
 }
 
