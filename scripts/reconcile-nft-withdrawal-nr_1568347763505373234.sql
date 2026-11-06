@@ -28,6 +28,17 @@ BEGIN
     IF v_disbursement.status NOT IN ('RESERVED', 'PENDING', 'NEEDS_RECONCILIATION') THEN
         RAISE EXCEPTION 'precondition failed: status is %', v_disbursement.status;
     END IF;
+    -- Refuse to overwrite a different payment identity or known transaction hash.
+    IF v_disbursement.makex_operation_id IS NOT NULL
+       AND v_disbursement.makex_operation_id <> '13588ddf-a8ae-4bfb-96b1-db7096ca8761' THEN
+        RAISE EXCEPTION 'precondition failed: different MakeX operation ID';
+    END IF;
+    IF (v_disbursement.primary_tx_hash IS NOT NULL
+         AND lower(v_disbursement.primary_tx_hash) <> '1676b1d838b6f53d1061a1632e8d76d5258230ed636bdad267090fe0666474f2')
+       OR (v_disbursement.untrusted_tx_hash IS NOT NULL
+         AND lower(v_disbursement.untrusted_tx_hash) <> '1676b1d838b6f53d1061a1632e8d76d5258230ed636bdad267090fe0666474f2') THEN
+        RAISE EXCEPTION 'precondition failed: recorded transaction hash differs';
+    END IF;
     IF v_disbursement.token_identifier IS DISTINCT FROM 'EMP-897b49-105c'
        OR v_disbursement.amount_raw IS DISTINCT FROM '1' THEN
         RAISE EXCEPTION 'precondition failed: token % amount %', v_disbursement.token_identifier, v_disbursement.amount_raw;
@@ -79,10 +90,10 @@ WITH leased AS (
         'incident-reconcile',
         leased.lease->>'fence',
         '1676b1d838b6f53d1061a1632e8d76d5258230ed636bdad267090fe0666474f2',
-        NULL,
+        '13588ddf-a8ae-4bfb-96b1-db7096ca8761',
         200,
-        false,
-        NULL,
+        true,
+        '0',
         NULL,
         '1825',
         (leased.lease->'record'->>'guild_id'),
@@ -92,9 +103,9 @@ WITH leased AS (
     FROM leased
 )
 SELECT
-    (SELECT result->>'idempotent' FROM settled) AS idempotent,
-    (SELECT status FROM esdt_disbursements WHERE disbursement_id = 'nr_1568347763505373234_32717ded09f1771d208c3666') AS disbursement_status,
-    (SELECT count(*) FROM virtual_account_nft_transactions
-      WHERE transaction_id = 'nft-settle:nr_1568347763505373234_32717ded09f1771d208c3666:EMP-897b49-105c') AS audit_rows;
+    settled.result->>'idempotent' AS idempotent,
+    settled.result->'record'->>'status' AS disbursement_status,
+    (settled.result->>'settled')::integer AS audit_rows
+FROM settled;
 
 ROLLBACK;
