@@ -15,7 +15,9 @@ const {
   massRefundDisbursementId,
   interactionDisbursementId,
   legacyAttemptFlags,
-  unconfirmedLegacyTransfer
+  unconfirmedLegacyTransfer,
+  verifiedNftDisbursementInput,
+  classifyVerifiedNftAttempt
 } = require('./esdt-disbursement-flow');
 
 process.env.ESDT_DISBURSEMENTS_ENABLED = 'true';
@@ -1098,4 +1100,257 @@ test('MakeX is not called when the idempotency key was not persisted', async () 
     (error) => error.code === 'IDEMPOTENCY_KEY_REQUIRED' && error.beforeBroadcast === true
   );
   assert.equal(called, false);
+});
+
+const NFT_ID = 'EMP-897b49-105c';
+const NFT_HASH = '1676b1d838b6f53d1061a1632e8d76d5258230ed636bdad267090fe0666474f2';
+
+function nftRepo(amount = 1) {
+  const repo = new MemoryEsdtDisbursementRepository();
+  repo.seedNft({
+    guildId: 'g',
+    userId: 'u',
+    collection: 'EMP-897b49',
+    nonce: 4188,
+    identifier: NFT_ID,
+    amount
+  });
+  return repo;
+}
+
+function verifiedInput(interactionId = '1568347763505373234', amount = 1) {
+  return verifiedNftDisbursementInput({
+    interactionId,
+    guildId: 'g',
+    userId: 'u',
+    assetKey: NFT_ID,
+    amount,
+    recipientWallet: RECIPIENT,
+    senderWallet: SENDER,
+    collection: 'EMP-897b49',
+    tokenNonce: 4188
+  });
+}
+
+function nftContract(record, overrides = {}) {
+  return {
+    httpStatus: 200,
+    rawResponse: {
+      status: 'success',
+      success: true,
+      complete: true,
+      skippedWhitelist: true,
+      result: {
+        status: 'success',
+        txHash: overrides.hash || NFT_HASH,
+        nonce: 1825,
+        sender: SENDER,
+        receiver: overrides.recipient || RECIPIENT,
+        recipient: overrides.recipient || RECIPIENT,
+        tokenIdentifier: overrides.token || NFT_ID,
+        amount: overrides.amount || record.amountRaw,
+        amountRaw: overrides.amount || record.amountRaw,
+        ...(overrides.assets ? { assets: overrides.assets } : {})
+      }
+    }
+  };
+}
+
+test('a verified NFT withdrawal settles the virtual account once and a duplicate does not send again', async () => {
+  const repo = nftRepo();
+  let sends = 0;
+  const keys = [];
+  const send = async (record) => {
+    sends += 1;
+    keys.push(record.disbursementId);
+    return classifyVerifiedNftAttempt(record, nftContract(record));
+  };
+  const first = await executeEsdtDisbursement({ repo, input: verifiedInput(), send });
+  assert.equal(first.kind, 'confirmed');
+  assert.equal(first.record.primaryTxHash, NFT_HASH);
+  assert.equal(repo.nftAmount('g', 'u', 'EMP-897b49', 4188), 0);
+  assert.equal(repo.nftLedger.length, 1);
+  assert.equal(repo.nftLedger[0].txHash, NFT_HASH);
+  const duplicate = await executeEsdtDisbursement({ repo, input: verifiedInput(), send });
+  assert.equal(duplicate.kind, 'confirmed');
+  assert.equal(duplicate.sent, false);
+  assert.equal(sends, 1);
+  assert.equal(keys.length, 1);
+  assert.equal(repo.nftLedger.length, 1);
+  const again = await repo.settleNftWithdrawal(first.record.disbursementId, {
+    ownedTxHash: NFT_HASH,
+    guildId: 'g',
+    userId: 'u',
+    recipientWallet: RECIPIENT,
+    processingOwner: 'nobody',
+    processingFence: 'none'
+  });
+  assert.equal(again.idempotent, true);
+  assert.equal(repo.nftLedger.length, 1);
+});
+
+test('a wrong NFT destination, collection, or quantity does not debit inventory', async () => {
+  for (const overrides of [
+    { recipient: OTHER },
+    { token: 'EMP-897b49-105d' },
+    { amount: '2' }
+  ]) {
+    const repo = nftRepo();
+    const outcome = await executeEsdtDisbursement({
+      repo,
+      input: verifiedInput(),
+      send: async (record) => classifyVerifiedNftAttempt(record, nftContract(record, overrides))
+    });
+    assert.equal(outcome.kind, 'needs_reconciliation');
+    assert.equal(outcome.record.primaryTxHash, null);
+    assert.equal(repo.nftAmount('g', 'u', 'EMP-897b49', 4188), 1);
+    assert.equal(repo.nftLedger.length, 0);
+  }
+});
+
+test('an SFT withdrawal debits the exact quantity and a legacy hash still does not', async () => {
+  const repo = nftRepo(4);
+  const outcome = await executeEsdtDisbursement({
+    repo,
+    input: verifiedInput('1568347763505373240', 4),
+    send: async (record) => classifyVerifiedNftAttempt(record, nftContract(record, { amount: '4' }))
+  });
+  assert.equal(outcome.kind, 'confirmed');
+  assert.equal(repo.nftAmount('g', 'u', 'EMP-897b49', 4188), 0);
+  const legacy = nftRepo();
+  const historical = await executeEsdtDisbursement({
+    repo: legacy,
+    input: {
+      operationKind: 'nft_transfer',
+      disbursementId: 'nr_100000000000000250_abcdef1234567890abcd',
+      businessActionId: 'nr_100000000000000250_abcdef1234567890abcd',
+      interactionId: '100000000000000250',
+      guildId: 'g',
+      userId: 'u',
+      tokenIdentifier: NFT_ID,
+      tokenTicker: 'EMP',
+      amountHuman: '1',
+      decimals: 0,
+      recipientWallet: RECIPIENT,
+      senderWallet: SENDER
+    },
+    send: async () => unconfirmedLegacyTransfer({ success: true, txHash: NFT_HASH, httpStatus: 200 })
+  });
+  assert.equal(historical.kind, 'needs_reconciliation');
+  assert.equal(historical.record.errorCode, 'ENDPOINT_CONTRACT_UNSUPPORTED');
+  assert.equal(legacy.nftAmount('g', 'u', 'EMP-897b49', 4188), 1);
+});
+
+test('a database failure after NFT confirmation can be settled later without a second debit', async () => {
+  const repo = nftRepo();
+  const original = repo.settleNftWithdrawal.bind(repo);
+  let failures = 1;
+  repo.settleNftWithdrawal = async (id, patch) => {
+    if (failures > 0) {
+      failures -= 1;
+      throw new Error('database unavailable');
+    }
+    return original(id, patch);
+  };
+  let sends = 0;
+  const send = async (record) => {
+    sends += 1;
+    return classifyVerifiedNftAttempt(record, nftContract(record));
+  };
+  const failed = await executeEsdtDisbursement({ repo, input: verifiedInput(), send });
+  assert.equal(failed.kind, 'needs_reconciliation');
+  assert.equal(failed.record.errorCode, 'NFT_SETTLEMENT_FAILED');
+  assert.equal(failed.record.primaryTxHash, NFT_HASH);
+  assert.equal(repo.nftAmount('g', 'u', 'EMP-897b49', 4188), 1);
+  const recovered = await executeEsdtDisbursement({ repo, input: verifiedInput(), send });
+  assert.equal(recovered.kind, 'confirmed');
+  assert.equal(sends, 2);
+  assert.equal(repo.nftAmount('g', 'u', 'EMP-897b49', 4188), 0);
+  assert.equal(repo.nftLedger.length, 1);
+  const repeated = await executeEsdtDisbursement({ repo, input: verifiedInput(), send });
+  assert.equal(repeated.sent, false);
+  assert.equal(sends, 2);
+  assert.equal(repo.nftLedger.length, 1);
+});
+
+test('an already-dispatched NFT with missing inventory is never misclassified as authoritative non-payment', async () => {
+  const repo = nftRepo();
+  repo.settleNftWithdrawal = async () => { throw new Error('temporary settlement database failure'); };
+  const sentKeys = [];
+  const send = async (record) => {
+    sentKeys.push(record.disbursementId);
+    return classifyVerifiedNftAttempt(record, nftContract(record));
+  };
+
+  const first = await executeEsdtDisbursement({ repo, input: verifiedInput('1568347763505373251'), send });
+  assert.equal(first.kind, 'needs_reconciliation');
+  assert.equal(first.record.status, 'NEEDS_RECONCILIATION');
+  assert.equal(first.record.dispatchedAt != null, true);
+
+  // Simulate an external inventory change between broadcast and reconciliation.
+  // That must not become a fabricated blockchain failure or permit a fresh payout identity.
+  repo.nftBalances.clear();
+  const retry = await executeEsdtDisbursement({ repo, input: verifiedInput('1568347763505373251'), send });
+  assert.equal(retry.kind, 'needs_reconciliation');
+  assert.equal(retry.record.status, 'NEEDS_RECONCILIATION');
+  assert.equal(retry.record.errorCode, 'NFT_SETTLEMENT_FAILED');
+  assert.equal(retry.record.primaryTxHash, NFT_HASH);
+  assert.equal(repo.nftLedger.length, 0);
+  assert.equal(sentKeys.length, 2);
+  assert.equal(sentKeys[0], sentKeys[1]);
+});
+
+test('two concurrent withdrawals of the same NFT broadcast once', async () => {
+  const repo = nftRepo();
+  let sends = 0;
+  const run = (interactionId) => executeEsdtDisbursement({
+    repo,
+    input: verifiedInput(interactionId),
+    send: async (record) => {
+      sends += 1;
+      return classifyVerifiedNftAttempt(record, nftContract(record));
+    }
+  });
+  const results = await Promise.all([
+    run('1568347763505373234'),
+    run('1568347763505373299')
+  ]);
+  const confirmed = results.filter((result) => result.kind === 'confirmed');
+  const blocked = results.filter((result) => result.kind === 'blocked');
+  assert.equal(confirmed.length, 1);
+  assert.equal(blocked.length, 1);
+  assert.equal(sends, 1);
+  assert.equal(repo.nftLedger.length, 1);
+  const later = await executeEsdtDisbursement({
+    repo,
+    input: verifiedInput('1568347763505373300'),
+    send: async () => {
+      sends += 1;
+      return { outcome: 'confirmed', nftContract: true, ownedTxHash: NFT_HASH };
+    }
+  });
+  assert.equal(later.kind, 'failed');
+  assert.equal(later.sent, false);
+  assert.equal(sends, 1);
+});
+
+test('a fungible ESDT disbursement does not use NFT settlement', async () => {
+  const repo = repoWith('9');
+  repo.seedNft({
+    guildId: 'g',
+    userId: 'u',
+    collection: 'EMP-897b49',
+    nonce: 4188,
+    identifier: NFT_ID,
+    amount: 1
+  });
+  const outcome = await executeEsdtDisbursement({
+    repo,
+    input: refundInput('100000000000000261', '1'),
+    send: async (record) => classifyFor(record, successSpec(record))
+  });
+  assert.equal(outcome.kind, 'confirmed');
+  assert.equal(repo.balanceOf('g', 'u', TOKEN), '8');
+  assert.equal(repo.nftAmount('g', 'u', 'EMP-897b49', 4188), 1);
+  assert.equal(repo.nftLedger.length, 0);
 });

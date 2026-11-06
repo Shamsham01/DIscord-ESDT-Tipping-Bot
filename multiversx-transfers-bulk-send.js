@@ -60,7 +60,7 @@ function extractCollectionAndNonce(fullTokenIdentifier) {
  * @param {string} apiToken - API authentication token
  * @returns {Promise<Object>} Transfer result with txHash, success status, etc.
  */
-async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem, apiBaseUrl, apiToken, senderWalletAddress = null, guildId = null) {
+async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem, apiBaseUrl, apiToken, senderWalletAddress = null, guildId = null, options = {}) {
   const { legacyAttemptFlags } = require('./utils/esdt-disbursement-flow');
   let requestStarted = false;
   const stamp = (target, details) => {
@@ -155,6 +155,7 @@ async function transferMultipleNFTs(recipientWallet, tokenIdentifiers, walletPem
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiToken}`,
+          ...(options.idempotencyKey ? { 'x-makex-idempotency-key': options.idempotencyKey } : {}),
         },
         body: JSON.stringify(requestBody),
         signal: controller.signal

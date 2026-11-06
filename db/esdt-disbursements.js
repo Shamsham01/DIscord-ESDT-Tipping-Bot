@@ -150,6 +150,25 @@ async function markDispatched(disbursementId, patch) {
   return { idempotent: data.idempotent === true, record: mapRecord(data.record) };
 }
 
+async function settleNftWithdrawal(disbursementId, patch) {
+  const data = await rpc('settle_nft_disbursement_withdrawal', {
+    p_disbursement_id: disbursementId,
+    p_owner: patch.processingOwner,
+    p_fence: patch.processingFence,
+    p_tx_hash: patch.ownedTxHash,
+    p_operation_id: patch.operationId || null,
+    p_http_status: patch.httpStatus || null,
+    p_fee_exempt: patch.feeExempt === true,
+    p_usage_fee: patch.usageFee != null ? String(patch.usageFee) : null,
+    p_usage_fee_hash: patch.usageFeeHash || null,
+    p_chain_nonce: patch.nonce != null ? String(patch.nonce) : null,
+    p_guild_id: patch.guildId,
+    p_user_id: patch.userId,
+    p_recipient: patch.recipientWallet
+  });
+  return { idempotent: data.idempotent === true, record: mapRecord(data.record) };
+}
+
 async function confirm(disbursementId, patch) {
   const data = await rpc('confirm_esdt_disbursement', {
     p_disbursement_id: disbursementId,
@@ -220,6 +239,44 @@ async function listEffectsDue({ limit = 20 } = {}) {
   return (Array.isArray(data) ? data : []).map(mapRecord);
 }
 
+async function assertNftEntitlement(record) {
+  const assets = String(record.tokenIdentifier || '').startsWith('bulk:')
+    ? ((record.effectPayload && record.effectPayload.assets) || [])
+    : [singleNftAsset(record)];
+  for (const asset of assets) {
+    const { data, error } = await client()
+      .from('virtual_account_nft_balances')
+      .select('amount,staked')
+      .eq('guild_id', record.guildId)
+      .eq('user_id', record.userId)
+      .eq('collection', asset.collection)
+      .eq('nonce', Number(asset.nonce))
+      .maybeSingle();
+    if (error) throw error;
+    if (!data || data.staked === true || Number(data.amount == null ? 1 : data.amount) < Number(asset.quantity)) {
+      const missing = new Error('nft_balance_insufficient');
+      missing.code = 'nft_balance_insufficient';
+      throw missing;
+    }
+  }
+  return { ok: true };
+}
+
+function singleNftAsset(record) {
+  const parts = String(record.tokenIdentifier || '').split('-');
+  const nonceHex = parts.pop();
+  if (!/^[0-9a-fA-F]+$/.test(nonceHex || '')) {
+    const error = new Error('nft_settlement_mismatch');
+    error.code = 'nft_settlement_mismatch';
+    throw error;
+  }
+  return {
+    collection: parts.join('-'),
+    nonce: Number.parseInt(nonceHex, 16),
+    quantity: Number(record.amountRaw)
+  };
+}
+
 module.exports = {
   isConfigured,
   reserve,
@@ -228,6 +285,8 @@ module.exports = {
   releaseLease,
   markDispatched,
   confirm,
+  settleNftWithdrawal,
+  assertNftEntitlement,
   markUnresolved,
   failAndRestore,
   noteEffect,
