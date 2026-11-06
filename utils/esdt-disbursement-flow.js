@@ -1110,7 +1110,9 @@ async function executeEsdtDisbursement({ repo, send, input, workerId, env = proc
       return { kind: 'needs_reconciliation', record, sent: false, reserved: true };
     }
 
-    if (record.operationKind === 'nft_transfer' && record.replayable === true && typeof repo.assertNftEntitlement === 'function') {
+    // Inventory may change after the first dispatch; that is never proof of non-payment.
+    // On recovery, re-query MakeX with the same durable identity and reconcile instead.
+    if (record.operationKind === 'nft_transfer' && record.replayable === true && !record.dispatchedAt && typeof repo.assertNftEntitlement === 'function') {
       try {
         await repo.assertNftEntitlement(record);
       } catch (error) {
