@@ -1273,6 +1273,33 @@ test('a database failure after NFT confirmation can be settled later without a s
   assert.equal(repo.nftLedger.length, 1);
 });
 
+test('an already-dispatched NFT with missing inventory is never misclassified as authoritative non-payment', async () => {
+  const repo = nftRepo();
+  repo.settleNftWithdrawal = async () => { throw new Error('temporary settlement database failure'); };
+  const sentKeys = [];
+  const send = async (record) => {
+    sentKeys.push(record.disbursementId);
+    return classifyVerifiedNftAttempt(record, nftContract(record));
+  };
+
+  const first = await executeEsdtDisbursement({ repo, input: verifiedInput('1568347763505373251'), send });
+  assert.equal(first.kind, 'needs_reconciliation');
+  assert.equal(first.record.status, 'NEEDS_RECONCILIATION');
+  assert.equal(first.record.dispatchedAt != null, true);
+
+  // Simulate an external inventory change between broadcast and reconciliation.
+  // That must not become a fabricated blockchain failure or permit a fresh payout identity.
+  repo.nftBalances.clear();
+  const retry = await executeEsdtDisbursement({ repo, input: verifiedInput('1568347763505373251'), send });
+  assert.equal(retry.kind, 'needs_reconciliation');
+  assert.equal(retry.record.status, 'NEEDS_RECONCILIATION');
+  assert.equal(retry.record.errorCode, 'NFT_SETTLEMENT_FAILED');
+  assert.equal(retry.record.primaryTxHash, NFT_HASH);
+  assert.equal(repo.nftLedger.length, 0);
+  assert.equal(sentKeys.length, 2);
+  assert.equal(sentKeys[0], sentKeys[1]);
+});
+
 test('two concurrent withdrawals of the same NFT broadcast once', async () => {
   const repo = nftRepo();
   let sends = 0;
