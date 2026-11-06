@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const { canonicalizeEsdtAmount, addDecimalStrings, subtractDecimalStrings } = require('./esdt-amount');
-const { coerceTransferClassification } = require('./esdt-transfer-outcome');
+const { coerceTransferClassification, classifyEsdtTransferResponse } = require('./esdt-transfer-outcome');
 
 const OPEN_STATUSES = new Set(['RESERVED', 'PENDING', 'NEEDS_RECONCILIATION']);
 
@@ -206,6 +206,207 @@ function blocks(existing, input) {
   return false;
 }
 
+function nftBalanceKey(row) {
+  return `${row.guildId}|${row.userId}|${row.collection}|${Number(row.nonce)}`;
+}
+
+function parseSingleNft(tokenIdentifier, amountRaw) {
+  const identifier = String(tokenIdentifier || '');
+  if (identifier.startsWith('bulk:')) return null;
+  const parts = identifier.split('-');
+  if (parts.length < 3) return null;
+  const nonceHex = parts.pop();
+  if (!/^[0-9a-fA-F]+$/.test(nonceHex)) return null;
+  const nonce = Number.parseInt(nonceHex, 16);
+  if (!Number.isSafeInteger(nonce)) return null;
+  return {
+    collection: parts.join('-'),
+    nonce,
+    identifier,
+    tokenIdentifier: `${parts.join('-')}-${nonceHex.toLowerCase()}`,
+    quantity: Number(amountRaw)
+  };
+}
+
+function nftAssetsFor(row) {
+  const parsed = parseSingleNft(row.tokenIdentifier, row.amountRaw);
+  const payloadAssets = row.effectPayload && Array.isArray(row.effectPayload.assets)
+    ? row.effectPayload.assets
+    : null;
+  if (parsed) {
+    if (!Number.isInteger(parsed.quantity) || parsed.quantity <= 0) {
+      throw namedError('nft_settlement_mismatch', 'nft_settlement_mismatch');
+    }
+    if (payloadAssets && payloadAssets.length) {
+      const asset = payloadAssets[0];
+      if (payloadAssets.length !== 1
+        || asset.collection !== parsed.collection
+        || Number(asset.nonce) !== parsed.nonce
+        || Number(asset.quantity) !== parsed.quantity) {
+        throw namedError('nft_settlement_mismatch', 'nft_settlement_mismatch');
+      }
+    }
+    return [parsed];
+  }
+  if (!payloadAssets || !payloadAssets.length) {
+    throw namedError('nft_settlement_mismatch', 'nft_settlement_mismatch');
+  }
+  const sum = payloadAssets.reduce((total, asset) => total + Number(asset.quantity), 0);
+  if (String(sum) !== String(Number(row.amountRaw))) {
+    throw namedError('nft_settlement_mismatch', 'nft_settlement_mismatch');
+  }
+  return payloadAssets.map((asset) => ({
+    collection: asset.collection,
+    nonce: Number(asset.nonce),
+    identifier: asset.identifier || asset.tokenIdentifier,
+    tokenIdentifier: asset.tokenIdentifier || asset.identifier,
+    quantity: Number(asset.quantity)
+  }));
+}
+
+function assertNftEntitlement(repo, row) {
+  const assets = nftAssetsFor(row);
+  for (const asset of assets) {
+    const balance = repo.nftBalances.get(nftBalanceKey({
+      guildId: row.guildId,
+      userId: row.userId,
+      collection: asset.collection,
+      nonce: asset.nonce
+    }));
+    if (!balance || balance.staked === true || Number(balance.amount) < asset.quantity) {
+      throw namedError('nft_balance_insufficient', 'nft_balance_insufficient');
+    }
+  }
+}
+
+function settleNftWithdrawal(repo, disbursementId, patch) {
+  const row = repo.disbursements.get(disbursementId);
+  if (!row) throw namedError('disbursement_not_found', 'disbursement_not_found');
+  const assets = nftAssetsFor(row);
+  const settled = assets.every((asset) => repo.nftLedger.some((entry) => entry.assetId === `${disbursementId}:${asset.identifier}`));
+  if (row.status === 'CONFIRMED' && row.primaryTxHash === patch.ownedTxHash && settled) {
+    return { idempotent: true, record: clone(row) };
+  }
+  if (row.status === 'CONFIRMED') throw namedError('disbursement_already_confirmed', 'disbursement_already_confirmed');
+  if (!OPEN_STATUSES.has(row.status)) throw namedError('invalid_transition', 'invalid_transition');
+  repo._requireLease(row, patch);
+  if (patch.guildId !== row.guildId || patch.userId !== row.userId) {
+    throw namedError('nft_settlement_mismatch', 'nft_settlement_mismatch');
+  }
+  if (String(patch.recipientWallet || '').toLowerCase() !== String(row.recipientWallet || '').toLowerCase()) {
+    throw namedError('nft_settlement_mismatch', 'nft_settlement_mismatch');
+  }
+  if (!patch.ownedTxHash || !/^[0-9a-fA-F]{16,128}$/.test(String(patch.ownedTxHash))) {
+    throw namedError('invalid_tx_hash', 'invalid_tx_hash');
+  }
+  assertNftEntitlement(repo, row);
+  for (const asset of assets) {
+    const key = nftBalanceKey({
+      guildId: row.guildId,
+      userId: row.userId,
+      collection: asset.collection,
+      nonce: asset.nonce
+    });
+    const balance = repo.nftBalances.get(key);
+    balance.amount -= asset.quantity;
+    if (balance.amount <= 0) repo.nftBalances.delete(key);
+    repo.nftLedger.push({
+      id: `nft-settle:${disbursementId}:${asset.identifier}`,
+      assetId: `${disbursementId}:${asset.identifier}`,
+      guildId: row.guildId,
+      userId: row.userId,
+      collection: asset.collection,
+      nonce: asset.nonce,
+      identifier: asset.identifier,
+      quantity: asset.quantity,
+      txHash: patch.ownedTxHash,
+      type: 'withdraw'
+    });
+  }
+  row.status = 'CONFIRMED';
+  row.primaryTxHash = patch.ownedTxHash;
+  row.makexOperationId = patch.operationId || row.makexOperationId;
+  row.httpStatus = patch.httpStatus || 200;
+  row.feeExempt = patch.feeExempt === true;
+  row.usageFee = patch.usageFee != null ? String(patch.usageFee) : row.usageFee;
+  row.usageFeeHash = patch.usageFeeHash || null;
+  row.nonce = patch.nonce != null ? String(patch.nonce) : row.nonce;
+  row.errorCode = null;
+  row.errorMessage = null;
+  row.confirmedAt = new Date().toISOString();
+  row.updatedAt = row.confirmedAt;
+  row.processingOwner = null;
+  row.processingFence = null;
+  row.processingLeaseUntil = null;
+  return { idempotent: false, record: clone(row) };
+}
+
+function verifiedNftDisbursementInput(input) {
+  const disbursementId = input.interactionId
+    ? assetDisbursementId('nr', input.interactionId, input.userId, input.assetKey)
+    : hashedDisbursementId('auc', input.stableKey || `${input.guildId}|${input.userId}|${input.assetKey}`);
+  const quantity = Number(input.amount);
+  const assets = Array.isArray(input.assets) && input.assets.length
+    ? input.assets
+    : (input.collection == null ? null : [{
+      collection: input.collection,
+      nonce: Number(input.tokenNonce),
+      quantity,
+      identifier: input.assetKey,
+      tokenIdentifier: input.assetKey
+    }]);
+  return {
+    operationKind: 'nft_transfer',
+    disbursementId,
+    businessActionId: disbursementId,
+    interactionId: input.interactionId || null,
+    guildId: input.guildId,
+    userId: input.userId,
+    tokenIdentifier: input.assetKey,
+    tokenTicker: String(input.assetKey || 'NFT').split('-')[0] || 'NFT',
+    amountHuman: String(quantity),
+    decimals: 0,
+    recipientWallet: input.recipientWallet,
+    senderWallet: input.senderWallet,
+    memo: input.memo || null,
+    replayable: true,
+    effectPayload: {
+      collection: input.collection || null,
+      tokenNonce: input.tokenNonce == null ? null : Number(input.tokenNonce),
+      quantity,
+      assets
+    }
+  };
+}
+
+function classifyVerifiedNftAttempt(record, raw) {
+  const payloadAssets = record.effectPayload && Array.isArray(record.effectPayload.assets)
+    ? record.effectPayload.assets
+    : null;
+  const expected = {
+    sender: record.senderWallet,
+    recipient: record.recipientWallet,
+    tokenIdentifier: record.tokenIdentifier,
+    amountRaw: record.amountRaw
+  };
+  if (payloadAssets && payloadAssets.length > 1) {
+    expected.assets = payloadAssets.map((asset) => ({
+      tokenIdentifier: asset.tokenIdentifier || asset.identifier,
+      amountRaw: String(asset.quantity || asset.amountRaw || 1)
+    }));
+  }
+  const classified = classifyEsdtTransferResponse({
+    httpStatus: raw && raw.httpStatus,
+    parsedResponse: raw && (raw.rawResponse || raw.parsedResponse || null),
+    expected,
+    requireTransferIdentity: true,
+    timedOut: Boolean(raw && raw.timedOut),
+    networkError: Boolean(raw && raw.networkError)
+  });
+  if (classified.outcome === 'confirmed') classified.nftContract = true;
+  return classified;
+}
+
 function emptyHouse() {
   return {
     bettingSpending: {},
@@ -240,6 +441,32 @@ class MemoryEsdtDisbursementRepository {
       for (const row of state.house) this.house.set(row.key, clone(row));
     }
     if (state.ledger) this.ledger = clone(state.ledger);
+    this.nftBalances = new Map();
+    this.nftLedger = [];
+    if (state.nftBalances) {
+      for (const row of state.nftBalances) this.nftBalances.set(nftBalanceKey(row), clone(row));
+    }
+    if (state.nftLedger) this.nftLedger = clone(state.nftLedger);
+  }
+
+  seedNft(row) {
+    const stored = {
+      guildId: row.guildId,
+      userId: row.userId,
+      collection: row.collection,
+      nonce: Number(row.nonce),
+      identifier: row.identifier,
+      amount: Number(row.amount == null ? 1 : row.amount),
+      nftName: row.nftName || null,
+      tokenType: row.tokenType || 'NFT',
+      staked: row.staked === true
+    };
+    this.nftBalances.set(nftBalanceKey(stored), stored);
+  }
+
+  nftAmount(guildId, userId, collection, nonce) {
+    const row = this.nftBalances.get(nftBalanceKey({ guildId, userId, collection, nonce }));
+    return row ? row.amount : 0;
   }
 
   seedAccount({ guildId, userId, tokenIdentifier, balance, auctionReserved = '0' }) {
@@ -513,6 +740,17 @@ class MemoryEsdtDisbursementRepository {
       row.processingLeaseUntil = null;
       return { idempotent: false, record: clone(row) };
     });
+  }
+
+  async assertNftEntitlement(record) {
+    return this._lock(() => {
+      assertNftEntitlement(this, record);
+      return { ok: true };
+    });
+  }
+
+  async settleNftWithdrawal(disbursementId, patch) {
+    return this._lock(() => settleNftWithdrawal(this, disbursementId, patch));
   }
 
   async markUnresolved(disbursementId, patch) {
@@ -872,6 +1110,21 @@ async function executeEsdtDisbursement({ repo, send, input, workerId, env = proc
       return { kind: 'needs_reconciliation', record, sent: false, reserved: true };
     }
 
+    if (record.operationKind === 'nft_transfer' && record.replayable === true && typeof repo.assertNftEntitlement === 'function') {
+      try {
+        await repo.assertNftEntitlement(record);
+      } catch (error) {
+        const failed = await repo.failAndRestore(record.disbursementId, {
+          ...leasePatch,
+          authoritativeNonPayment: true,
+          reason: 'This NFT is no longer available in the virtual account. Nothing was sent.',
+          errorCode: 'NFT_BALANCE_INSUFFICIENT',
+          errorMessage: error.message || 'nft_balance_insufficient'
+        });
+        return { kind: 'failed', record: failed.record, sent: false, reserved: true };
+      }
+    }
+
     const dispatched = await repo.markDispatched(record.disbursementId, leasePatch);
     record = dispatched.record;
 
@@ -898,7 +1151,7 @@ async function executeEsdtDisbursement({ repo, send, input, workerId, env = proc
       return { kind: 'pending', record: pending.record, sent: true, reserved: true };
     }
 
-    if (classified && classified.outcome === 'confirmed' && record.replayable === false) {
+    if (classified && classified.outcome === 'confirmed' && record.replayable === false && classified.nftContract !== true) {
       classified = {
         ...classified,
         outcome: 'needs_reconciliation',
@@ -908,6 +1161,31 @@ async function executeEsdtDisbursement({ repo, send, input, workerId, env = proc
         errorCode: 'ENDPOINT_CONTRACT_UNSUPPORTED',
         errorMessage: 'This endpoint is not covered by the Transfers PR #7 confirmation contract. The balance was not settled from this response.'
       };
+    }
+
+    if (classified && classified.outcome === 'confirmed' && record.operationKind === 'nft_transfer' && classified.nftContract === true) {
+      try {
+        const settled = await repo.settleNftWithdrawal(record.disbursementId, {
+          ...classified,
+          ...leasePatch,
+          guildId: record.guildId,
+          userId: record.userId,
+          recipientWallet: record.recipientWallet
+        });
+        return { kind: 'confirmed', record: settled.record, sent: true, reserved: true };
+      } catch (error) {
+        if (error && (error.code === 'lease_lost' || matchesCode(error, 'lease_lost'))) throw error;
+        const pending = await repo.markUnresolved(record.disbursementId, {
+          ...leasePatch,
+          status: 'NEEDS_RECONCILIATION',
+          operationId: classified.operationId,
+          ownedTxHash: classified.ownedTxHash,
+          httpStatus: classified.httpStatus,
+          errorCode: 'NFT_SETTLEMENT_FAILED',
+          errorMessage: error.message || 'NFT inventory settlement failed. The chain payment was not repeated.'
+        });
+        return { kind: 'needs_reconciliation', record: pending.record, sent: true, reserved: true, settlementFailed: true };
+      }
     }
 
     if (classified && classified.outcome === 'confirmed') {
@@ -1056,6 +1334,8 @@ module.exports = {
   buildEsdtTransferOptions,
   legacyAttemptFlags,
   unconfirmedLegacyTransfer,
+  verifiedNftDisbursementInput,
+  classifyVerifiedNftAttempt,
   executeEsdtDisbursement,
   resumeEsdtDisbursement,
   resumeUnresolvedEsdtDisbursements

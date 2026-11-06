@@ -141,6 +141,8 @@ const {
   buildEsdtTransferOptions,
   legacyAttemptFlags,
   unconfirmedLegacyTransfer,
+  verifiedNftDisbursementInput,
+  classifyVerifiedNftAttempt,
   executeEsdtDisbursement,
   resumeUnresolvedEsdtDisbursements
 } = require('./utils/esdt-disbursement-flow');
@@ -2753,6 +2755,7 @@ async function transferNFT(recipientWallet, fullTokenIdentifier, projectName, gu
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${API_TOKEN}`,
+          ...(options.idempotencyKey ? { 'x-makex-idempotency-key': options.idempotencyKey } : {}),
         },
         body: JSON.stringify(requestBody),
         signal: controller.signal
@@ -2936,6 +2939,7 @@ async function transferSFTFromCommunityFund(recipientWallet, tokenTicker, tokenN
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${API_TOKEN}`,
+          ...(options.idempotencyKey ? { 'x-makex-idempotency-key': options.idempotencyKey } : {}),
         },
         body: JSON.stringify(requestBody),
         signal: controller.signal
@@ -3185,6 +3189,7 @@ async function transferNFTFromCommunityFund(recipientWallet, fullTokenIdentifier
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${API_TOKEN}`,
+          ...(options.idempotencyKey ? { 'x-makex-idempotency-key': options.idempotencyKey } : {}),
         },
         body: JSON.stringify(requestBody),
         signal: controller.signal
@@ -10637,24 +10642,30 @@ client.on('interactionCreate', async (interaction) => {
       console.log(`[WITHDRAW-NFT] Full token identifier: ${fullTokenIdentifier}`);
       
       // Transfer NFT/SFT from Community Fund to user wallet (use token_type from database)
-      const nftOutcome = await executeLegacyNftDisbursement({
-        interactionId: interaction.id,
-        guildId,
-        userId,
-        assetKey: fullTokenIdentifier,
-        amount,
-        recipientWallet: userWallet,
-        senderWallet: communityFundProject.walletAddress,
-        memo: 'NFT withdrawal',
+      const nftOutcome = await executeEsdtDisbursement({
+        repo: esdtDisbursements,
         workerId: `withdraw-nft-${interaction.id}`,
-        sendLegacy: () => transferNFTFromCommunityFund(
+        input: verifiedNftDisbursementInput({
+          interactionId: interaction.id,
+          guildId,
+          userId,
+          assetKey: fullTokenIdentifier,
+          amount,
+          recipientWallet: userWallet,
+          senderWallet: communityFundProject.walletAddress,
+          memo: 'NFT withdrawal',
+          collection,
+          tokenNonce: nft.nonce
+        }),
+        send: async (record) => classifyVerifiedNftAttempt(record, await transferNFTFromCommunityFund(
           userWallet,
           fullTokenIdentifier,
           communityFundProjectName,
           guildId,
           amount,
-          tokenType
-        )
+          tokenType,
+          { idempotencyKey: record.disbursementId }
+        ))
       });
       const transferResult = {
         success: nftOutcome.kind === 'confirmed',
@@ -10663,27 +10674,7 @@ client.on('interactionCreate', async (interaction) => {
       };
       
       if (transferResult.success) {
-        // Remove NFT/SFT from virtual account (handles partial removal)
-        // IMPORTANT: This must succeed before logging the transaction
-        try {
-          await virtualAccountsNFT.removeNFTFromAccount(guildId, userId, collection, nft.nonce, amount);
-        } catch (removeError) {
-          console.error(`[WITHDRAW-NFT] CRITICAL: Failed to remove NFT from account after successful transfer!`, {
-            userId,
-            collection,
-            nonce: nft.nonce,
-            amount,
-            txHash: transferResult.txHash,
-            error: removeError.message
-          });
-          // The NFT was transferred but balance wasn't updated - this is a critical error
-          await interaction.editReply({ 
-            content: `⚠️ **Withdrawal completed but balance update failed!**\n\n**Transaction Hash:** ${transferResult.txHash ? `\`${transferResult.txHash}\`` : 'N/A'}\n\n**Error:** ${removeError.message}\n\nPlease contact an administrator immediately. The NFT was transferred but your balance may not reflect the withdrawal.`, 
-            flags: [MessageFlags.Ephemeral] 
-          });
-          return;
-        }
-        
+        // The inventory debit and audit row are written atomically with confirmation.
         // CRITICAL: Cancel all active listings for this NFT when it's withdrawn
         try {
           const activeListings = await virtualAccountsNFT.getUserListings(guildId, userId, 'ACTIVE');
@@ -10709,28 +10700,6 @@ client.on('interactionCreate', async (interaction) => {
           console.error(`[WITHDRAW-NFT] Error cancelling listings for withdrawn NFT:`, listingError.message);
           // Don't fail the withdrawal if listing cancellation fails, but log it
         }
-        
-        // Create transaction record (only if removal succeeded)
-        const amountTextDesc = amount > 1 ? ` (${amount}x)` : '';
-        // Get token_type from balance (most reliable source)
-        const balanceTokenType = nft.token_type || tokenType;
-        // Use the full identifier from the NFT object, not just the collection
-        const nftIdentifier = nft.identifier || `${collection}-${String(nft.nonce).padStart(4, '0')}`;
-        await virtualAccountsNFT.addNFTTransaction(guildId, userId, {
-          id: `withdraw_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-          type: 'withdraw',
-          collection: collection,
-          identifier: nftIdentifier,
-          nonce: nft.nonce,
-          nft_name: nftDisplayName,
-          amount: amount, // Store amount for SFTs
-          token_type: balanceTokenType, // Use actual token_type from balance, not inferred from amount
-          price_token_identifier: null,
-          price_amount: null,
-          timestamp: Date.now(),
-          description: `Withdrew ${balanceTokenType} ${nftDisplayName}${amountTextDesc} to wallet ${userWallet}`,
-          tx_hash: transferResult.txHash
-        });
         
         const explorerUrl = transferResult.txHash
           ? `https://explorer.multiversx.com/transactions/${transferResult.txHash}`
@@ -22257,25 +22226,36 @@ client.on('interactionCreate', async (interaction) => {
       console.log(`[WITHDRAW-NFT-BULK] User ${interaction.user.tag} (${interaction.user.id}) withdrawing ${nftsToWithdraw.length} NFT(s) to ${userWallet}`);
       
       // Call bulk transfer API
-      const nftOutcome = await executeLegacyNftDisbursement({
-        interactionId: interaction.id,
-        guildId: guildIdFromCustomId,
-        userId: interaction.user.id,
-        assetKey: `bulk:${tokenIdentifiers.join(',')}`,
-        amount: tokenIdentifiers.length,
-        recipientWallet: userWallet,
-        senderWallet: communityFundProject.walletAddress,
-        memo: 'Bulk NFT withdrawal',
+      const nftOutcome = await executeEsdtDisbursement({
+        repo: esdtDisbursements,
         workerId: `withdraw-nft-bulk-${interaction.id}`,
-        sendLegacy: () => transferMultipleNFTs(
+        input: verifiedNftDisbursementInput({
+          interactionId: interaction.id,
+          guildId: guildIdFromCustomId,
+          userId: interaction.user.id,
+          assetKey: `bulk:${tokenIdentifiers.join(',')}`,
+          amount: tokenIdentifiers.length,
+          recipientWallet: userWallet,
+          senderWallet: communityFundProject.walletAddress,
+          memo: 'Bulk NFT withdrawal',
+          assets: nftsToWithdraw.map((nft) => ({
+            collection: nft.collection,
+            nonce: Number(nft.nonce),
+            quantity: 1,
+            identifier: nft.identifier || `${nft.collection}-${Number(nft.nonce).toString(16)}`,
+            tokenIdentifier: nft.identifier || `${nft.collection}-${Number(nft.nonce).toString(16)}`
+          }))
+        }),
+        send: async (record) => classifyVerifiedNftAttempt(record, await transferMultipleNFTs(
           userWallet,
           tokenIdentifiers,
           communityFundProject.walletPem,
           API_BASE_URL,
           API_TOKEN,
           communityFundProject.walletAddress,
-          guildIdFromCustomId
-        )
+          guildIdFromCustomId,
+          { idempotencyKey: record.disbursementId }
+        ))
       });
       const transferResult = {
         success: nftOutcome.kind === 'confirmed',
@@ -22290,7 +22270,6 @@ client.on('interactionCreate', async (interaction) => {
         
         for (const nft of nftsToWithdraw) {
           try {
-            await virtualAccountsNFT.removeNFTFromAccount(guildIdFromCustomId, interaction.user.id, nft.collection, nft.nonce, 1);
             removedCount++;
             
             // Cancel active listings for this NFT
@@ -22313,27 +22292,6 @@ client.on('interactionCreate', async (interaction) => {
             } catch (listingError) {
               console.error(`[WITHDRAW-NFT-BULK] Error cancelling listings:`, listingError.message);
             }
-            
-            // Create transaction record
-            const nftDisplayName = nft.nft_name || `${nft.collection}#${nft.nonce}`;
-            const nftIdentifier = nft.identifier || `${nft.collection}-${String(nft.nonce).padStart(4, '0')}`;
-            const tokenType = nft.token_type || 'NFT';
-            
-            await virtualAccountsNFT.addNFTTransaction(guildIdFromCustomId, interaction.user.id, {
-              id: `withdraw_bulk_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-              type: 'withdraw',
-              collection: nft.collection,
-              identifier: nftIdentifier,
-              nonce: nft.nonce,
-              nft_name: nftDisplayName,
-              amount: 1,
-              token_type: tokenType,
-              price_token_identifier: null,
-              price_amount: null,
-              timestamp: Date.now(),
-              description: `Bulk withdrawal: ${nftDisplayName} to wallet ${userWallet}`,
-              tx_hash: transferResult.txHash
-            });
           } catch (removeError) {
             console.error(`[WITHDRAW-NFT-BULK] Failed to remove NFT ${nft.collection}#${nft.nonce}:`, removeError.message);
             failedRemovals.push(`${nft.collection}#${nft.nonce}`);

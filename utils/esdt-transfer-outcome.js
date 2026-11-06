@@ -41,17 +41,29 @@ function asObject(value) {
  * An explicit `transfer` object is accepted only when that object itself
  * carries `amountRaw`. A human `amount` is never treated as the raw amount.
  */
+function normalizeAssets(value) {
+  if (!Array.isArray(value)) return null;
+  return value.map((item) => ({
+    tokenIdentifier: text(item && (item.tokenIdentifier || item.identifier)) || null,
+    amountRaw: item && item.amountRaw != null
+      ? text(item.amountRaw)
+      : (item && item.amount != null ? text(item.amount) : null)
+  }));
+}
+
 function normalizeTransfer(body, data, result) {
   const explicit = Object.keys(asObject(body.transfer)).length
     ? asObject(body.transfer)
     : asObject(data.transfer);
+  const assets = normalizeAssets(result.assets) || normalizeAssets(explicit.assets);
   if (explicit.amountRaw != null && text(explicit.amountRaw) !== '') {
     return {
       sender: explicit.sender || null,
       recipient: explicit.recipient || explicit.receiver || null,
       receiver: explicit.receiver || explicit.recipient || null,
       tokenIdentifier: explicit.tokenIdentifier || explicit.tokenTicker || null,
-      amountRaw: text(explicit.amountRaw)
+      amountRaw: text(explicit.amountRaw),
+      assets
     };
   }
   return {
@@ -61,7 +73,8 @@ function normalizeTransfer(body, data, result) {
     tokenIdentifier: result.tokenIdentifier || result.tokenTicker || null,
     amountRaw: result.amountRaw != null
       ? text(result.amountRaw)
-      : (result.amount != null ? text(result.amount) : null)
+      : (result.amount != null ? text(result.amount) : null),
+    assets
   };
 }
 
@@ -104,6 +117,7 @@ function extractEsdtTransferApiFields(parsedResponse) {
     retryable: body.retryable === true || data.retryable === true,
     complete: body.complete === true,
     successFlag: body.success === true,
+    assets: transfer.assets || null,
     nonce: result.nonce != null ? result.nonce : (data.nonce != null ? data.nonce : null),
     topStatus: body.status
   };
@@ -121,6 +135,18 @@ function integerEqual(left, right) {
   }
 }
 
+function assetListMatches(expectedAssets, actualAssets) {
+  if (!Array.isArray(actualAssets) || actualAssets.length !== expectedAssets.length) return false;
+  return expectedAssets.every((expectedAsset, index) => {
+    const actual = actualAssets[index] || {};
+    const expectedToken = text(expectedAsset.tokenIdentifier || expectedAsset.identifier);
+    const actualToken = text(actual.tokenIdentifier);
+    const expectedAmount = expectedAsset.amountRaw != null ? expectedAsset.amountRaw : expectedAsset.amount;
+    const actualAmount = actual.amountRaw != null ? actual.amountRaw : actual.amount;
+    return expectedToken !== '' && lower(expectedToken) === lower(actualToken) && integerEqual(expectedAmount, actualAmount);
+  });
+}
+
 function exactTransferIdentity(expected, fields) {
   const transfer = fields.transfer || {};
   const sender = text(transfer.sender);
@@ -130,11 +156,18 @@ function exactTransferIdentity(expected, fields) {
   const mismatches = [];
   if (!expected || !text(expected.sender) || !sender || !addressesEqual(expected.sender, sender)) mismatches.push('sender');
   if (!expected || !text(expected.recipient) || !recipient || !addressesEqual(expected.recipient, recipient)) mismatches.push('recipient');
-  if (!expected || !text(expected.tokenIdentifier) || !token || lower(expected.tokenIdentifier) !== lower(token)) mismatches.push('token');
-  if (!expected || text(expected.amountRaw) === '' || text(amountRaw) === '' || !integerEqual(expected.amountRaw, amountRaw)) {
-    mismatches.push('amountRaw');
+  const assetIdentity = expected && Array.isArray(expected.assets) && expected.assets.length > 0;
+  if (assetIdentity) {
+    if (!assetListMatches(expected.assets, fields.assets)) mismatches.push('assets');
+  } else {
+    if (!expected || !text(expected.tokenIdentifier) || !token || lower(expected.tokenIdentifier) !== lower(token)) mismatches.push('token');
+    if (!expected || text(expected.amountRaw) === '' || text(amountRaw) === '' || !integerEqual(expected.amountRaw, amountRaw)) {
+      mismatches.push('amountRaw');
+    }
   }
-  const missing = !sender || !recipient || !token || text(amountRaw) === '';
+  const missing = !sender || !recipient || (assetIdentity
+    ? !Array.isArray(fields.assets) || fields.assets.length === 0
+    : (!token || text(amountRaw) === ''));
   return { ok: mismatches.length === 0, mismatches, missing };
 }
 

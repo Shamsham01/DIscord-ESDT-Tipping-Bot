@@ -14,6 +14,10 @@ const MIGRATION = fs.readFileSync(
   path.join(__dirname, '../supabase/migrations/20261102180000_esdt_disbursement_reservations.sql'),
   'utf8'
 );
+const NFT_SETTLEMENT = fs.readFileSync(
+  path.join(__dirname, '../supabase/migrations/20261106203000_nft_disbursement_settlement.sql'),
+  'utf8'
+);
 
 const SCHEMA = `
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -81,6 +85,42 @@ CREATE TABLE IF NOT EXISTS house_balance (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(guild_id, token_identifier)
 );
+
+CREATE TABLE IF NOT EXISTS virtual_account_nft_balances (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    nonce INTEGER NOT NULL,
+    nft_name TEXT,
+    amount INTEGER DEFAULT 1,
+    token_type TEXT DEFAULT 'NFT',
+    staked BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(guild_id, user_id, collection, nonce)
+);
+
+CREATE TABLE IF NOT EXISTS virtual_account_nft_transactions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    guild_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    transaction_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    nonce INTEGER NOT NULL,
+    nft_name TEXT,
+    amount INTEGER DEFAULT 1,
+    token_type TEXT DEFAULT 'NFT',
+    tx_hash TEXT,
+    source TEXT,
+    timestamp BIGINT NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(guild_id, user_id, transaction_id)
+);
 `;
 
 function quoteIdent(value) {
@@ -107,6 +147,7 @@ async function withDatabase(fn) {
   try {
     await client.query(SCHEMA);
     await client.query(MIGRATION);
+    await client.query(NFT_SETTLEMENT);
     await fn(client);
   } finally {
     await client.end();
@@ -541,5 +582,59 @@ test('a confirmed payment cannot be restored and a subscription effect is applie
       (error) => /invalid_transition/.test(error.message)
     );
     assert.equal((await client.query(`SELECT balances->>'DROP-1fc8cc' AS balance FROM virtual_accounts`)).rows[0].balance, '4');
+  });
+});
+
+test('postgres NFT settlement removes one inventory row and a repeated call does not', async () => {
+  await withDatabase(async (client) => {
+    const id = 'nr_1568347763505373234_32717ded09f1771d208c3666';
+    await client.query(
+      `INSERT INTO virtual_account_nft_balances
+        (guild_id, user_id, collection, identifier, nonce, nft_name, amount, token_type)
+       VALUES
+        ('g', 'u', 'EMP-897b49', 'EMP-897b49-105c', 4188, 'Empyreans #1679', 1, 'NFT'),
+        ('g', 'other', 'EMP-897b49', 'EMP-897b49-105c', 4188, 'someone else', 1, 'NFT')`
+    );
+    await client.query(RESERVE_SQL, [
+      id, 'nft_transfer', id, '1568347763505373234', 'g', 'u', null, null,
+      'EMP-897b49-105c', 'EMP', '1', '1', 0, RECIPIENT, SENDER, 'NFT withdrawal',
+      false, true, false, false,
+      JSON.stringify({ assets: [{ collection: 'EMP-897b49', nonce: 4188, quantity: 1, identifier: 'EMP-897b49-105c' }] }),
+      'asset'
+    ]);
+    const lease = await client.query(
+      `SELECT claim_esdt_disbursement_lease($1, 'worker-a', 150) AS result`,
+      [id]
+    );
+    const fence = lease.rows[0].result.fence;
+    const args = [id, 'worker-a', fence, HASH, 'op', 200, true, null, null, '1825', 'g', 'u', RECIPIENT];
+    await assert.rejects(
+      () => client.query(
+        `SELECT settle_nft_disbursement_withdrawal($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [id, 'worker-a', fence, HASH, 'op', 200, true, null, null, '1825', 'g', 'someone-else', RECIPIENT]
+      ),
+      (error) => /nft_settlement_mismatch/.test(error.message)
+    );
+    const settled = await client.query(
+      `SELECT settle_nft_disbursement_withdrawal($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) AS result`,
+      args
+    );
+    assert.equal(settled.rows[0].result.idempotent, false);
+    assert.equal(settled.rows[0].result.record.status, 'CONFIRMED');
+    const again = await client.query(
+      `SELECT settle_nft_disbursement_withdrawal($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) AS result`,
+      args
+    );
+    assert.equal(again.rows[0].result.idempotent, true);
+    const mine = await client.query(`SELECT count(*)::int AS n FROM virtual_account_nft_balances WHERE user_id = 'u'`);
+    assert.equal(mine.rows[0].n, 0);
+    const other = await client.query(`SELECT amount FROM virtual_account_nft_balances WHERE user_id = 'other'`);
+    assert.equal(other.rows[0].amount, 1);
+    const audits = await client.query(
+      `SELECT tx_hash, count(*)::int AS n FROM virtual_account_nft_transactions GROUP BY tx_hash`
+    );
+    assert.equal(audits.rows.length, 1);
+    assert.equal(audits.rows[0].n, 1);
+    assert.equal(audits.rows[0].tx_hash, HASH);
   });
 });
